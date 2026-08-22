@@ -1,0 +1,37 @@
+name: jobingo
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: jobingo
+      POSTGRES_PASSWORD: jobingo
+      POSTGRES_DB: jobingo
+    ports:
+      # Host 5433, not 5432 -- this machine already runs another project's
+      # Postgres on the default port.
+      - "5433:5432"
+    volumes:
+      - jobingo_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobingo -d jobingo"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      # Host 6380, not 6379 -- same reason as Postgres above.
+      - "6380:6379"
+    volumes:
+      - jobingo_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  jobingo_postgres_data:
+  jobingo_redis_data:
