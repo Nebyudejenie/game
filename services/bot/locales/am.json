@@ -1,0 +1,56 @@
+{
+  "welcome.new_user": "እንኳን ወደ ጆ ቢንጎ በደህና መጡ! ለመቀጠል እባክዎ ይመዝገቡ።",
+  "welcome.back": "እንኳን ደህና መጡ፣ {name}!",
+
+  "register.button": "📝 ይመዝገቡ",
+  "register.instructions_button": "📖 መመሪያ",
+  "register.prompt": "ለመመዝገብ ስልክ ቁጥርዎን ያጋሩ።",
+  "register.use_button": "እባክዎ 'ስልክ ቁጥር አጋራ' የሚለውን ቁልፍ ይጠቀሙ።",
+  "register.contact_mismatch": "የተጋራው ስልክ ቁጥር የእርስዎ አይደለም። እባክዎ የራስዎን ስልክ ቁጥር ብቻ ያጋሩ።",
+  "register.invalid_phone": "ይህ ትክክለኛ የኢትዮጵያ ስልክ ቁጥር አይመስልም። እባክዎ እንደገና ይሞክሩ።",
+  "register.success": "እንኳን ደስ አለዎት፣ {name}! ምዝገባዎ ተጠናቅቋል።",
+
+  "menu.play": "🎮 ይጫወቱ",
+  "menu.balance": "💰 ቀሪ ሂሳብ",
+  "menu.deposit": "⬇️ ገቢ ያድርጉ",
+  "menu.withdraw": "⬆️ ወጪ ያድርጉ",
+  "menu.invite": "👥 ጋብዙ",
+  "menu.rules": "📖 ህጎች",
+
+  "balance.summary": "ካሽ: {cash} ብር\nቦነስ: {bonus} ብር\nየተያዘ: {locked} ብር",
+
+  "deposit.not_available": "ገቢ ማድረግ በቅርቡ ይጀምራል። እባክዎ ትንሽ ይታገሱ።",
+  "withdraw.not_available": "ወጪ ማድረግ በቅርቡ ይጀምራል። እባክዎ ትንሽ ይታገሱ።",
+  "limits.not_available": "የጨዋታ ገደቦች ቅንብር በቅርቡ ይጀምራል።",
+
+  "history.header": "የቅርብ ጊዜ የጨዋታ እና የገንዘብ እንቅስቃሴዎችዎ፦",
+  "history.empty": "እስካሁን ምንም እንቅስቃሴ የለም።",
+  "history.round_line": "ዙር #{seq} — {stake} ብር — {outcome}",
+  "history.outcome_won": "አሸንፈዋል",
+  "history.outcome_other": "—",
+  "history.transaction_line": "{kind} — {amount} ብር — {date}",
+
+  "invite.summary": "የግብዣ አገናኝዎ፦\n{link}\n\nእስካሁን {count} ሰዎች ተቀላቅለዋል።",
+  "invite.no_username": "የግብዣ አገናኝ ገና አልተዘጋጀም። እባክዎ ቆየት ብለው ይሞክሩ።",
+
+  "support.info": "እርዳታ ከፈለጉ፣ እባክዎ @jobingo_support ን ያግኙ።",
+  "rules.text": "75 ቁጥር ያለው ጆ ቢንጎ፦ ካርድ ይምረጡ፣ ቁጥሮች ሲጠሩ ካርድዎ ላይ ምልክት ያድርጉ፣ መስመር፣ አምድ፣ ሰያፍ ወይም አራት ጠርዞችን ሲያጠናቅቁ 'ቢንጎ' ብለው ይጠይቁ። ደራሽ ከተሰበሰበው ገንዘብ ላይ ከኦፕሬተር ክፍያ በኋላ የሚቀረው ነው።",
+
+  "language.prompt": "ቋንቋ ይምረጡ፦",
+  "language.set": "ቋንቋዎ ወደ አማርኛ ተቀይሯል።",
+  "language.invalid": "ያልታወቀ ቋንቋ። am, en, om, ti ከሚሉት ይምረጡ።",
+
+  "change_username.usage": "አጠቃቀም፦ /change_username <አዲስ ስም>",
+  "change_username.success": "የማሳያ ስምዎ ወደ {name} ተቀይሯል።",
+  "change_username.too_long": "ስሙ በጣም ረጅም ነው። እባክዎ አጠር ያለ ስም ይሞክሩ።",
+
+  "play.not_available": "የጨዋታ ገጹ ገና አልተከፈተም። እባክዎ ቆየት ብለው ይሞክሩ።",
+  "play.open": "ለመጫወት ከታች ያለውን ቁልፍ ይጫኑ።",
+
+  "error.generic": "የሆነ ስህተት ተፈጥሯል። እባክዎ እንደገና ይሞክሩ።",
+  "error.not_registered": "እባክዎ በመጀመሪያ ይመዝገቡ። /start ይጫኑ።",
+
+  "notify.deposit_confirmed": "✅ {amount} ብር ገቢ ተደርጓል። ቀሪ ሂሳብ፦ {balance} ብር",
+  "notify.you_won": "እንኳን ደስ አለዎት! {amount} ብር አሸንፈዋል።",
+  "wallet.insufficient": "በቂ ቀሪ ሂሳብ የለዎትም። እባክዎ ያስገቡ።"
+}

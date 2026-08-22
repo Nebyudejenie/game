@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     # Phase 1
     telegram_bot_token: str = ""
     telegram_webhook_secret: str = ""
+    telegram_bot_username: str = ""
+    # Set once the Mini App (Phase 4) is deployed; empty means the bot's
+    # Play button honestly reports the game screen isn't open yet instead
+    # of shipping a web_app button pointing nowhere.
+    miniapp_url: str = ""
 
     # Phase 5-6
     chapa_api_key: str = ""

@@ -1,0 +1,56 @@
+{
+  "welcome.new_user": "Welcome to Jo Bingo! Please register to continue.",
+  "welcome.back": "Welcome back, {name}!",
+
+  "register.button": "📝 Register",
+  "register.instructions_button": "📖 Instructions",
+  "register.prompt": "Share your phone number to register.",
+  "register.use_button": "Please use the 'Share Phone Number' button.",
+  "register.contact_mismatch": "That's not your own phone number. Please share only your own contact.",
+  "register.invalid_phone": "That doesn't look like a valid Ethiopian phone number. Please try again.",
+  "register.success": "Congratulations, {name}! Your registration is complete.",
+
+  "menu.play": "🎮 Play",
+  "menu.balance": "💰 Balance",
+  "menu.deposit": "⬇️ Deposit",
+  "menu.withdraw": "⬆️ Withdraw",
+  "menu.invite": "👥 Invite",
+  "menu.rules": "📖 Rules",
+
+  "balance.summary": "Cash: {cash} ETB\nBonus: {bonus} ETB\nLocked: {locked} ETB",
+
+  "deposit.not_available": "Deposits are launching soon. Please check back shortly.",
+  "withdraw.not_available": "Withdrawals are launching soon. Please check back shortly.",
+  "limits.not_available": "Play-limit settings are launching soon.",
+
+  "history.header": "Your recent game and money activity:",
+  "history.empty": "No activity yet.",
+  "history.round_line": "Round #{seq} — {stake} ETB — {outcome}",
+  "history.outcome_won": "won",
+  "history.outcome_other": "—",
+  "history.transaction_line": "{kind} — {amount} ETB — {date}",
+
+  "invite.summary": "Your invite link:\n{link}\n\n{count} people have joined so far.",
+  "invite.no_username": "Your invite link isn't ready yet. Please try again shortly.",
+
+  "support.info": "Need help? Please reach out to @jobingo_support.",
+  "rules.text": "75-ball Jo Bingo: pick a card, mark it as numbers are called, and call BINGO when you complete a row, column, diagonal, or the four corners. The derash is what's left of the pot after the operator's cut.",
+
+  "language.prompt": "Choose your language:",
+  "language.set": "Your language has been set to English.",
+  "language.invalid": "Unknown language. Choose one of: am, en, om, ti.",
+
+  "change_username.usage": "Usage: /change_username <new name>",
+  "change_username.success": "Your display name has been changed to {name}.",
+  "change_username.too_long": "That name is too long. Please try a shorter one.",
+
+  "play.not_available": "The game screen isn't open yet. Please check back shortly.",
+  "play.open": "Tap the button below to play.",
+
+  "error.generic": "Something went wrong. Please try again.",
+  "error.not_registered": "Please register first. Tap /start.",
+
+  "notify.deposit_confirmed": "✅ {amount} ETB deposited. Balance: {balance} ETB",
+  "notify.you_won": "Congratulations! You won {amount} ETB.",
+  "wallet.insufficient": "Insufficient balance. Please deposit."
+}

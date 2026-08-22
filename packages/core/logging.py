@@ -7,8 +7,10 @@ any service, no matter who adds a new log call later.
 
 import logging
 import sys
+from typing import cast
 
 import structlog
+from structlog.typing import EventDict, FilteringBoundLogger, WrappedLogger
 
 _REDACTED_KEYS = {
     "phone",
@@ -24,7 +26,7 @@ _REDACTED_KEYS = {
 }
 
 
-def _redact(_logger: object, _method_name: str, event_dict: dict) -> dict:
+def _redact(_logger: WrappedLogger, _method_name: str, event_dict: EventDict) -> EventDict:
     for key in list(event_dict):
         if key.lower() in _REDACTED_KEYS:
             event_dict[key] = "***REDACTED***"
@@ -53,5 +55,5 @@ def configure_logging(level: str = "INFO") -> None:
     )
 
 
-def get_logger(name: str) -> structlog.stdlib.BoundLogger:
-    return structlog.get_logger(name)
+def get_logger(name: str) -> FilteringBoundLogger:
+    return cast(FilteringBoundLogger, structlog.get_logger(name))

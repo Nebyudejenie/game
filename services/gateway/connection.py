@@ -1,0 +1,290 @@
+"""One instance per WebSocket: the auth handshake, inbound message dispatch,
+and the outbound writer loop draining this connection's fan-out mailbox.
+
+Money-moving actions (take_card, drop_card, set_auto, claim) never touch the
+database directly from here -- they go over services/engine/commands.py to
+whichever engine process actually owns the room, which is the only writer
+of that room's state. This handler only ever reads (queries.py) or forwards.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import time
+from typing import Any
+
+import asyncpg
+from fastapi import WebSocket, WebSocketDisconnect
+from redis.asyncio import Redis
+
+from packages.core import telegram_auth
+from packages.core.telegram_auth import InvalidInitData
+from services.engine import commands
+from services.engine.commands import CommandTimeout
+from services.gateway import queries, rate_limit
+from services.gateway.fanout import ConnectionQueue, FanoutHub
+
+AUTH_TIMEOUT_SECONDS = 5.0
+GOING_AWAY_RECONNECT_CODE = 1012  # "service restart" -- reconnect now, don't back off
+
+
+class ConnectionHandler:
+    def __init__(
+        self,
+        websocket: WebSocket,
+        pool: asyncpg.Pool,
+        redis: Redis,
+        hub: FanoutHub,
+        bot_token: str,
+    ) -> None:
+        self._ws = websocket
+        self._pool = pool
+        self._redis = redis
+        self._hub = hub
+        self._bot_token = bot_token
+
+        self._user_id: int | None = None
+        self._joined_rooms: set[int] = set()
+        self._cq = ConnectionQueue()
+        self._writer_task: asyncio.Task[None] | None = None
+
+    async def run(self) -> None:
+        await self._ws.accept()
+        try:
+            if not await self._handshake():
+                return
+            self._writer_task = asyncio.create_task(self._writer_loop())
+            await self._message_loop()
+        except WebSocketDisconnect:
+            pass
+        finally:
+            await self._cleanup()
+
+    async def close_for_shutdown(self) -> None:
+        with contextlib.suppress(Exception):
+            await self._ws.close(code=GOING_AWAY_RECONNECT_CODE, reason="restarting")
+
+    # --- handshake -------------------------------------------------------
+
+    async def _handshake(self) -> bool:
+        try:
+            raw = await asyncio.wait_for(self._ws.receive_text(), timeout=AUTH_TIMEOUT_SECONDS)
+        except (TimeoutError, WebSocketDisconnect):
+            await self._safe_close(4001, "auth_timeout")
+            return False
+
+        try:
+            frame = json.loads(raw)
+        except json.JSONDecodeError:
+            await self._safe_close(4000, "bad_frame")
+            return False
+
+        if not isinstance(frame, dict) or frame.get("t") != "auth":
+            await self._safe_close(4000, "expected_auth")
+            return False
+
+        try:
+            data = telegram_auth.validate_init_data(
+                frame.get("init_data", ""), self._bot_token
+            )
+        except InvalidInitData as exc:
+            await self._safe_close(4003, f"invalid_init_data:{exc.reason}")
+            return False
+
+        display_name = data.user.first_name or data.user.username or str(data.user.id)
+        user_id = await queries.get_or_create_user_by_telegram_id(
+            self._pool, data.user.id, display_name
+        )
+        self._user_id = user_id
+        balance = await queries.user_balance_snapshot(self._pool, user_id)
+        self._hub.subscribe_user(user_id, self._cq)
+
+        await self._ws.send_text(
+            json.dumps(
+                {
+                    "t": "authed",
+                    "user": {"id": user_id, "name": display_name, "balance": balance["cash"]},
+                    "server_time": int(time.time() * 1000),
+                }
+            )
+        )
+        return True
+
+    async def _safe_close(self, code: int, reason: str) -> None:
+        with contextlib.suppress(Exception):
+            await self._ws.close(code=code, reason=reason)
+
+    # --- message loop ------------------------------------------------------
+
+    async def _message_loop(self) -> None:
+        assert self._user_id is not None
+        while True:
+            raw = await self._ws.receive_text()
+            allowed = await rate_limit.allow(
+                self._redis, "ws", str(self._user_id), **rate_limit.WS_MESSAGES
+            )
+            if not allowed:
+                await self._send_error("rate_limited", "Slow down.", "እባክዎ ትንሽ ይታገሱ።")
+                continue
+            try:
+                frame = json.loads(raw)
+            except json.JSONDecodeError:
+                await self._send_error("bad_frame", "Malformed message.", "የተሳሳተ መልእክት።")
+                continue
+            if not isinstance(frame, dict):
+                await self._send_error("bad_frame", "Malformed message.", "የተሳሳተ መልእክት።")
+                continue
+            await self._dispatch(frame)
+
+    async def _dispatch(self, frame: dict[str, Any]) -> None:
+        t = frame.get("t")
+
+        if t == "ping":
+            await self._ws.send_text(
+                json.dumps(
+                    {"t": "pong", "ts": frame.get("ts"), "server_time": int(time.time() * 1000)}
+                )
+            )
+        elif t == "rooms":
+            rooms = await queries.list_rooms(self._pool)
+            await self._ws.send_text(json.dumps({"t": "rooms", "rooms": rooms}))
+        elif t == "join":
+            await self._handle_join(frame)
+        elif t == "leave":
+            await self._handle_leave(frame)
+        elif t == "take_card":
+            await self._run_action(
+                frame.get("room_id"),
+                ack_name="take_card",
+                action="join",
+                payload={"card_no": frame.get("card_no"), "auto_mark": True},
+                bucket=rate_limit.TAKE_CARD,
+            )
+        elif t == "drop_card":
+            await self._run_action(
+                frame.get("room_id"), ack_name="drop_card", action="drop_card", payload={}
+            )
+        elif t == "set_auto":
+            await self._run_action(
+                frame.get("room_id"),
+                ack_name="set_auto",
+                action="set_auto",
+                payload={"auto": bool(frame.get("auto", True))},
+            )
+        elif t == "claim":
+            room_id = await self._room_id_for_round(frame.get("round_id"))
+            if room_id is None:
+                await self._send_error("bad_round_id", "Unknown round.", "ያልታወቀ ዙር።")
+                return
+            await self._run_action(
+                room_id, ack_name="claim", action="claim", payload={}, bucket=rate_limit.CLAIM
+            )
+        elif t == "mark":
+            pass  # advisory only -- the server never trusts a client-reported mark
+        else:
+            await self._send_error(
+                "unknown_message", f"Unknown message type: {t}", "ያልታወቀ መልእክት።"
+            )
+
+    async def _room_id_for_round(self, round_id: Any) -> int | None:
+        if not isinstance(round_id, int):
+            return None
+        row = await self._pool.fetchrow("SELECT room_id FROM rounds WHERE id = $1", round_id)
+        return int(row["room_id"]) if row is not None else None
+
+    async def _handle_join(self, frame: dict[str, Any]) -> None:
+        room_id = frame.get("room_id")
+        if not isinstance(room_id, int):
+            await self._send_error("bad_room_id", "room_id required.", "የክፍል መለያ ያስፈልጋል።")
+            return
+        assert self._user_id is not None
+        self._joined_rooms.add(room_id)
+        self._hub.subscribe_room(room_id, self._cq)
+        state = await queries.build_state_sync(self._pool, room_id, self._user_id)
+        await self._ws.send_text(json.dumps(state))
+
+    async def _handle_leave(self, frame: dict[str, Any]) -> None:
+        room_id = frame.get("room_id")
+        if isinstance(room_id, int) and room_id in self._joined_rooms:
+            self._joined_rooms.discard(room_id)
+            self._hub.unsubscribe_room(room_id, self._cq)
+
+    async def _run_action(
+        self,
+        room_id: Any,
+        *,
+        ack_name: str,
+        action: str,
+        payload: dict[str, Any],
+        bucket: dict[str, float] | None = None,
+    ) -> None:
+        if not isinstance(room_id, int):
+            await self._send_error("bad_room_id", "room_id required.", "የክፍል መለያ ያስፈልጋል።")
+            return
+        assert self._user_id is not None
+
+        if bucket is not None:
+            allowed = await rate_limit.allow(
+                self._redis, action, str(self._user_id), **bucket
+            )
+            if not allowed:
+                await self._send_error(
+                    "rate_limited", "Too many requests.", "በጣም ብዙ ጥያቄዎች።"
+                )
+                return
+
+        try:
+            result = await commands.send_command(
+                self._redis, room_id, action, self._user_id, payload
+            )
+        except CommandTimeout:
+            await self._send_error(
+                "room_unavailable",
+                "This room isn't available right now.",
+                "ይህ ክፍል አሁን አይገኝም።",
+            )
+            return
+
+        if action == "claim":
+            await self._ws.send_text(
+                json.dumps({"t": "claim_result", "valid": result.ok, "reason": result.reason})
+            )
+        else:
+            await self._ws.send_text(
+                json.dumps(
+                    {"t": "ack", "for": ack_name, "ok": result.ok, "reason": result.reason}
+                )
+            )
+
+    async def _send_error(self, code: str, message_en: str, message_am: str) -> None:
+        await self._ws.send_text(
+            json.dumps(
+                {"t": "error", "code": code, "message_en": message_en, "message_am": message_am}
+            )
+        )
+
+    # --- outbound ----------------------------------------------------------
+
+    async def _writer_loop(self) -> None:
+        assert self._user_id is not None
+        while True:
+            if self._cq.needs_state_sync:
+                self._cq.needs_state_sync = False
+                for room_id in list(self._joined_rooms):
+                    state = await queries.build_state_sync(self._pool, room_id, self._user_id)
+                    await self._ws.send_text(json.dumps(state))
+            raw = await self._cq.queue.get()
+            await self._ws.send_text(raw)
+
+    async def _cleanup(self) -> None:
+        if self._writer_task is not None:
+            self._writer_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._writer_task
+            self._writer_task = None
+        for room_id in list(self._joined_rooms):
+            self._hub.unsubscribe_room(room_id, self._cq)
+        if self._user_id is not None:
+            self._hub.unsubscribe_user(self._user_id, self._cq)

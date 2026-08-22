@@ -15,6 +15,14 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 import asyncpg
+import asyncpg.pool
+
+# Every function here is called both with a bare connection (tests, one-off
+# scripts) and with a connection checked out of a pool via `async with
+# pool.acquire() as conn`, which asyncpg wraps in a proxy that isn't a
+# subclass of Connection. Accept both rather than forcing every caller to
+# know which one they happen to have.
+AsyncpgConnection = asyncpg.Connection | asyncpg.pool.PoolConnectionProxy
 
 USER_BALANCE_KINDS = frozenset({"user_cash", "user_bonus", "user_locked"})
 
@@ -43,6 +51,12 @@ class Entry:
     amount: Decimal
 
 
+@dataclass
+class _LockedBalance:
+    kind: str
+    balance: Decimal
+
+
 @dataclass(frozen=True)
 class LedgerTransaction:
     id: int
@@ -55,7 +69,7 @@ class LedgerTransaction:
 
 
 async def get_or_create_account(
-    conn: asyncpg.Connection,
+    conn: AsyncpgConnection,
     user_id: int | None,
     kind: str,
     currency: str = "ETB",
@@ -109,7 +123,7 @@ async def get_or_create_account(
 
 
 async def post(
-    conn: asyncpg.Connection,
+    conn: AsyncpgConnection,
     kind: str,
     entries: list[Entry],
     idempotency_key: str,
@@ -160,7 +174,7 @@ async def post(
         # transactions that both touch accounts A and B can never deadlock
         # by locking them in opposite order.
         account_ids = sorted({e.account_id for e in entries})
-        locked: dict[int, dict] = {}
+        locked: dict[int, _LockedBalance] = {}
         for account_id in account_ids:
             row = await conn.fetchrow(
                 "SELECT account_id, kind, balance FROM account_balances "
@@ -191,7 +205,8 @@ async def post(
                     "WHERE account_id = $1 FOR UPDATE",
                     account_id,
                 )
-            locked[account_id] = dict(row)
+                assert row is not None
+            locked[account_id] = _LockedBalance(kind=row["kind"], balance=row["balance"])
 
         deltas: dict[int, Decimal] = {}
         for entry in entries:
@@ -201,8 +216,8 @@ async def post(
 
         for account_id, delta in deltas.items():
             current = locked[account_id]
-            new_balance = current["balance"] + delta
-            if current["kind"] in USER_BALANCE_KINDS and new_balance < 0:
+            new_balance = current.balance + delta
+            if current.kind in USER_BALANCE_KINDS and new_balance < 0:
                 raise InsufficientFunds(account_id, new_balance)
 
         for entry in entries:
@@ -243,14 +258,18 @@ async def post(
         )
 
 
-async def balance(conn: asyncpg.Connection, account_id: int) -> Decimal:
+_CENT = Decimal("0.01")
+
+
+async def balance(conn: AsyncpgConnection, account_id: int) -> Decimal:
     value = await conn.fetchval(
         "SELECT balance FROM account_balances WHERE account_id = $1", account_id
     )
-    return value if value is not None else Decimal("0")
+    result = value if value is not None else Decimal("0")
+    return result.quantize(_CENT)
 
 
-async def available(conn: asyncpg.Connection, user_id: int) -> Decimal:
+async def available(conn: AsyncpgConnection, user_id: int) -> Decimal:
     row = await conn.fetchrow(
         """
         SELECT
@@ -263,10 +282,11 @@ async def available(conn: asyncpg.Connection, user_id: int) -> Decimal:
         """,
         user_id,
     )
-    return row["available"] if row and row["available"] is not None else Decimal("0")
+    result = row["available"] if row and row["available"] is not None else Decimal("0")
+    return result.quantize(_CENT)
 
 
-async def reconcile(conn: asyncpg.Connection) -> list[tuple[int, Decimal, Decimal]]:
+async def reconcile(conn: AsyncpgConnection) -> list[tuple[int, Decimal, Decimal]]:
     """Recomputes every account's balance from ledger_entries and compares it
     to the account_balances cache. Returns a list of (account_id, cached,
     computed) for every mismatch found -- empty means the ledger is
