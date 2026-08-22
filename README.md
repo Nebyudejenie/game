@@ -6,15 +6,16 @@ product/architecture spec lives in [`idea.md`](idea.md) (see especially the
 blueprint this repo follows; see [`DECISIONS.md`](DECISIONS.md) for why).
 
 This repo is being built phase by phase. **Phase 0 (foundations + ledger),
-Phase 2 (game engine), and Phase 3 (realtime gateway) are done.** Everything
-else — the Telegram bot, the Mini App, payments, admin — is scaffolded as
-empty packages under `services/` and gets filled in phase by phase (see
-`DECISIONS.md` and the plan referenced there for the full roadmap).
+Phase 1 (Telegram bot), Phase 2 (game engine), and Phase 3 (realtime
+gateway) are done.** Everything else — the Mini App, payments, admin — is
+scaffolded as empty packages under `services/` and gets filled in phase by
+phase (see `DECISIONS.md` and the plan referenced there for the full
+roadmap).
 
 ## Repository layout
 
 ```
-services/bot/          Phase 1: Telegram bot (aiogram 3, webhook mode)
+services/bot/          Phase 1: Telegram bot (aiogram 3, webhook mode) -- DONE
 services/gateway/      Phase 3: realtime WebSocket gateway (FastAPI) -- DONE
 services/engine/       Phase 2: game engine / room state machine workers -- DONE
 services/wallet/       Phase 1: wallet API surface over packages/core/ledger.py
@@ -114,11 +115,39 @@ above.
   durable source of truth) so reconnection works even if the room's engine
   just crashed.
 
+**Telegram bot (Phase 1):**
+- **`services/bot/registration.py`** + **`phone.py`** — the registration
+  flow: a shared contact only proves phone ownership if its `user_id`
+  matches the sender (any mismatch is rejected outright — Telegram lets
+  anyone forward anyone's contact card), phone numbers are normalized to
+  E.164, typed numbers are never accepted as a substitute for the
+  Share-Phone-Number button.
+- **`services/bot/notifier.py`** — the only code path allowed to call
+  `bot.send_message`; paces to ~25 msg/s and backs off per-chat on a 429
+  without stalling every other chat's queue behind one rate-limited one.
+- **`services/bot/dedup.py`** — webhook `update_id` deduplication via
+  Redis, so a retried Telegram webhook can't double-process anything.
+- **`services/bot/i18n.py`** + **`locales/`** — every user-facing string
+  keyed, Amharic default, English complete, `om`/`ti` stubbed with
+  fallback — enforced mechanically, not just by convention, by an AST-based
+  test that fails on any hardcoded string literal in `handlers.py`.
+- **`services/bot/handlers.py`** + **`app.py`** — the aiogram 3 webhook
+  app: full command set, referral deep links, and real reads/writes
+  against the same ledger and round tables the engine and gateway use —
+  `/balance` and `/history` show actual money and actual games, not
+  placeholders. `/deposit`, `/withdraw`, and `/limits` honestly report
+  "not available yet" rather than faking Phase 5-7 functionality that
+  doesn't exist.
+
 Covered end to end by `tests/`, including the tests that actually matter: a
 35-player round settling to the cent (700 pot → 560 derash → 140 house), two
 simultaneous claims splitting a derash evenly, a killed engine mid-round
 recovering to a full refund on the next worker startup, Postgres itself (not
 Python) rejecting an unbalanced ledger transaction, a full auth→join→stake→
-round-settle flow over a real WebSocket, and 1,000 real concurrent WebSocket
-connections in one room receiving a call in ~130–175ms (spec budget: 300ms).
-`mypy --strict` is clean across the whole codebase.
+round-settle flow over a real WebSocket, 1,000 real concurrent WebSocket
+connections in one room receiving a call in ~130–190ms on a good run (spec
+budget: 300ms — see `DECISIONS.md` for why this one occasionally reads
+higher on a busy shared host), a contact-mismatch registration rejected
+end to end through a real aiogram Dispatcher, and a duplicate Telegram
+`update_id` processed exactly once. `mypy --strict` is clean across the
+whole codebase.

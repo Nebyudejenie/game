@@ -5,6 +5,87 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-22 — Phase 1 (Telegram bot, spec Prompt 5) scoping decisions
+
+- **`/deposit`, `/withdraw`, `/limits` honestly report "not available yet"**
+  rather than faking a payment or limits flow. Building a working-looking
+  deposit command with no real provider behind it (Phase 5-6, not built) or
+  a limits command with no responsible-gambling engine behind it (Phase 7,
+  not built) would be exactly the "fake/mock functionality" the CTO
+  instructions explicitly forbid. `/balance`, `/history`, `/invite`,
+  `/language`, `/rules`, `/support`, and the full registration flow are all
+  real, reading and writing the actual ledger/DB.
+- **Play button is conditional on `MINIAPP_URL` being configured.** Telegram
+  requires a valid HTTPS URL for a `web_app` button; there is no Mini App
+  yet (Phase 4). Rather than ship a button that would error or point
+  nowhere, `/play` and the main menu button fall back to an honest "not
+  open yet" message until `MINIAPP_URL` is set.
+- **Referral codes are just the referrer's own numeric user_id** (`ref_
+  {telegram_id}`), not a separately generated/looked-up code — already
+  unique, no new table needed. Only the `referred_by` link and a plain
+  count are implemented; the `referrals` table's reward/qualifying-deposit
+  tracking (spec section 4.5) depends on deposits existing, so it's
+  deferred to whichever phase builds the promotions engine.
+- **`/change_username` takes its argument inline** (`/change_username New
+  Name`) rather than using aiogram's FSM (a "send the command, then reply
+  with the name" conversation). Avoids pulling in FSM storage machinery for
+  one simple field; can be upgraded to a real conversation later if product
+  wants a friendlier flow.
+- **Structural, AST-based test enforcing "no hardcoded string in any
+  handler"** (`tests/unit/test_bot_no_hardcoded_strings.py`), not just
+  reviewer discipline. It walks the whole `handlers.py` AST for string
+  literals with real alphabetic content and fails on anything not
+  specifically exempted (a `t(...)` call's translation key, a
+  `Command(...)`/`Router(...)` protocol identifier, a `row["key"]`
+  Record-subscript, a ledger account "kind" enum value, or an f-string's
+  structural fragments used only for URL building). Every exemption was
+  added only after the checker actually flagged that real, verified-safe
+  case against the live file — none were guessed in advance. The checker
+  caught one real bug while being built: `outcome = "won" if ... else "—"`
+  was hardcoded English text passed straight into a `t(...)` format kwarg,
+  bypassing i18n entirely; fixed by adding `history.outcome_won` /
+  `history.outcome_other` translation keys.
+- **aiogram's `Router` can only attach to one `Dispatcher` for its
+  lifetime.** `services/bot/handlers.py`'s `router` is the normal aiogram
+  module-level-singleton pattern, correct for production (one long-lived
+  Dispatcher), but it meant test code building a fresh `Dispatcher` per
+  test function crashed on the second test ("router already attached").
+  Fixed by sharing one session-scoped `Dispatcher`/`Bot`/fake-session
+  across all of `test_bot_handlers.py`, matching how the bot actually runs.
+- **Bot API testing uses a fake `aiogram.client.session.base.BaseSession`
+  subclass** that records `SendMessage` calls and returns a synthetic
+  `Message` instead of touching the network — no real bot token or
+  Telegram connectivity needed. Combined with `Dispatcher.feed_update()`
+  fed synthetic `Update` objects, this exercises the real Router/handler
+  code end to end, which is what let the spec's own Prompt 5 test list
+  (contact-mismatch rejection, typed-number rejection, duplicate
+  `update_id`) be proven directly rather than approximated.
+- **Amharic/English translations are a first-pass draft**, not
+  native-speaker-reviewed — except the handful of strings taken verbatim
+  from the spec itself (`register.prompt`, `register.use_button`,
+  `wallet.insufficient`), which are presumably already vetted. Flagging
+  this explicitly rather than implying production-ready translation
+  quality; a native speaker should review `services/bot/locales/am.json`
+  before this ships for real users.
+- **Docker containers had stopped mid-session** (host uptime showed an
+  11-minute restart partway through this phase) — not a code issue,
+  just `docker compose up -d postgres redis` again, data intact via the
+  named volume. Noted because it produced a wall of unrelated-looking
+  connection-refused test failures that could otherwise look like a real
+  regression.
+- **Load-test variance reconfirmed, more dramatically.** Immediately after
+  the container restart above (host uptime 11 minutes, other unrelated
+  Docker workloads on the same shared 4-core machine also mid-restart),
+  the 1000-socket fan-out test measured p99 = 482-528ms across repeated
+  runs -- well over budget. Waiting and rerunning once the host settled
+  brought it straight back to 147-190ms, matching every other measurement
+  taken during this project. Real, environment-driven variance on shared
+  infrastructure, not a regression in the (unchanged) fan-out code --
+  exactly why this test is `@pytest.mark.load` and excluded from the
+  default run rather than a hard CI gate.
+
+---
+
 ## 2026-08-22 — Phase 3 (realtime gateway, spec Prompt 4) scoping decisions
 
 - **Gateway↔engine command channel: Redis Streams, one per room.** Prompt 3

@@ -1,0 +1,39 @@
+/* Design tokens -- spec section 1 (Mini App UI Spec).
+   The game screen deliberately does NOT read Telegram theme params: the
+   color coding (called/near/danger/gold) needs a fixed dark canvas or it
+   breaks under a light Telegram theme. Wallet/settings screens are the
+   ones allowed to blend with Telegram's theme -- see wallet.css. */
+
+:root {
+  --bg: #0B0E14;
+  --surface: #151A24;
+  --surface-2: #1E2532;
+  --text: #F2F5FA;
+  --muted: #8A94A6;
+  --call: #22C55E;
+  --near: #F59E0B;
+  --danger: #EF4444;
+  --gold: #FFC94A;
+  --accent: #7C5CFF;
+
+  --border: #262E3D;
+
+  --fs-display: 40px;
+  --fs-xl: 28px;
+  --fs-lg: 20px;
+  --fs-md: 16px;
+  --fs-sm: 13px;
+  --fs-xs: 11px;
+
+  --radius: 10px;
+  --radius-lg: 16px;
+
+  --font-display: "Jo Bingo Display", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Noto Sans Ethiopic", "Segoe UI", system-ui, sans-serif;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-scale: 0;
+  }
+}

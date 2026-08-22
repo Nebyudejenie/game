@@ -1,0 +1,52 @@
+{
+  "rooms.title": "ክፍሎች",
+  "rooms.playing": "እየተጫወተ — በ~{seconds}ሰ ቀጣይ",
+  "rooms.derash_up_to": "ደራሽ እስከ {amount}",
+  "rooms.empty": "ምንም ክፍል የለም",
+
+  "lobby.pick_card": "ካርድ ይምረጡ",
+  "lobby.starts_in": "ይጀምራል {seconds}ሰ",
+  "lobby.take_card": "ካርድ {card} ውሰዱ — {stake} ብር",
+  "lobby.card_taken_change": "ካርድ {card} ተይዟል · ቀይር",
+  "lobby.deposit_to_play": "ለመጫወት ገቢ ያድርጉ",
+  "lobby.confirm_title": "ካርድ {card} ማረጋገጫ",
+
+  "game.derash": "ደራሽ",
+  "game.players": "ተጫዋቾች",
+  "game.stake": "ወስ",
+  "game.call": "ጥሪ",
+  "game.auto": "ራስሰር",
+  "game.your_card": "ካርድዎ",
+  "game.bingo": "ቢንጎ",
+  "game.no_pattern_yet": "ገና ንድፍ የለም",
+
+  "spectate.banner": "የዚህ ዙር ጨዋታ ተጀምሯል። አዲስ ዙር እስኪጀመር ይጠብቁ።",
+  "spectate.next_in": "ቀጣይ ዙር በ~{seconds}ሰ ይጀምራል።",
+  "spectate.reserve": "ካርድ ያዝ",
+
+  "result.win_title": "ገበያ ደረሰ!",
+  "result.card_row": "ካርድ {card} — {pattern}",
+  "result.won_on_call": "በጥሪ {index} ከ{total} ላይ አሸነፉ",
+  "result.session_line": "የዚህ ክፍለ ጊዜ: {sign}{amount} ብር",
+  "result.play_next": "ቀጣይ ዙር ይጫወቱ",
+  "result.verify_draw": "ጥሪውን ያረጋግጡ",
+  "result.no_winner": "አሸናፊ የለም — ገንዘብዎ ተመልሷል",
+
+  "wallet.title": "የገንዘብ ቦርሳ",
+  "wallet.tab_balance": "ቀሪ ሂሳብ",
+  "wallet.tab_deposit": "ገቢ",
+  "wallet.tab_withdraw": "ወጪ",
+  "wallet.tab_history": "ታሪክ",
+  "wallet.cash": "ካሽ",
+  "wallet.bonus": "ቦነስ",
+  "wallet.locked": "የተያዘ",
+  "wallet.not_available": "ይህ ባህሪ በቅርቡ ይጀምራል።",
+  "wallet.history_empty": "እስካሁን ምንም እንቅስቃሴ የለም።",
+
+  "connection.reconnecting": "በመገናኘት ላይ…",
+  "connection.offline": "ግንኙነት ተቋርጧል",
+
+  "error.generic": "የሆነ ስህተት ተፈጥሯል። እባክዎ እንደገና ይሞክሩ።",
+  "error.room_unavailable": "ይህ ክፍል አሁን አይገኝም።",
+  "error.rate_limited": "እባክዎ ትንሽ ይታገሱ።"
+}

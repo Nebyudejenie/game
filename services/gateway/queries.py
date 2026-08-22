@@ -11,6 +11,7 @@ make reconnection depend on a live engine for no real benefit.
 
 from __future__ import annotations
 
+import json
 import time
 from decimal import Decimal
 from typing import Any
@@ -66,6 +67,35 @@ async def user_balance_snapshot(pool: asyncpg.Pool, user_id: int) -> dict[str, s
         }
 
 
+async def user_history(pool: asyncpg.Pool, user_id: int, limit: int = 10) -> list[dict[str, Any]]:
+    rows = await pool.fetch(
+        """
+        SELECT rd.id, rd.seq, rd.stake, rd.ended_at,
+               (rw.round_id IS NOT NULL) AS won,
+               rw.amount AS won_amount
+        FROM round_entries re
+        JOIN rounds rd ON rd.id = re.round_id
+        LEFT JOIN round_winners rw ON rw.round_id = re.round_id AND rw.user_id = re.user_id
+        WHERE re.user_id = $1 AND rd.status IN ('done', 'voided')
+        ORDER BY rd.ended_at DESC NULLS LAST
+        LIMIT $2
+        """,
+        user_id,
+        limit,
+    )
+    return [
+        {
+            "round_id": row["id"],
+            "seq": row["seq"],
+            "stake": str(row["stake"]),
+            "ended_at": row["ended_at"].isoformat() if row["ended_at"] else None,
+            "won": row["won"],
+            "won_amount": str(row["won_amount"]) if row["won_amount"] is not None else None,
+        }
+        for row in rows
+    ]
+
+
 async def list_rooms(pool: asyncpg.Pool) -> list[dict[str, Any]]:
     rows = await pool.fetch(
         """
@@ -102,10 +132,24 @@ async def list_rooms(pool: asyncpg.Pool) -> list[dict[str, Any]]:
 
 
 async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> dict[str, Any]:
+    """The one-message reconnect payload (spec section 6.5): everything the
+    Mini App needs to redraw exactly where the player left off, sourced
+    entirely from Postgres so it works even if the room's engine just
+    crashed and hasn't been replaced yet.
+    """
+    room_row = await pool.fetchrow(
+        "SELECT stake, win_patterns, max_players FROM rooms WHERE id = $1", room_id
+    )
+    if room_row is None:
+        raise ValueError(f"no such room: {room_id}")
+    win_patterns = room_row["win_patterns"]
+    if isinstance(win_patterns, str):
+        win_patterns = json.loads(win_patterns)
+
     round_row = await pool.fetchrow(
         """
         SELECT id, status, call_index, draw_order, pot, derash, house_cut_bps,
-               stake, server_seed_hash
+               stake, player_count, lobby_deadline
         FROM rounds
         WHERE room_id = $1
         ORDER BY seq DESC
@@ -116,19 +160,29 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
 
     called: list[int] = []
     your_card: int | None = None
+    your_card_grid: list[list[int]] | None = None
     auto_mark: bool | None = None
     status = "idle"
     round_id = None
     call_index = 0
     pot = Decimal("0")
+    derash = Decimal("0")
+    players = 0
+    stake = room_row["stake"]
+    lobby_deadline_ms: int | None = None
 
     if round_row is not None:
         status = round_row["status"]
         round_id = round_row["id"]
         call_index = round_row["call_index"]
         pot = round_row["pot"]
+        derash = round_row["derash"] or Decimal("0")
+        players = round_row["player_count"] or 0
+        stake = round_row["stake"]
         draw_order = round_row["draw_order"] or []
         called = list(draw_order[:call_index])
+        if round_row["lobby_deadline"] is not None:
+            lobby_deadline_ms = int(round_row["lobby_deadline"].timestamp() * 1000)
 
         entry = await pool.fetchrow(
             "SELECT card_no, auto_mark FROM round_entries WHERE round_id = $1 AND user_id = $2",
@@ -138,6 +192,12 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
         if entry is not None:
             your_card = entry["card_no"]
             auto_mark = entry["auto_mark"]
+            card_row = await pool.fetchrow(
+                "SELECT grid FROM cards WHERE card_no = $1", your_card
+            )
+            if card_row is not None:
+                grid = card_row["grid"]
+                your_card_grid = json.loads(grid) if isinstance(grid, str) else grid
 
     return {
         "t": "state_sync",
@@ -147,7 +207,13 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
         "call_index": call_index,
         "called": called,
         "pot": str(pot),
+        "derash": str(derash),
+        "players": players,
+        "stake": str(stake),
+        "win_patterns": win_patterns,
         "your_card": your_card,
+        "your_card_grid": your_card_grid,
         "auto_mark": auto_mark,
+        "lobby_deadline_ms": lobby_deadline_ms,
         "server_time": int(time.time() * 1000),
     }

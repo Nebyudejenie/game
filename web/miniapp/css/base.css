@@ -1,0 +1,151 @@
+/* Reset + base layout. */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: var(--fs-md);
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+/* Tabular figures everywhere numbers change, so a countdown or a score
+   never jitters in width as its digits change (spec section 1: Type). */
+.tabular, .stat-value, .call-badge, .card-cell, .board-cell {
+  font-variant-numeric: tabular-nums;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.screen {
+  display: none;
+  min-height: 100vh;
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 12px;
+  padding-bottom: 32px;
+}
+
+.screen.active {
+  display: block;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* Connection banner -- spec section 3.3: a thin amber bar, never a modal,
+   because the player might be mid-round when this shows. */
+#connection-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1000;
+  background: var(--near);
+  color: #1a1200;
+  font-size: var(--fs-xs);
+  text-align: center;
+  padding: 4px 8px;
+  transform: translateY(-100%);
+  transition: transform 160ms ease;
+}
+
+#connection-banner.visible {
+  transform: translateY(0);
+}
+
+.stat-strip {
+  display: flex;
+  justify-content: space-between;
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin-bottom: 10px;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.stat-label {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.stat-value {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+}
+
+.btn-primary {
+  display: block;
+  width: 100%;
+  background: var(--accent);
+  color: var(--text);
+  font-weight: 600;
+  font-size: var(--fs-md);
+  padding: 14px;
+  border-radius: var(--radius);
+  text-align: center;
+}
+
+.btn-primary:disabled {
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+.btn-gold {
+  background: var(--gold);
+  color: #1a1200;
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translate(-50%, 12px);
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 10px 16px;
+  border-radius: var(--radius);
+  font-size: var(--fs-sm);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease, transform 160ms ease;
+  z-index: 900;
+  max-width: 90%;
+  text-align: center;
+}
+
+.toast.visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}

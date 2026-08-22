@@ -1,0 +1,15 @@
+/* Self-hosted Amharic font, per spec: "Do not rely on device fonts for
+   Amharic -- rendering on cheap Android is inconsistent." Subsetted to
+   the Unicode codepoints this UI's locale files actually use (~11.5KB,
+   well under the spec's 40KB budget for the Amharic font subset) --
+   regenerate with fonts/subset.sh after adding new Amharic copy, since a
+   character outside the current subset falls back to the next font in
+   the stack instead of rendering from Noto Sans Ethiopic. */
+
+@font-face {
+  font-family: "Noto Sans Ethiopic";
+  src: url("../fonts/NotoSansEthiopic-Regular.subset.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}

@@ -1,0 +1,52 @@
+{
+  "rooms.title": "Rooms",
+  "rooms.playing": "Playing — next in ~{seconds}s",
+  "rooms.derash_up_to": "Derash up to {amount}",
+  "rooms.empty": "No rooms available",
+
+  "lobby.pick_card": "Pick your card",
+  "lobby.starts_in": "Starts {seconds}s",
+  "lobby.take_card": "Take card {card} — {stake} ETB",
+  "lobby.card_taken_change": "Card {card} taken · Change",
+  "lobby.deposit_to_play": "Deposit to play",
+  "lobby.confirm_title": "Confirm card {card}",
+
+  "game.derash": "Derash",
+  "game.players": "Players",
+  "game.stake": "Stake",
+  "game.call": "Call",
+  "game.auto": "AUTO",
+  "game.your_card": "Your card",
+  "game.bingo": "BINGO",
+  "game.no_pattern_yet": "No pattern yet",
+
+  "spectate.banner": "This round is in progress. Please wait for a new round.",
+  "spectate.next_in": "Next round starts in ~{seconds}s.",
+  "spectate.reserve": "Reserve a card",
+
+  "result.win_title": "You won!",
+  "result.card_row": "Card {card} — {pattern}",
+  "result.won_on_call": "Won on call {index} of {total}",
+  "result.session_line": "This session: {sign}{amount} ETB",
+  "result.play_next": "Play next round",
+  "result.verify_draw": "Verify draw",
+  "result.no_winner": "No winner — your stake was refunded",
+
+  "wallet.title": "Wallet",
+  "wallet.tab_balance": "Balance",
+  "wallet.tab_deposit": "Deposit",
+  "wallet.tab_withdraw": "Withdraw",
+  "wallet.tab_history": "History",
+  "wallet.cash": "Cash",
+  "wallet.bonus": "Bonus",
+  "wallet.locked": "Locked",
+  "wallet.not_available": "This feature is launching soon.",
+  "wallet.history_empty": "No activity yet.",
+
+  "connection.reconnecting": "Reconnecting…",
+  "connection.offline": "Disconnected",
+
+  "error.generic": "Something went wrong. Please try again.",
+  "error.room_unavailable": "This room isn't available right now.",
+  "error.rate_limited": "Please slow down."
+}

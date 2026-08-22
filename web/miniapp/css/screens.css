@@ -1,0 +1,419 @@
+/* Screen-specific layout -- spec section 2. */
+
+/* --- 2.1 Room list --- */
+
+.room-list-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.balance-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-md);
+}
+
+.balance-pill .amount {
+  font-family: var(--font-display);
+}
+
+.deposit-fab {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent);
+  font-size: var(--fs-lg);
+  line-height: 1;
+}
+
+.room-card {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.room-card:active {
+  background: var(--surface-2);
+}
+
+.room-card .stake {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+}
+
+.room-card .players {
+  color: var(--call);
+  font-size: var(--fs-sm);
+}
+
+.room-card .derash-line {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+
+.room-card .countdown {
+  font-family: var(--font-display);
+  font-size: var(--fs-md);
+}
+
+.room-card.playing .countdown {
+  color: var(--call);
+}
+
+/* --- 2.2 Card selection (lobby) --- */
+
+.lobby-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 4px;
+  margin-bottom: 14px;
+}
+
+.card-grid-cell {
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-2);
+  border-radius: 6px;
+  font-size: var(--fs-xs);
+}
+
+.card-grid-cell.taken {
+  background: var(--surface);
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.card-grid-cell.selected {
+  background: var(--accent);
+  color: var(--text);
+}
+
+.card-preview {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  padding: 10px;
+  margin-bottom: 14px;
+}
+
+.card-preview-title {
+  text-align: center;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  margin-bottom: 8px;
+}
+
+/* --- 2.3 The 5x5 player card grid (shared by lobby preview + game screen) --- */
+
+.mini-card {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+}
+
+.mini-card-header {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+  margin-bottom: 4px;
+  text-align: center;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+}
+
+.card-cell {
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-2);
+  border-radius: 6px;
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.card-cell.free {
+  background: var(--gold);
+  color: #1a1200;
+}
+
+.card-cell.marked {
+  background: var(--call);
+  color: #06210f;
+}
+
+/* --- 2.3 Game screen --- */
+
+.call-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.recent-calls {
+  display: flex;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.game-body {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+
+.board {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 3px;
+}
+
+.board-header {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 3px;
+  text-align: center;
+  color: var(--muted);
+  font-weight: 700;
+  font-size: var(--fs-sm);
+  margin-bottom: 3px;
+}
+
+.board-cell {
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-2);
+  border-radius: 4px;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.board-cell.called {
+  background: var(--call);
+  color: #06210f;
+}
+
+.board-cell.near {
+  background: var(--near);
+  color: #1a1200;
+}
+
+.call-panel {
+  width: 92px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.call-badge {
+  width: 88px;
+  height: 88px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 3px solid var(--gold);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-size: var(--fs-xl);
+  transform: scale(0.8);
+  opacity: 0;
+  transition: transform 240ms ease, opacity 240ms ease;
+}
+
+.call-badge.show {
+  transform: scale(1);
+  opacity: 1;
+  box-shadow: 0 0 24px 0 var(--gold);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .call-badge {
+    transition: none;
+    transform: scale(1);
+  }
+}
+
+.auto-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.switch {
+  width: 36px;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  position: relative;
+}
+
+.switch.on {
+  background: var(--accent);
+}
+
+.switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--text);
+  transition: left 120ms ease;
+}
+
+.switch.on .switch-knob {
+  left: 18px;
+}
+
+.your-card-section {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  padding: 10px;
+}
+
+.your-card-title {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  margin-bottom: 6px;
+  text-align: center;
+}
+
+.bingo-btn {
+  margin-top: 10px;
+  background: var(--gold);
+  color: #1a1200;
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  letter-spacing: 0.08em;
+}
+
+.bingo-btn.shake {
+  animation: shake 240ms ease;
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-6px); }
+  75% { transform: translateX(6px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bingo-btn.shake { animation: none; }
+}
+
+/* --- 2.4 Spectate --- */
+
+.spectate-banner {
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 12px;
+  text-align: center;
+  margin-bottom: 10px;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+/* --- 2.5 Result --- */
+
+.result-screen {
+  text-align: center;
+  padding-top: 40px;
+}
+
+.result-title {
+  font-size: var(--fs-xl);
+  margin-bottom: 4px;
+}
+
+.result-amount {
+  font-family: var(--font-display);
+  font-size: var(--fs-display);
+  color: var(--gold);
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  margin: 16px 0;
+}
+
+.result-meta {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  margin-bottom: 20px;
+}
+
+.result-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.result-actions .btn-secondary {
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 12px;
+}
+
+/* --- 2.6 Wallet -- uses Telegram theme params, not the fixed dark
+   game canvas (spec: "Do use theme params for the wallet and settings
+   screens"). See wallet.css for the theme-aware overrides. */
+
+.wallet-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 14px;
+}
+
+.wallet-tab {
+  flex: 1;
+  padding: 10px;
+  text-align: center;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  border-bottom: 2px solid transparent;
+}
+
+.wallet-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.wallet-balance-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.wallet-note {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  margin-top: 14px;
+  text-align: center;
+}

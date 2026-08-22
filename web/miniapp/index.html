@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="am">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <title>Jo Bingo</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="css/fonts.css" />
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/screens.css" />
+</head>
+<body>
+  <div id="connection-banner"></div>
+  <div id="toast" class="toast"></div>
+
+  <!-- 2.1 Room list -->
+  <main id="screen-rooms" class="screen active" data-screen="rooms">
+    <div class="room-list-header">
+      <div class="balance-pill">
+        <span>💰</span>
+        <span class="amount" id="balance-amount">0.00 ETB</span>
+      </div>
+      <button id="open-wallet-btn" class="deposit-fab">+</button>
+    </div>
+    <div id="room-list"></div>
+  </main>
+
+  <!-- 2.2 Card selection (LOBBY) -->
+  <main id="screen-lobby" class="screen" data-screen="lobby">
+    <div class="lobby-header">
+      <span id="lobby-countdown" class="stat-value"></span>
+    </div>
+    <div id="card-grid" class="card-grid"></div>
+    <button id="lobby-cta" class="btn-primary" disabled></button>
+  </main>
+
+  <!-- 2.3 Game screen (RUNNING) + 2.4 Spectate -->
+  <main id="screen-game" class="screen" data-screen="game">
+    <div class="stat-strip">
+      <div class="stat">
+        <span class="stat-label" data-i18n="game.derash"></span>
+        <span class="stat-value" id="stat-derash">0.00 ETB</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label" data-i18n="game.players"></span>
+        <span class="stat-value" id="stat-players">0</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label" data-i18n="game.stake"></span>
+        <span class="stat-value" id="stat-stake">0.00 ETB</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label" data-i18n="game.call"></span>
+        <span class="stat-value" id="stat-call">0/75</span>
+      </div>
+    </div>
+
+    <div id="spectate-banner" class="spectate-banner hidden">
+      <p data-i18n="spectate.banner"></p>
+      <button id="reserve-card-btn" class="btn-primary" style="margin-top:8px" data-i18n="spectate.reserve"></button>
+    </div>
+
+    <div class="call-row">
+      <span data-i18n="game.your_card" style="display:none"></span>
+      <div class="recent-calls" id="recent-calls"></div>
+    </div>
+
+    <div class="game-body">
+      <div id="board"></div>
+      <div class="call-panel">
+        <div id="call-badge" class="call-badge"></div>
+        <div class="auto-toggle">
+          <span data-i18n="game.auto"></span>
+          <div id="auto-switch" class="switch on"><div class="switch-knob"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="your-card-section" class="your-card-section">
+      <div class="your-card-title" data-i18n="game.your_card"></div>
+      <div id="your-card"></div>
+      <button id="bingo-btn" class="btn-primary bingo-btn" disabled data-i18n="game.bingo"></button>
+    </div>
+  </main>
+
+  <!-- 2.5 Result (SETTLING) -->
+  <main id="screen-result" class="screen result-screen" data-screen="result">
+    <div id="result-title" class="result-title"></div>
+    <div id="result-amount" class="result-amount"></div>
+    <div id="result-meta" class="result-meta"></div>
+    <div class="result-actions">
+      <button id="play-next-btn" class="btn-primary btn-gold" data-i18n="result.play_next"></button>
+      <button id="verify-draw-btn" class="btn-secondary" data-i18n="result.verify_draw"></button>
+    </div>
+  </main>
+
+  <!-- 2.6 Wallet -->
+  <main id="screen-wallet" class="screen" data-screen="wallet">
+    <div class="room-list-header">
+      <h2 data-i18n="wallet.title"></h2>
+      <button id="wallet-back-btn">✕</button>
+    </div>
+    <div class="wallet-tabs">
+      <div class="wallet-tab active" data-tab="balance" data-i18n="wallet.tab_balance"></div>
+      <div class="wallet-tab" data-tab="deposit" data-i18n="wallet.tab_deposit"></div>
+      <div class="wallet-tab" data-tab="withdraw" data-i18n="wallet.tab_withdraw"></div>
+      <div class="wallet-tab" data-tab="history" data-i18n="wallet.tab_history"></div>
+    </div>
+
+    <div id="wallet-pane-balance" class="wallet-pane">
+      <div class="wallet-balance-row"><span data-i18n="wallet.cash"></span><span id="wallet-cash">0.00 ETB</span></div>
+      <div class="wallet-balance-row"><span data-i18n="wallet.bonus"></span><span id="wallet-bonus">0.00 ETB</span></div>
+      <div class="wallet-balance-row"><span data-i18n="wallet.locked"></span><span id="wallet-locked">0.00 ETB</span></div>
+    </div>
+    <div id="wallet-pane-deposit" class="wallet-pane hidden">
+      <p class="wallet-note" data-i18n="wallet.not_available"></p>
+    </div>
+    <div id="wallet-pane-withdraw" class="wallet-pane hidden">
+      <p class="wallet-note" data-i18n="wallet.not_available"></p>
+    </div>
+    <div id="wallet-pane-history" class="wallet-pane hidden">
+      <p class="wallet-note" data-i18n="wallet.history_empty"></p>
+    </div>
+  </main>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
