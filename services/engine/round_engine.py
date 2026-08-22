@@ -332,6 +332,18 @@ class RoundEngine:
 
         now = time.monotonic()
         async with self._winner_lock:
+            # A user can reach a valid claim through two independent paths
+            # in the same round -- the server's own AUTO-mode scan
+            # (_call_next_number) and a client-sent `claim` message (a
+            # player with AUTO on client-side races to send one too, or a
+            # manual player double-taps) -- either of which could otherwise
+            # add the same user_id to _pending_winners twice and crash the
+            # round_winners (round_id, user_id) primary key at settlement.
+            # One claim per user per round, full stop, regardless of source.
+            already_pending = any(w.user_id == user_id for w in self._pending_winners)
+            if already_pending:
+                return ClaimResult(False, "already_claimed")
+
             if self._status == "running":
                 self._status = "settling"
                 deadline = now + WINNER_TIE_WINDOW_SECONDS

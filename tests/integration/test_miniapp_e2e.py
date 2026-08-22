@@ -1,0 +1,204 @@
+"""Real-browser verification of the Mini App (spec's own UI document) --
+not a mock DOM, an actual Chromium tab loading the actual gateway-served
+static files, talking to a real WebSocket, real Postgres, real Redis, and
+a real RoundEngine. This is what "start the dev server and use the feature
+in a browser before reporting complete" means for a frontend change.
+
+Telegram's `window.Telegram.WebApp` object is stubbed via an init script
+(no real Telegram client exists in a test) -- everything downstream of
+that (the WebSocket handshake, state_sync, gameplay) is the genuine app
+talking to the genuine backend.
+
+Two traps this file's first draft actually fell into, worth naming so they
+don't come back:
+
+1. index.html's real `<script src="https://telegram.org/js/telegram-web-app.js">`
+   loads after page.add_init_script()'s stub runs, and overwrites
+   `window.Telegram.WebApp.initData` back to "" (there's no real Telegram
+   environment) -- silently breaking auth. Fixed by blocking that request
+   entirely via page.route() so only our stub exists.
+2. `#screen-rooms` used to default to `class="active"` in the raw HTML (so
+   *something* was visible before JS ran), which made
+   `wait_for_selector("#screen-rooms.active")` pass regardless of whether
+   auth had actually succeeded -- and the balance placeholder used to be
+   "0.00 ETB", which is indistinguishable from a real zero balance. Fixed
+   by not defaulting any screen to active, and using "-- ETB" as the
+   loading placeholder so a real "0.00 ETB" is unambiguous proof `authed`
+   actually arrived.
+"""
+
+import asyncio
+import json
+from decimal import Decimal
+
+import pytest
+
+from services.engine.round_engine import RoundEngine, load_room_config
+from tests.integration.conftest import (
+    build_init_data,
+    create_funded_user,
+    create_room,
+    fund_user,
+    next_telegram_id,
+)
+
+pytestmark = pytest.mark.e2e
+
+TELEGRAM_SDK_URL = "https://telegram.org/js/telegram-web-app.js"
+
+
+def telegram_stub_script(init_data: str, telegram_id: int, first_name: str) -> str:
+    payload = {
+        "initData": init_data,
+        "initDataUnsafe": {"user": {"id": telegram_id, "first_name": first_name, "language_code": "am"}},
+        "themeParams": {},
+    }
+    return f"""
+    window.Telegram = {{
+      WebApp: {{
+        initData: {json.dumps(payload["initData"])},
+        initDataUnsafe: {json.dumps(payload["initDataUnsafe"])},
+        themeParams: {json.dumps(payload["themeParams"])},
+        ready: function() {{}},
+        expand: function() {{}},
+        HapticFeedback: {{
+          impactOccurred: function() {{}},
+          notificationOccurred: function() {{}}
+        }},
+        BackButton: {{
+          show: function() {{}},
+          hide: function() {{}},
+          onClick: function() {{}}
+        }}
+      }}
+    }};
+    """
+
+
+async def prepare_page(browser, telegram_id: int, first_name: str = "Nebyu"):
+    init_data = build_init_data(telegram_id, first_name=first_name)
+    page = await browser.new_page(viewport={"width": 390, "height": 780})
+    console_errors: list[str] = []
+    page.on("pageerror", lambda exc: console_errors.append(str(exc)))
+
+    # Must be the real Telegram SDK never running at all, not just our
+    # stub running "first" -- add_init_script() runs before every page
+    # script, but the SDK's own <script> tag would still execute afterward
+    # and overwrite window.Telegram.WebApp.initData back to "". A plain
+    # `lambda route: route.abort()` creates the coroutine and never awaits
+    # or schedules it -- silently a no-op -- hence a real async def here.
+    async def block_real_sdk(route):
+        await route.abort()
+
+    await page.route(TELEGRAM_SDK_URL, block_real_sdk)
+    await page.add_init_script(telegram_stub_script(init_data, telegram_id, first_name))
+    return page, console_errors
+
+
+async def test_miniapp_loads_authenticates_and_shows_balance(gateway_server, browser, conn):
+    telegram_id = next_telegram_id()
+    page, console_errors = await prepare_page(browser, telegram_id)
+
+    http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+    await page.goto(http_base + "/")
+
+    await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+    # "-- ETB" is the loading placeholder; a real "0.00 ETB" only appears
+    # once the authed message actually arrives and app.js writes it in.
+    await page.wait_for_function(
+        "document.getElementById('balance-amount').textContent.includes('0.00')", timeout=10000
+    )
+
+    assert console_errors == [], f"JS errors on load: {console_errors}"
+
+    await page.screenshot(path="/tmp/miniapp-rooms.png")
+    await page.close()
+
+
+async def test_miniapp_full_gameplay_flow(gateway_server, browser, pool, redis, card_pool, conn):
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=8, call_interval_ms=15
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    try:
+        other_player = await create_funded_user(conn)
+        assert (await engine.join(other_player, 2)).ok
+
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('0.00')", timeout=10000
+        )
+
+        # Fund the player directly through the ledger (deposits are Phase
+        # 5-6, not built) -- then reload so the balance shown reflects it.
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        assert user_row is not None, "authed handshake did not create the user row"
+        await fund_user(conn, user_row["id"], Decimal("100.00"))
+        await page.reload()
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('100.00')", timeout=10000
+        )
+        # Target this test's own room specifically -- the dev database
+        # accumulates rooms across every previous test run in the session,
+        # all at the same 10.00 ETB stake, so `.room-card` alone (the
+        # *first* match) is non-deterministic about which room it hits.
+        # That was a real, intermittent test bug, not app flakiness: the
+        # click could land on some other, already-finished leftover room,
+        # whose state_sync never reports status "lobby".
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page.wait_for_selector(room_selector, timeout=10000)
+        await page.click(room_selector)
+
+        await page.wait_for_selector("#screen-lobby.active", timeout=10000)
+        cells = await page.query_selector_all(".card-grid-cell")
+        assert len(cells) == 100
+
+        await cells[9].click()  # card #10
+        await page.click("#lobby-cta")
+        # Proof the take_card ack actually landed, not just that the click
+        # happened: the CTA switches to the "already taken, tap to change"
+        # wording once the server confirms.
+        await page.wait_for_function(
+            "document.getElementById('lobby-cta').textContent.includes('10')", timeout=5000
+        )
+
+        await page.wait_for_selector("#screen-game.active", timeout=25000)
+        board_cells = await page.query_selector_all(".board-cell")
+        assert len(board_cells) == 75
+        # Proof this player actually holds a card (not spectating): the
+        # your-card section is the one thing enterSpectate() hides.
+        assert not await page.is_hidden("#your-card-section")
+
+        # Confirm the actual stake happened -- not just that the UI moved
+        # on to the next screen.
+        balance_after_stake = await pool.fetchval(
+            """
+            SELECT balance FROM account_balances b
+            JOIN accounts a ON a.id = b.account_id
+            WHERE a.user_id = $1 AND a.kind = 'user_cash'
+            """,
+            user_row["id"],
+        )
+        assert balance_after_stake == Decimal("90.00")
+
+        # Wait for at least one live call to actually render.
+        await page.wait_for_function(
+            "document.getElementById('call-badge').textContent.length > 0", timeout=15000
+        )
+
+        await page.screenshot(path="/tmp/miniapp-game.png")
+
+        assert console_errors == [], f"JS errors during gameplay: {console_errors}"
+        await page.close()
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)

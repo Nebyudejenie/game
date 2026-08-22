@@ -6,11 +6,11 @@ product/architecture spec lives in [`idea.md`](idea.md) (see especially the
 blueprint this repo follows; see [`DECISIONS.md`](DECISIONS.md) for why).
 
 This repo is being built phase by phase. **Phase 0 (foundations + ledger),
-Phase 1 (Telegram bot), Phase 2 (game engine), and Phase 3 (realtime
-gateway) are done.** Everything else — the Mini App, payments, admin — is
-scaffolded as empty packages under `services/` and gets filled in phase by
-phase (see `DECISIONS.md` and the plan referenced there for the full
-roadmap).
+Phase 1 (Telegram bot), Phase 2 (game engine), Phase 3 (realtime gateway),
+and Phase 4 (Mini App) are done** — that's the full player-facing loop,
+working end to end. What's left — payments, admin — is scaffolded as empty
+packages under `services/` (see `DECISIONS.md` and the plan referenced
+there for the full roadmap).
 
 ## Repository layout
 
@@ -22,7 +22,7 @@ services/wallet/       Phase 1: wallet API surface over packages/core/ledger.py
 services/payments/     Phase 5-6: deposit/withdrawal provider adapters
 services/admin/        Phase 7: admin console API
 packages/core/         Shared, framework-free domain logic (ledger, bingo, config, logging, redis, telegram auth)
-web/miniapp/           Phase 4: Telegram Mini App
+web/miniapp/           Phase 4: Telegram Mini App (vanilla JS, no framework) -- DONE
 migrations/            Alembic migrations (raw SQL, no ORM)
 tests/unit/            Pure-function tests, no external dependencies
 tests/integration/     Tests against real Postgres + Redis (docker-compose)
@@ -53,7 +53,20 @@ docker compose -f deploy/docker-compose.yml up -d postgres redis
 # 5. Real-scale gateway measurement (1000 concurrent sockets), run standalone
 #    for a clean reading -- see DECISIONS.md on why this is excluded by default
 .venv/bin/pytest tests/ -m load -v -s
+
+# 6. Real-browser Mini App tests (Playwright/Chromium) -- also excluded by
+#    default; install a browser once, then run explicitly
+.venv/bin/playwright install chromium
+.venv/bin/pytest tests/ -m e2e -v -s
 ```
+
+To actually play with it: start the gateway (`uvicorn services.gateway.app:app
+--reload`, from the repo root) and open `http://localhost:8000/` -- the
+gateway serves the Mini App's static files itself. Outside a real Telegram
+client `window.Telegram.WebApp` won't exist, so the app has nothing to
+authenticate with; the E2E tests stub it (see
+`tests/integration/test_miniapp_e2e.py`) the same way a real integration
+would supply real `initData`.
 
 Copy `.env.example` to `.env` if you want to override any connection
 settings; everything works fine with the defaults baked into
@@ -139,6 +152,28 @@ above.
   "not available yet" rather than faking Phase 5-7 functionality that
   doesn't exist.
 
+**Mini App (Phase 4):**
+- **`web/miniapp/`** — the full player-facing client per the Mini App UI
+  spec: room list, card selection (two-tap commit), the live game screen
+  (75-cell call board and 5×5 card both rendered once and mutated in
+  place, never re-rendered per call), spectate mode, the result screen,
+  and a wallet view. Vanilla JS (ES modules), no framework, no build step.
+- **`js/ws.js`** — the WebSocket client, matching the gateway's protocol
+  exactly: auth handshake, transparent reconnect (re-authenticates and
+  re-joins the active room, restoring state from the server's own
+  `state_sync` rather than anything remembered client-side), server-time
+  offset tracking for a countdown that never trusts the device clock.
+- **`js/i18n.js`** + **`locales/`** — Amharic default, English complete,
+  same fallback rules as the bot side. Amharic renders via a self-hosted
+  `Noto Sans Ethiopic` subset (`fonts/`) — regenerable with
+  `fonts/subset.sh` — cut from Google's ~200KB full delivery to ~11.5KB by
+  subsetting to the codepoints the current locale files actually use
+  (spec budget: 40KB).
+- **`services/gateway/app.py`** now also serves the Mini App's static
+  files and two REST endpoints (`/api/me`, `/api/history`) for the wallet
+  screen, authenticated the same `Authorization: tma <initData>` way as
+  the WebSocket handshake.
+
 Covered end to end by `tests/`, including the tests that actually matter: a
 35-player round settling to the cent (700 pot → 560 derash → 140 house), two
 simultaneous claims splitting a derash evenly, a killed engine mid-round
@@ -148,6 +183,10 @@ round-settle flow over a real WebSocket, 1,000 real concurrent WebSocket
 connections in one room receiving a call in ~130–190ms on a good run (spec
 budget: 300ms — see `DECISIONS.md` for why this one occasionally reads
 higher on a busy shared host), a contact-mismatch registration rejected
-end to end through a real aiogram Dispatcher, and a duplicate Telegram
-`update_id` processed exactly once. `mypy --strict` is clean across the
+end to end through a real aiogram Dispatcher, a duplicate Telegram
+`update_id` processed exactly once, and a real Chromium browser playing an
+actual round against the real backend (auth → fund → join → take a card →
+watch live calls render → confirm the stake actually happened in the
+ledger) — which is how three real bugs invisible to every other test got
+found and fixed; see `DECISIONS.md`. `mypy --strict` is clean across the
 whole codebase.

@@ -63,6 +63,7 @@ function renderRoomList() {
     const isPlaying = room.status === "running" || room.status === "lobby";
     const card = document.createElement("div");
     card.className = "room-card" + (room.status === "running" ? " playing" : "");
+    card.dataset.roomId = String(room.room_id);
     card.innerHTML = `
       <div>
         <div class="stake">${room.stake} ETB</div>
@@ -192,8 +193,18 @@ ws.on("ack", (msg) => {
   }
   if (msg.for === "take_card") {
     haptics.success();
-    setState({ round: { ...getState().round, your_card: selectedCard } });
-    updateLobbyCta();
+    // The ack only confirms success -- it doesn't carry the card's actual
+    // grid (the command channel's replies are deliberately {ok, reason}
+    // only). Re-requesting state_sync is what actually populates
+    // your_card_grid, which enterGame() needs once the round starts;
+    // patching only `your_card` locally left it null and crashed
+    // setCardGrid() the moment round_start fired (a real bug an E2E test
+    // caught -- see DECISIONS.md).
+    const state = getState();
+    if (state.currentRoomId !== null) ws.joinRoom(state.currentRoomId);
+    // enterLobby(), triggered by the state_sync reply just requested
+    // above, is what refreshes the CTA text correctly (it has the fresh
+    // your_card by then); no need to also do it here against stale state.
   }
 });
 
@@ -251,13 +262,21 @@ function updateStatStrip(sync) {
 }
 
 ws.on("round_start", (sync) => {
-  setState({ round: { ...getState().round, ...sync } });
+  // One merge, reused everywhere below -- round_start's own payload
+  // doesn't carry `stake` (only round.js/state_sync do), and `called`
+  // must actually reset to [] for the new round, not just look reset to
+  // whatever enterGame() was locally handed. Splitting these into
+  // separate ad-hoc merges previously left the stat strip's stake blank
+  // after the first round_start of a session, and left state.round.called
+  // stale across rounds (caught by review of a real E2E screenshot, not
+  // by a unit test -- see DECISIONS.md).
+  const merged = { ...getState().round, ...sync, called: [] };
+  setState({ round: merged });
   if (getState().screen === "lobby" || getState().screen === "game") {
-    const merged = { ...getState().round, called: [] };
     if (merged.your_card) enterGame(merged);
     else enterSpectate(merged);
   }
-  updateStatStrip(sync);
+  updateStatStrip(merged);
 });
 
 ws.on("call", (msg) => {

@@ -59,7 +59,12 @@ function open() {
     }
     if (message.t === "authed") {
       setState({ connection: "connected", user: message.user });
-      for (const resolve of authResolvers.splice(0)) resolve(message);
+      // Resolve with the user object, matching waitForAuth()'s other
+      // branch (`Promise.resolve(getState().user)`) -- resolving with the
+      // whole {t, user, server_time} envelope here silently broke every
+      // caller's `user.balance` access (real bug, caught by an E2E test
+      // actually reading the DOM instead of just checking the WS traffic).
+      for (const resolve of authResolvers.splice(0)) resolve(message.user);
       const { currentRoomId } = getState();
       if (currentRoomId !== null) send({ t: "join", room_id: currentRoomId });
     }

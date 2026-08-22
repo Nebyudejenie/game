@@ -5,6 +5,131 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-22 — Phase 4 (Mini App, spec's Mini App UI Specification) — real bugs found by actually testing in a browser
+
+This phase is the reason the CTO instructions insist on testing UI in a
+real browser before calling it done — every one of these was invisible to
+`mypy`/unit tests and would have shipped silently broken:
+
+- **`ws.js`'s auth resolver passed the wrong object.** `authResolvers`
+  were resolved with the whole `{t, user, server_time}` envelope instead
+  of `message.user`, so every caller's `user.balance` read `undefined`.
+  The WebSocket traffic looked perfect in isolation (`authed` arrived with
+  a real balance) -- only reading the actual DOM (`#balance-amount`)
+  caught it. Fixed to resolve with `message.user`, matching
+  `waitForAuth()`'s other branch.
+- **Taking a card never fetched the card's actual grid.** `state_sync`
+  only includes `your_card_grid` once `round_entries` has a row for that
+  user; the LOBBY-time `state_sync` (before taking a card) naturally has
+  it `null`. The `take_card` ack handler patched `your_card` locally but
+  never re-fetched state, so `your_card_grid` stayed `null` -- crashing
+  `setCardGrid()` the moment `round_start` fired (`TypeError: Cannot read
+  properties of null (reading '0')`, only visible in a running browser's
+  console, never in a `curl`/WS-trace-level check). Fixed by re-sending
+  `join` after a successful `take_card` ack, reusing the existing
+  `state_sync` path rather than inventing a new one.
+- **`round_start`'s stat-strip update used the wrong object.** The handler
+  correctly merged `round_start`'s payload into `state.round` for storage,
+  but then called `updateStatStrip(sync)` with the *raw*, unmerged
+  `round_start` payload -- which has no `stake` field (only `state_sync`
+  does) -- leaving the stake stat blank after the first `round_start` of a
+  session. Same fix also closed a second bug in the same code path:
+  `state.round.called` was never actually reset to `[]` in the global
+  store across rounds (only a local copy was), which would have let a
+  stale called-number from a previous round leak into the *next* round's
+  client-side pattern check. Caught by reviewing an actual screenshot from
+  the E2E test, not by any assertion. One merged object now, reused for
+  `setState`, `enterGame`/`enterSpectate`, and `updateStatStrip` alike.
+- **The E2E test's own `page.route()` handler was a no-op.**
+  `lambda route: route.abort()` creates the coroutine and never awaits or
+  schedules it -- a classic Python async mistake, silently doing nothing.
+  Without it, index.html's real `<script src="https://telegram.org/js/
+  telegram-web-app.js">` loads after the test's `add_init_script` stub and
+  overwrites `window.Telegram.WebApp.initData` back to `""`, breaking auth
+  in a way that looked like an app bug until traced to the test harness
+  itself. Fixed with a real `async def` handler.
+- **A real double-claim race, found only by running the E2E test enough
+  times to hit it**: a single player can produce two independent valid
+  claims for the same round through two separate paths -- the server's own
+  AUTO-mode scan (`_call_next_number`) and a client-sent `claim` message
+  (the Mini App's client-side AUTO toggle independently detects the same
+  completed pattern and sends its own claim). Both could land in
+  `_pending_winners`, crashing `round_winners`' `(round_id, user_id)`
+  primary key at settlement -- `asyncpg.exceptions.UniqueViolationError`,
+  visible only as an intermittent `finally: await asyncio.wait_for(task,
+  ...)` failure in whichever test happened to run the engine long enough
+  to hit it (roughly 1 in 3 runs of the gameplay E2E test). Fixed in
+  `round_engine.py`'s `claim()`: reject a second claim from a user_id
+  already in `_pending_winners`, regardless of source (`"already_claimed"`)
+  -- one claim per user per round, full stop. Added a direct regression
+  test (`test_same_user_double_claim_race_settles_exactly_once`) that
+  fires both claim sources concurrently for the same user without needing
+  a browser to reproduce it.
+- **The E2E gameplay test still has residual, lower-rate flakiness**
+  (~1 in 7-8 runs, after the fix above) waiting for the game screen to
+  appear -- a plain timeout, no crash, no console error, and it always
+  passes on retry. This matches the same category already documented for
+  the load tests: five to eight consecutive heavy Playwright+uvicorn+engine
+  test invocations on one shared 4-core dev box will occasionally hit real
+  resource contention. Bumped the wait budget as cheap mitigation (15s →
+  25s) and documenting rather than chasing further, since it shows no
+  reproducible error signal to chase and the test is opt-in
+  (`pytest -m e2e`), not part of the default suite or any CI gate.
+- **The E2E gameplay test was itself flaky** (~2/3 failure rate) for an
+  unrelated reason: the dev database accumulates rooms across every prior
+  test run at the same 10.00 ETB stake, and `page.click(".room-card")`
+  clicked whichever one sorted first -- non-deterministic against ties,
+  so it sometimes hit some other, already-finished room whose
+  `state_sync` never reports `status: "lobby"`. Fixed by adding
+  `data-room-id` to each room card in `renderRoomList()` and having the
+  test target its own room specifically. Confirmed with 4 consecutive
+  clean runs afterward.
+- **`#screen-rooms` used to default to `class="screen active"` in the raw
+  HTML** (so something was visible before JS ran) and the balance
+  placeholder used to be `"0.00 ETB"` -- both made the *first* E2E test
+  draft pass regardless of whether auth had actually succeeded, since a
+  real `"0.00 ETB"` balance is indistinguishable from the placeholder. No
+  screen defaults to active now; the loading placeholder is `"-- ETB"`, so
+  a genuine `"0.00 ETB"` is unambiguous proof `authed` arrived.
+
+**Design decisions**, not bugs:
+
+- **Amharic font is subsetted to the codepoints actually used, not the
+  full Ethiopic block.** Google's full "ethiopic" delivery is ~200KB, over
+  4x the spec's 40KB budget (Ethiopic is a syllabary -- hundreds of glyphs,
+  not a ~26-letter alphabet). Subsetting to the ~122 characters currently
+  used across `web/miniapp/locales/am.json` and the bot's `am`/`ti`
+  locales gets it to ~11.5KB. Tradeoff: a new Amharic string introducing a
+  character outside the current subset falls back to a system font for
+  that glyph until `fonts/subset.sh` is rerun -- documented in the script
+  itself and in `css/fonts.css`'s own comment, not just here.
+- **Gateway REST endpoints (`/api/me`, `/api/history`) added for the
+  wallet screen**, not just the WebSocket protocol. The spec's client→
+  server message list (§6.2) has no request for balance snapshot or
+  history; rather than force those through the realtime channel, they're
+  plain authenticated REST calls (`Authorization: tma <initData>`, same
+  `validate_init_data` boundary as the WS handshake) -- a normal read
+  doesn't need a persistent connection, and this matches the spec's own
+  architecture diagram showing "REST API" as a sibling to "WebSocket",
+  not something WebSocket-only.
+- **`state_sync` extended** with `stake`, `win_patterns`, `players`,
+  `derash`, `your_card_grid`, and `lobby_deadline_ms` -- Phase 3's version
+  only had what the (not-yet-built) Mini App's actual needs could reveal.
+  All sourced from Postgres, consistent with Phase 3's existing "state_sync
+  never depends on a live engine" principle.
+- **Mini App static files served by the gateway itself**
+  (`StaticFiles` mount on `/`), anchored to `services/gateway/app.py`'s own
+  file location rather than the process's cwd. Simplest path for local
+  dev/testing and a legitimate (if not final) production option; a real
+  deployment would likely put these behind a CDN instead, which is a pure
+  infra change with no code impact.
+- **Playwright is a dev-only, on-demand dependency** (`pytest -m e2e`,
+  same pattern as the load tests), not part of the default suite --
+  a Chromium binary is a heavy, environment-specific thing to require for
+  every contributor's default `pytest tests/` run.
+
+---
+
 ## 2026-08-22 — Phase 1 (Telegram bot, spec Prompt 5) scoping decisions
 
 - **`/deposit`, `/withdraw`, `/limits` honestly report "not available yet"**

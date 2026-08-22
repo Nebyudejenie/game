@@ -93,6 +93,38 @@ async def gateway_server():
     await asyncio.wait_for(task, timeout=10)
 
 
+def _find_fallback_chromium() -> str | None:
+    """Playwright's default launch() wants a small 'headless shell' binary;
+    some environments only manage to download the full Chromium build (a
+    flaky/rate-limited network can abort the headless-shell download
+    partway through while the earlier, larger Chromium download already
+    succeeded). If the full build is present, use it directly rather than
+    failing outright.
+    """
+    import glob
+    import pathlib
+
+    cache = pathlib.Path.home() / ".cache" / "ms-playwright"
+    matches = sorted(glob.glob(str(cache / "chromium-*" / "chrome-linux64" / "chrome")))
+    return matches[-1] if matches else None
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def browser():
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        try:
+            instance = await p.chromium.launch(args=["--no-sandbox"])
+        except Exception:
+            fallback = _find_fallback_chromium()
+            if fallback is None:
+                raise
+            instance = await p.chromium.launch(executable_path=fallback, args=["--no-sandbox"])
+        yield instance
+        await instance.close()
+
+
 def build_init_data(telegram_id: int, *, first_name: str = "Test", auth_date: int | None = None) -> str:
     """Builds a correctly HMAC-signed initData string against this test
     session's TELEGRAM_BOT_TOKEN, the same way a real Telegram client would.

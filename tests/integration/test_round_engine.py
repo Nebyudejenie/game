@@ -119,6 +119,65 @@ async def test_two_simultaneous_claims_split_derash_evenly(pool, redis, card_poo
         await asyncio.wait_for(task, timeout=10)
 
 
+async def test_same_user_double_claim_race_settles_exactly_once(pool, redis, card_pool, conn):
+    """Regression test: a real crash found by the Mini App's E2E test.
+
+    A single player can produce two independent valid claims for the same
+    round -- the server's own AUTO-mode scan and a client-sent `claim`
+    message racing each other (a player with client-side AUTO on, or a
+    manual double-tap). Both used to land in _pending_winners, crashing
+    round_winners' (round_id, user_id) primary key at settlement. Exactly
+    one must win; the other must be cleanly rejected, and settlement must
+    still complete.
+    """
+    room_id = await create_room(conn, stake=Decimal("20.00"), min_players=2, call_interval_ms=15)
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        user_a = await create_funded_user(conn)
+        user_b = await create_funded_user(conn)
+        card_a = 1
+
+        assert (await engine.join(user_a, card_a, auto_mark=False)).ok
+        assert (await engine.join(user_b, 2, auto_mark=False)).ok
+
+        await wait_until(lambda: engine.status == "running", timeout=5)
+
+        grid_a = card_pool[card_a]
+
+        def a_ready() -> bool:
+            return bool(bingo.winning_patterns(grid_a, engine._called, room.win_patterns))  # noqa: SLF001
+
+        await wait_until(a_ready, timeout=10)
+
+        results = await asyncio.gather(
+            engine.claim(user_a, source="auto"),
+            engine.claim(user_a, source="manual"),
+        )
+        oks = [r for r in results if r.ok]
+        rejected = [r for r in results if not r.ok]
+        assert len(oks) == 1, results
+        assert len(rejected) == 1 and rejected[0].reason == "already_claimed", results
+
+        await wait_until(lambda: engine.status == "idle", timeout=5)
+
+        round_row = await pool.fetchrow(
+            "SELECT id FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1", room_id
+        )
+        winners = await pool.fetch(
+            "SELECT user_id, amount FROM round_winners WHERE round_id = $1", round_row["id"]
+        )
+        assert len(winners) == 1
+        assert winners[0]["user_id"] == user_a
+
+        mismatches = await ledger.reconcile(conn)
+        assert mismatches == []
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
 async def test_claim_from_user_not_in_round_rejected_and_logged(pool, redis, card_pool, conn):
     room_id = await create_room(conn, stake=Decimal("20.00"), min_players=2, call_interval_ms=15)
     engine = await make_engine(pool, redis, card_pool, room_id)
