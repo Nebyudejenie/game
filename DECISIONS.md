@@ -5,6 +5,111 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-22 — Phase 5 (deposits, spec Prompt 7 / section 8.1-8.2)
+
+Built `services/payments/`: a provider-agnostic `PaymentProvider` Protocol
+(`provider.py`), a real Chapa adapter (`chapa.py`), the deposit domain logic
+(`deposits.py`: create a checkout intent, credit through the ledger on a
+verified webhook, a polling fallback, and a pure `reconcile()`), and a
+small FastAPI app (`app.py`) exposing the one surface that genuinely has to
+be a network endpoint -- the webhook Chapa's own servers POST to.
+
+**No live SantimPay/ArifPay credentials were provided this session** (the
+user confirmed having *some* credentials early on but never handed over
+actual values), so only the Chapa adapter was built, matching the spec's
+own Prompt 7 instruction ("Build ... a Chapa adapter first, structured so
+adding SantimPay is a new file and nothing else"). The `PaymentProvider`
+Protocol is what makes that literally true: `deposits.py` never imports
+`chapa` by name, only the Protocol.
+
+**Chapa's endpoint contract was fetched from developer.chapa.co (2026-08-22)
+rather than reconstructed from memory**, since getting a payment
+integration's wire format wrong is exactly the kind of mistake that's
+invisible until it costs real money: `POST /v1/transaction/initialize` for
+checkout creation, `GET /v1/transaction/verify/{tx_ref}` for polling,
+`POST /v1/transfers` for payouts, and the two-header webhook signature
+scheme (`x-chapa-signature` = HMAC-SHA256 of the raw body, `chapa-signature`
+= HMAC-SHA256 of the secret key itself, both keyed with the secret key --
+Chapa's own docs: "If either header is missing or the value does not
+match, discard the request"). Both are checked in `chapa.py`. The
+`/transaction/verify` and `/transfers` *response* body shapes weren't
+fully documented in what was fetched; `chapa.py` reads them through
+Chapa's standard `{"status", "message", "data"}` envelope, which is
+well-established across their whole API, and is not yet verified against a
+live sandbox call (no credentials to do that with -- see "not yet tested
+against a live rail" below).
+
+**A real gap in Phase 9 (responsible gaming) closed early, deliberately:**
+the spec's Prompt 9 wants self-exclusion to block deposits; that couldn't
+be built until deposits existed. `create_deposit_intent()` now checks
+`users.status = 'self_excluded'` and rejects with `DepositorSelfExcluded`
+before ever calling the provider -- covered by
+`test_self_excluded_user_cannot_deposit`. The rest of Prompt 9 (loss
+limits, cool-off, self-exclusion blocking play and marketing) is still
+open.
+
+**`create_deposit_intent()`'s exceptions are a class hierarchy
+(`BelowMinimumDeposit`, `DailyDepositCapExceeded`, `DepositorSelfExcluded`,
+`UnknownDepositor`, `DepositProviderError`), not one exception with a
+string `.reason` field.** Matches the existing
+`ContactMismatch`/`InvalidPhone`/`PhoneAlreadyRegistered` pattern in
+`services/bot/registration.py`, and sidesteps a real mechanical problem:
+`services/bot/handlers.py` has an AST-based test
+(`test_bot_no_hardcoded_strings.py`) that fails the build on any hardcoded
+string literal in that file, including inside a module-level
+`reason -> locale-key` lookup dict. Distinct exception types need no such
+table -- `except deposits.BelowMinimumDeposit:` is itself the dispatch.
+
+**`MIN_DEPOSIT_ETB` (10 ETB) and `DAILY_DEPOSIT_CAP_ETB` (50,000 ETB) are
+placeholder business parameters** -- `idea.md` never specifies exact
+figures for either. Configurable via `Settings`, easy to correct once the
+business has real numbers; not a load-bearing design choice.
+
+**Deliberately deferred, not built this pass:**
+- **Telegram bot deposit confirmation** (spec step 9: "Bot notification:
+  '✅ 200 ETB deposited...'"). The locale key (`notify.deposit_confirmed`)
+  already existed from an earlier phase, unused. What's missing is the
+  cross-process path: `services/payments` is a separate FastAPI process
+  from the bot, and `services/bot/handlers.py`'s own docstring makes
+  "nothing calls `bot.send_message` except `Notifier`" a load-bearing,
+  tested invariant -- so this needs a small Redis-Streams
+  notify-the-bot-process channel, not a direct call. Withdrawals (Phase 6)
+  need the exact same capability ("Bot notifies the user with the reason"),
+  so building it once for both is the plan rather than a rushed half now.
+  In the meantime, a depositing player still gets instant confirmation via
+  the live `balance_update` WebSocket push (below) if they're in the Mini
+  App, and can always check `/balance`.
+- **The Mini App's own deposit-amount UI** (spec's `[+]` button on the
+  wallet screen). The bot's `/deposit <amount>` command is the complete,
+  real entry point this pass; Phase 4's Mini App screens were already
+  reviewed and closed, and adding a full amount-picker screen there is a
+  frontend feature addition warranting its own pass rather than a
+  backend-phase add-on.
+- **Live testing against Chapa's actual sandbox.** Every test in
+  `tests/unit/test_chapa_provider.py` and
+  `tests/integration/test_payments_deposits.py` exercises the real
+  business logic (idempotency, row-locking, ledger crediting, amount
+  verification) against a `FakePaymentProvider` test double standing in
+  for Chapa's network -- the same reasoning every other test in this suite
+  uses a real local Postgres/Redis/gateway instead of a live external
+  dependency it can't safely or repeatably call. `chapa.py` itself has
+  never made a real network call. **This is the one honest gap in this
+  phase:** the adapter is built correctly against Chapa's documented
+  contract, but has not been proven against Chapa's own server, because no
+  real API key was available this session. That verification should happen
+  before any real money moves through it.
+
+**New in this phase, verified real (not test-only) end to end:** the
+`user:{id}` Redis pub/sub channel that `services/gateway/fanout.py` already
+subscribed to since Phase 3 -- built ahead of need, unused until now -- is
+what a deposit's ledger credit now publishes to
+(`deposits._publish_balance_update`), and `web/miniapp/js/app.js` now has a
+`balance_update` handler that updates the header and, if open, the wallet
+screen live. `test_webhook_pushes_live_balance_update_over_websocket`
+proves the whole chain: a real HTTP POST to `services/payments/app.py`'s
+webhook route credits the ledger and a real connected WebSocket receives
+the push, with no mocking anywhere in that path.
+
 ## 2026-08-22 — Phase 7 (admin console, spec section 33) — a real gap found while wiring the fairness-verification route
 
 Built the admin API as a fully separate FastAPI app (`services/admin/app.py`,

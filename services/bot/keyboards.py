@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, WebAppInfo
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    WebAppInfo,
+)
 
 from services.bot.i18n import t
 
@@ -14,6 +20,14 @@ def registration_keyboard(language: str) -> ReplyKeyboardMarkup:
             [KeyboardButton(text=t("register.instructions_button", language))],
         ],
         resize_keyboard=True,
+    )
+
+
+def deposit_checkout_keyboard(language: str, *, checkout_url: str, amount: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t("deposit.checkout_button", language, amount=amount), url=checkout_url)]
+        ]
     )
 
 

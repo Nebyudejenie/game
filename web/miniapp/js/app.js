@@ -456,6 +456,20 @@ function showToast(messageOrKey) {
 
 ws.on("error", (msg) => showToast(msg.message_am || msg.code));
 
+// A deposit (or any other out-of-round balance change) pushes this over the
+// user's own `user:{id}` channel (services/payments/deposits.py) -- the
+// header balance and, if it's currently open, the wallet screen both pick
+// it up live instead of waiting for the player to reopen the wallet tab.
+ws.on("balance_update", (msg) => {
+  const state = getState();
+  if (state.user) setState({ user: { ...state.user, balance: msg.cash } });
+  if (getState().screen === "wallet") {
+    el("wallet-cash").textContent = `${msg.cash} ETB`;
+    el("wallet-bonus").textContent = `${msg.bonus} ETB`;
+    el("wallet-locked").textContent = `${msg.locked} ETB`;
+  }
+});
+
 // --- Telegram back button -------------------------------------------------
 
 if (tg) {

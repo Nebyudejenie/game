@@ -7,6 +7,8 @@ literal) -- both are load-bearing invariants the tests check for.
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
+
 import asyncpg
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
@@ -17,7 +19,7 @@ from packages.core import ledger
 from packages.core.config import Settings
 from services.bot import referral
 from services.bot.i18n import SUPPORTED_LANGUAGES, resolve_language, t
-from services.bot.keyboards import main_menu_keyboard, registration_keyboard
+from services.bot.keyboards import deposit_checkout_keyboard, main_menu_keyboard, registration_keyboard
 from services.bot.notifier import Notifier
 from services.bot.registration import (
     ContactMismatch,
@@ -26,6 +28,8 @@ from services.bot.registration import (
     get_registered_user,
     register_from_contact,
 )
+from services.payments import deposits
+from services.payments.chapa import ChapaProvider
 
 router = Router(name="jobingo-bot")
 
@@ -232,12 +236,68 @@ async def cmd_support(message: Message, pool: asyncpg.Pool, notifier: Notifier) 
 
 
 @router.message(Command("deposit"))
-async def cmd_deposit(message: Message, pool: asyncpg.Pool, notifier: Notifier) -> None:
+async def cmd_deposit(
+    message: Message,
+    command: CommandObject,
+    pool: asyncpg.Pool,
+    notifier: Notifier,
+    settings: Settings,
+) -> None:
     assert message.from_user is not None
     language = await _language_for(pool, message.from_user.id)
-    if not await _require_registered(message, pool, notifier, language):
+    user = await get_registered_user(pool, message.from_user.id)
+    if user is None:
+        await notifier.send(message.chat.id, t("error.not_registered", language))
         return
-    await notifier.send(message.chat.id, t("deposit.not_available", language))
+
+    if not settings.chapa_api_key or not settings.public_base_url:
+        await notifier.send(message.chat.id, t("deposit.not_available", language))
+        return
+
+    raw_amount = (command.args or "").strip()
+    if not raw_amount:
+        await notifier.send(message.chat.id, t("deposit.usage", language, min=str(settings.min_deposit_etb)))
+        return
+    try:
+        amount = Decimal(raw_amount)
+    except InvalidOperation:
+        amount = None
+    if amount is None or amount <= 0:
+        await notifier.send(message.chat.id, t("deposit.invalid_amount", language))
+        return
+
+    provider = ChapaProvider(settings.chapa_api_key)
+    try:
+        intent = await deposits.create_deposit_intent(
+            pool,
+            provider,
+            user_id=user.id,
+            amount=amount,
+            phone_e164=user.phone_e164,
+            return_url=f"{settings.public_base_url}/deposit/return",
+            min_deposit=settings.min_deposit_etb,
+            daily_cap=settings.daily_deposit_cap_etb,
+        )
+    except deposits.BelowMinimumDeposit:
+        await notifier.send(
+            message.chat.id, t("deposit.below_minimum", language, min=str(settings.min_deposit_etb))
+        )
+        return
+    except deposits.DailyDepositCapExceeded:
+        await notifier.send(message.chat.id, t("deposit.daily_cap_exceeded", language))
+        return
+    except deposits.DepositorSelfExcluded:
+        await notifier.send(message.chat.id, t("deposit.self_excluded", language))
+        return
+    except (deposits.UnknownDepositor, deposits.DepositProviderError):
+        await notifier.send(message.chat.id, t("deposit.provider_error", language))
+        return
+
+    await notifier.send(
+        message.chat.id,
+        t("deposit.checkout_ready", language, amount=str(amount)),
+        reply_markup=deposit_checkout_keyboard(language, checkout_url=intent.checkout_url, amount=str(amount)),
+    )
 
 
 @router.message(Command("withdraw"))

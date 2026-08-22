@@ -16,6 +16,10 @@ import uvicorn
 # read is what the whole suite gets -- including the gateway app under test,
 # which needs a token the test's own initData-building helper also knows.
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-bot-token-for-suite")
+# Same reasoning for the payments app under test: it builds a real
+# ChapaProvider from settings.chapa_api_key at startup, so a webhook test
+# needs to know the exact secret to sign its test payloads with.
+os.environ.setdefault("CHAPA_API_KEY", "test-chapa-secret-for-suite")
 
 from packages.core import ledger
 from packages.core.config import get_settings
@@ -120,6 +124,33 @@ async def admin_server():
         await asyncio.sleep(0.05)
     else:
         raise RuntimeError("admin server did not start in time")
+
+    yield f"http://127.0.0.1:{port}"
+
+    server.should_exit = True
+    await asyncio.wait_for(task, timeout=10)
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def payments_server():
+    """Runs the real payments API (services/payments/app.py) via uvicorn --
+    same rationale as gateway_server/admin_server: the webhook route is the
+    one HTTP surface a payment provider's server actually reaches, so it's
+    tested as a genuine HTTP endpoint, not an in-process function call.
+    """
+    from services.payments.app import app as payments_app
+
+    port = _free_port()
+    config = uvicorn.Config(payments_app, host="127.0.0.1", port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    task = asyncio.create_task(server.serve())
+
+    for _ in range(200):
+        if server.started:
+            break
+        await asyncio.sleep(0.05)
+    else:
+        raise RuntimeError("payments server did not start in time")
 
     yield f"http://127.0.0.1:{port}"
 

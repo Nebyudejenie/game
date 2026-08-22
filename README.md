@@ -174,6 +174,41 @@ above.
   screen, authenticated the same `Authorization: tma <initData>` way as
   the WebSocket handshake.
 
+**Deposits (Phase 5):**
+- **`services/payments/provider.py`** — a provider-agnostic
+  `PaymentProvider` Protocol (`create_checkout` / `verify_webhook` /
+  `fetch_status` / `create_payout`); nothing in the deposit logic imports a
+  specific rail by name.
+- **`services/payments/chapa.py`** — the real Chapa adapter (Ethiopia's
+  primary rail): checkout creation, the two-header HMAC-SHA256 webhook
+  signature scheme Chapa's own docs require both of, status polling, and
+  payout creation. Endpoint paths and the signature scheme were confirmed
+  against Chapa's live developer docs, not reconstructed from memory.
+- **`services/payments/deposits.py`** — `create_deposit_intent()` (minimum
+  amount, daily cap, self-exclusion all checked before a provider is ever
+  called), `handle_webhook()` and `poll_pending_deposits()` sharing one
+  crediting path so a late webhook after a successful poll is a structural
+  no-op, and a pure `reconcile()` for the hourly settlement-report
+  comparison job. Every credit goes through `packages/core/ledger.py` with
+  `idempotency_key = our_ref`, the exact same discipline as round
+  settlement.
+- **`services/payments/app.py`** — the one real inbound HTTP surface:
+  `POST /webhooks/chapa`, signature-verified before anything else runs.
+  Deposit *creation* is a plain Python call from the bot, the same way the
+  bot already reads/writes the ledger directly for `/balance`.
+- **`services/bot/handlers.py`**'s `/deposit <amount>` now actually works
+  end to end — checkout link, real validation errors, no more "launching
+  soon" once `CHAPA_API_KEY`/`PUBLIC_BASE_URL` are configured.
+- A deposit's ledger credit publishes to the `user:{id}` Redis channel
+  `services/gateway/fanout.py` has subscribed to since Phase 3 (built ahead
+  of need, unused until now); `web/miniapp/js/app.js` picks it up live —
+  the header balance and an open wallet screen update without a reload.
+
+Only SantimPay/ArifPay were left unbuilt (no live credentials for either
+were available this session), and live testing against Chapa's own sandbox
+hasn't happened for the same reason — see `DECISIONS.md` for exactly what
+that means and what's still open before real money should move through it.
+
 **Admin console (Phase 7):**
 - **`services/admin/auth.py`** — a completely separate authentication path
   from players: username + bcrypt password + TOTP 2FA, Redis-backed session
@@ -230,5 +265,12 @@ against a real `uvicorn` server, RBAC denying/allowing per role, session
 logout actually invalidating a token, and the audit log's immutability
 trigger firing on a direct `UPDATE`/`DELETE` attempt — which is how a real
 Phase 2 gap (the provably-fair `server_seed` was never durably persisted)
-got found and fixed; see `DECISIONS.md`. `mypy --strict` is clean across the
+got found and fixed, and the exact four scenarios spec Prompt 7 calls out
+by name for deposits: the same webhook delivered 100 times concurrently
+credits exactly once, an invalid signature is rejected before the database
+is even touched, a webhook arriving after a successful poll is a no-op,
+and a mismatched amount does not credit -- plus a real HTTP POST to the
+payments webhook route crediting the ledger and a live-connected
+WebSocket actually receiving the resulting `balance_update` push, no
+mocking anywhere in that chain; see `DECISIONS.md`. `mypy --strict` is clean across the
 whole codebase.

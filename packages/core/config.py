@@ -5,6 +5,7 @@ Nothing here should ever hold a literal secret -- only the *names* of the env
 vars that carry them.
 """
 
+from decimal import Decimal
 from functools import lru_cache
 
 from pydantic import Field
@@ -38,6 +39,14 @@ class Settings(BaseSettings):
     chapa_api_key: str = ""
     santimpay_api_key: str = ""
     arifpay_api_key: str = ""
+    # Public HTTPS base URL this deployment is reachable at -- used to build
+    # the webhook/return URLs handed to a payment provider at checkout
+    # creation. Empty means honestly refuse to start a deposit rather than
+    # hand a provider a URL pointing nowhere (same "not available yet"
+    # discipline as miniapp_url before Phase 4).
+    public_base_url: str = ""
+    min_deposit_etb: Decimal = Decimal("10.00")
+    daily_deposit_cap_etb: Decimal = Decimal("50000.00")
 
     # Phase 7 -- comma-separated IPs; empty means unrestricted (dev-friendly
     # default). Set for production: admin console should only be reachable

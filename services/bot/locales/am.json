@@ -20,6 +20,14 @@
   "balance.summary": "ካሽ: {cash} ብር\nቦነስ: {bonus} ብር\nየተያዘ: {locked} ብር",
 
   "deposit.not_available": "ገቢ ማድረግ በቅርቡ ይጀምራል። እባክዎ ትንሽ ይታገሱ።",
+  "deposit.usage": "አጠቃቀም፦ /deposit <መጠን>። ዝቅተኛው {min} ብር ነው።",
+  "deposit.invalid_amount": "እባክዎ ትክክለኛ መጠን ያስገቡ፣ ለምሳሌ፦ /deposit 200",
+  "deposit.below_minimum": "ዝቅተኛው ገቢ {min} ብር ነው።",
+  "deposit.daily_cap_exceeded": "የዛሬውን የገቢ ገደብ ደርሰዋል። እባክዎ ነገ እንደገና ይሞክሩ።",
+  "deposit.self_excluded": "አካውንትዎ በራስ-ገደብ ላይ ስለሆነ ገቢ ማድረግ አይችሉም።",
+  "deposit.provider_error": "ገቢዎን አሁን መጀመር አልተቻለም። እባክዎ ትንሽ ቆይተው ይሞክሩ።",
+  "deposit.checkout_ready": "የ{amount} ብር ገቢዎን ለማጠናቀቅ ከታች ያለውን ይጫኑ።",
+  "deposit.checkout_button": "💳 {amount} ብር ይክፈሉ",
   "withdraw.not_available": "ወጪ ማድረግ በቅርቡ ይጀምራል። እባክዎ ትንሽ ይታገሱ።",
   "limits.not_available": "የጨዋታ ገደቦች ቅንብር በቅርቡ ይጀምራል።",
 
