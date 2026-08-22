@@ -5,6 +5,78 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-22 — Phase 7 (admin console, spec section 33) — a real gap found while wiring the fairness-verification route
+
+Built the admin API as a fully separate FastAPI app (`services/admin/app.py`,
+distinct process/port from the player-facing gateway): username + bcrypt
+password + TOTP 2FA login, Redis-backed session tokens (not JWT, so a
+session is server-side revocable on logout — matters for an admin console
+more than for players), RBAC via a single `has_permission(role, permission)`
+function checked on every mutating and every viewing route, and an
+append-only audit log enforced at the database level (`BEFORE UPDATE OR
+DELETE` trigger that raises rather than a convention nobody can verify).
+Every mutation that touches money (`adjust_balance`, `void_round_admin`)
+goes through `packages/core/ledger.py` like any other money movement —
+no route in `services/admin/app.py` ever writes a balance directly.
+
+**Real bug found, not a test bug:** building `get_round_fairness()` (the
+route a regulator or a suspicious player would use to verify a finished
+round's draw was not rigged) surfaced that `services/engine/round_engine.py`
+never actually persisted the revealed `server_seed` to the `rounds` table —
+only `server_seed_hash` (written at round start, for the commit half of the
+commit-reveal scheme) and `draw_order` (written when the round starts
+running) were ever saved. The actual `server_seed` bytes lived only in the
+engine's in-memory state and were broadcast once over Redis pub/sub in the
+`round_end` message — an ephemeral, unsubscribed-and-it's-gone channel, not
+a queryable record. That made independent, after-the-fact fairness
+verification structurally impossible for any round nobody happened to be
+connected for at the exact moment it ended, which defeats the entire point
+of a provably-fair scheme (the "provable" part requires the proof to still
+exist later). Fixed by persisting `server_seed` to `rounds` in both terminal
+paths: `_settle_with_winners()` (winner found) and the exhausted/no-winner
+refund path in `_run_calling_phase()`. Caught by writing
+`test_round_fairness_verification_matches_a_real_round`, which failed with
+`fairness["revealed"] is False` against a round that had genuinely
+finished — not a fixture/timing bug, the column was just always NULL.
+
+Two other issues fixed in `tests/integration/test_admin_queries.py` while
+building this, both narrow test bugs rather than app bugs (documented per
+the same discipline as Phase 3/4's test-vs-app-bug calls):
+- `test_search_users_finds_by_phone_fragment` hardcoded the literal phone
+  `+251911223344`, which collided with `phone_e164`'s UNIQUE constraint on
+  any second run against the same long-lived test database. Added
+  `unique_phone()` to `tests/integration/conftest.py` (same counter pattern
+  already used for `next_telegram_id()`, and already existed independently,
+  duplicated, in `test_bot_handlers.py`) and switched this test to it.
+- Three `RoundEngine`-backed tests used `lobby_seconds=30` with a 10s
+  `asyncio.wait_for(task, timeout=10)` on `engine.stop()`. This is a real,
+  narrow characteristic of `_run_lobby()` (it doesn't poll
+  `self._stop_requested` inside its wait, so `stop()` can't interrupt a long
+  lobby wait promptly) — deliberately not "fixed" in the engine itself,
+  since a slow-to-cancel lobby wait is harmless in production and every
+  other engine test already uses short `lobby_seconds` for exactly this
+  reason. Brought these three into line instead (`lobby_seconds=5`).
+
+Also: `asyncpg` returns `jsonb` columns as raw JSON text with no codec
+registered (true everywhere else in this codebase too) — a test asserting
+into `admin_audit_log.before`/`after` needed `json.loads()` first. Noted as
+a possible future global fix (register a `jsonb` → `dict` codec on the pool
+once, instead of every call site doing it ad hoc) but not made this pass —
+touching pool-wide codec config this late in a session isn't worth the risk
+for a cosmetic convenience.
+
+Wrote `tests/integration/test_admin_app.py` for the HTTP layer specifically
+(real `uvicorn` server via a new `admin_server` fixture mirroring the
+existing `gateway_server` one — genuine requests through the actual
+FastAPI dependency chain, not RBAC asserted by calling `has_permission()`
+directly): login end-to-end, bearer-token rejection, RBAC enforced per-role
+over real HTTP (`support` blocked from `/users/{id}/adjust`, `finance`
+allowed and money actually moves), audit-log route restricted to
+`superadmin`, logout actually invalidating the session, IP allowlist
+returning 403 for a disallowed source, and the audit log's immutability
+trigger firing on a direct `UPDATE`/`DELETE` attempt. All ran green first
+try against a from-scratch `docker compose down -v` rebuild.
+
 ## 2026-08-22 — Phase 4 (Mini App, spec's Mini App UI Specification) — real bugs found by actually testing in a browser
 
 This phase is the reason the CTO instructions insist on testing UI in a

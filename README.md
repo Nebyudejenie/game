@@ -174,6 +174,43 @@ above.
   screen, authenticated the same `Authorization: tma <initData>` way as
   the WebSocket handshake.
 
+**Admin console (Phase 7):**
+- **`services/admin/auth.py`** — a completely separate authentication path
+  from players: username + bcrypt password + TOTP 2FA, Redis-backed session
+  tokens (server-side revocable on logout, unlike a JWT), and login failures
+  that all raise the same generic error regardless of which check failed
+  (unknown username, wrong password, wrong code) so the error text itself
+  can't be used to enumerate usernames or probe 2FA status.
+- **`services/admin/rbac.py`** — a single `PERMISSIONS` dict mapping each
+  permission to the roles allowed to use it (`support` / `finance` / `ops` /
+  `superadmin`), checked through one `has_permission()` function on every
+  route — no scattered role checks to get out of sync.
+- **`services/admin/queries.py`** — every admin action that touches money
+  (`adjust_balance`, `void_round_admin`) goes through
+  `packages/core/ledger.py` like any other transaction, never a direct
+  balance write; every mutation writes an audit log row with before/after
+  state.
+- **`services/admin/audit.py`** + a migration — `admin_audit_log` is
+  append-only at the database level: a `BEFORE UPDATE OR DELETE` trigger
+  raises rather than relying on convention.
+- **`services/admin/app.py`** — the FastAPI admin API: dashboard summary,
+  user search/detail/ledger history, balance adjustment, user status
+  (suspend/self-exclude), round list/detail, the fairness-verification
+  route (`GET /rounds/{id}/fairness` — reveals the committed `server_seed`
+  once a round is terminal and independently re-verifies the draw), admin
+  round voiding, room CRUD, a daily GGR report, and the audit log itself
+  (restricted to `superadmin`) — plus an optional source-IP allowlist.
+
+Building the fairness route surfaced a real gap in Phase 2:
+`round_engine.py` was committing to `server_seed_hash` up front (correct)
+but never actually persisting the revealed `server_seed` anywhere durable
+once a round finished — it only ever went out once over an ephemeral Redis
+pub/sub message. Fixed so `rounds.server_seed` is written at both terminal
+points (settlement and exhausted/no-winner refund), making historical
+fairness verification actually possible instead of only "provable" for
+whoever happened to be connected at the exact second the round ended. See
+`DECISIONS.md`.
+
 Covered end to end by `tests/`, including the tests that actually matter: a
 35-player round settling to the cent (700 pot → 560 derash → 140 house), two
 simultaneous claims splitting a derash evenly, a killed engine mid-round
@@ -188,5 +225,10 @@ end to end through a real aiogram Dispatcher, a duplicate Telegram
 actual round against the real backend (auth → fund → join → take a card →
 watch live calls render → confirm the stake actually happened in the
 ledger) — which is how three real bugs invisible to every other test got
-found and fixed; see `DECISIONS.md`. `mypy --strict` is clean across the
+found and fixed, and an admin console's fairness route sent over real HTTP
+against a real `uvicorn` server, RBAC denying/allowing per role, session
+logout actually invalidating a token, and the audit log's immutability
+trigger firing on a direct `UPDATE`/`DELETE` attempt — which is how a real
+Phase 2 gap (the provably-fair `server_seed` was never durably persisted)
+got found and fixed; see `DECISIONS.md`. `mypy --strict` is clean across the
 whole codebase.

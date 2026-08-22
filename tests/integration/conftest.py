@@ -26,10 +26,18 @@ from services.engine.round_engine import load_card_pool
 # seeded randomly so re-runs of the suite never collide with leftover rows
 # from a previous run against the same database.
 _telegram_id_counter = itertools.count(random.randint(10**9, 2 * 10**9))
+_phone_counter = itertools.count(random.randint(10_000_000, 20_000_000))
 
 
 def next_telegram_id() -> int:
     return next(_telegram_id_counter)
+
+
+def unique_phone() -> str:
+    # phone_e164 is UNIQUE at the database level -- every test that
+    # registers a user with a phone number needs its own, the same as it
+    # needs its own telegram_id.
+    return f"+2519{next(_phone_counter):08d}"
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
@@ -88,6 +96,32 @@ async def gateway_server():
         raise RuntimeError("gateway server did not start in time")
 
     yield f"ws://127.0.0.1:{port}/ws"
+
+    server.should_exit = True
+    await asyncio.wait_for(task, timeout=10)
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def admin_server():
+    """Runs the real admin API (services/admin/app.py) via uvicorn, on this
+    same event loop -- same rationale as gateway_server: tests exercise the
+    genuine HTTP/RBAC/dependency-injection stack, not an in-process shortcut.
+    """
+    from services.admin.app import app as admin_app
+
+    port = _free_port()
+    config = uvicorn.Config(admin_app, host="127.0.0.1", port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    task = asyncio.create_task(server.serve())
+
+    for _ in range(200):
+        if server.started:
+            break
+        await asyncio.sleep(0.05)
+    else:
+        raise RuntimeError("admin server did not start in time")
+
+    yield f"http://127.0.0.1:{port}"
 
     server.should_exit = True
     await asyncio.wait_for(task, timeout=10)

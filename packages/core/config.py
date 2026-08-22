@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     santimpay_api_key: str = ""
     arifpay_api_key: str = ""
 
+    # Phase 7 -- comma-separated IPs; empty means unrestricted (dev-friendly
+    # default). Set for production: admin console should only be reachable
+    # from a known office/VPN range.
+    admin_ip_allowlist: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

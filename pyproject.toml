@@ -12,6 +12,8 @@ dependencies = [
     "redis>=5.0",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
+    "bcrypt>=4.1",
+    "pyotp>=2.9",
 ]
 
 [project.optional-dependencies]

@@ -503,6 +503,9 @@ class RoundEngine:
             assert round_id is not None
             assert self._server_seed is not None
             await refunds.refund_round(self._pool, round_id, reason="exhausted_no_winner")
+            await self._pool.execute(
+                "UPDATE rounds SET server_seed = $2 WHERE id = $1", round_id, self._server_seed
+            )
             await self._publish_room(
                 {
                     "t": "round_end",
@@ -614,9 +617,11 @@ class RoundEngine:
                     )
 
                 await conn.execute(
-                    "UPDATE rounds SET status = 'done', derash = $2, ended_at = now() WHERE id = $1",
+                    "UPDATE rounds SET status = 'done', derash = $2, server_seed = $3, "
+                    "ended_at = now() WHERE id = $1",
                     round_id,
                     derash,
+                    self._server_seed,
                 )
 
         await self._publish_room(
