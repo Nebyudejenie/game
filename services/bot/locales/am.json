@@ -29,6 +29,13 @@
   "deposit.checkout_ready": "የ{amount} ብር ገቢዎን ለማጠናቀቅ ከታች ያለውን ይጫኑ።",
   "deposit.checkout_button": "💳 {amount} ብር ይክፈሉ",
   "withdraw.not_available": "ወጪ ማድረግ በቅርቡ ይጀምራል። እባክዎ ትንሽ ይታገሱ።",
+  "withdraw.usage": "አጠቃቀም፦ /withdraw <መጠን> <ቴሌብር ቁጥር> <ሙሉ ስም>። ዝቅተኛው {min} ብር ነው።",
+  "withdraw.invalid_amount": "እባክዎ ትክክለኛ መጠን ያስገቡ፣ ለምሳሌ፦ /withdraw 200 0911223344 አበበ ከበደ",
+  "withdraw.below_minimum": "ዝቅተኛው ወጪ {min} ብር ነው።",
+  "withdraw.kyc_required": "ይህ መጠን መጀመሪያ የማንነት ማረጋገጫ ይፈልጋል። እባክዎ ድጋፍን ያግኙ።",
+  "withdraw.recent_deposit": "ለደህንነትዎ፣ ገቢ ካደረጉ በኋላ ላለ ጥቂት ጊዜ ወጪ ማድረግ አይቻልም። እባክዎ ቆየት ብለው ይሞክሩ።",
+  "withdraw.requested_approved": "✅ የ{amount} ብር ወጪ ጥያቄ ጸድቋል። በመንገድ ላይ ነው።",
+  "withdraw.requested_review": "የ{amount} ብር ወጪ ጥያቄ ገብቷል። እየተገመገመ ነው፣ ሲጠናቀቅ ይነገርዎታል።",
   "limits.not_available": "የጨዋታ ገደቦች ቅንብር በቅርቡ ይጀምራል።",
 
   "history.header": "የቅርብ ጊዜ የጨዋታ እና የገንዘብ እንቅስቃሴዎችዎ፦",

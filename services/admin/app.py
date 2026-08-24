@@ -258,6 +258,57 @@ async def void_round(
     return {"refunded": refunded}
 
 
+# --- withdrawals -----------------------------------------------------------
+
+
+@app.get("/withdrawals")
+async def list_pending_withdrawals(
+    admin: Annotated[AdminSession, Depends(require("payments:view"))],
+) -> list[dict[str, Any]]:
+    return await queries.list_pending_withdrawals(app.state.pool)
+
+
+class WithdrawalDecisionRequest(BaseModel):
+    reason: str
+
+
+@app.post("/withdrawals/{payment_id}/approve")
+async def approve_withdrawal(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("payments:approve"))],
+    payment_id: int,
+    body: WithdrawalDecisionRequest,
+) -> dict[str, bool]:
+    approved = await queries.approve_withdrawal_admin(
+        app.state.pool,
+        app.state.redis,
+        admin_id=admin.admin_id,
+        payment_id=payment_id,
+        reason=body.reason or None,
+        ip_address=_client_ip(request),
+    )
+    return {"approved": approved}
+
+
+@app.post("/withdrawals/{payment_id}/reject")
+async def reject_withdrawal(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("payments:approve"))],
+    payment_id: int,
+    body: WithdrawalDecisionRequest,
+) -> dict[str, bool]:
+    if not body.reason.strip():
+        raise HTTPException(status_code=422, detail="reason is required")
+    rejected = await queries.reject_withdrawal_admin(
+        app.state.pool,
+        admin_id=admin.admin_id,
+        payment_id=payment_id,
+        reason=body.reason,
+        ip_address=_client_ip(request),
+    )
+    return {"rejected": rejected}
+
+
 # --- rooms ---------------------------------------------------------------
 
 

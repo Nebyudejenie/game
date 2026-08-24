@@ -209,6 +209,47 @@ were available this session), and live testing against Chapa's own sandbox
 hasn't happened for the same reason — see `DECISIONS.md` for exactly what
 that means and what's still open before real money should move through it.
 
+**Withdrawals (Phase 6):**
+- **`services/payments/withdrawals.py`** — `request_withdrawal()`: the
+  validation gate (minimum amount, KYC level above a threshold, no
+  succeeded deposit in the chargeback window), then the spec's own
+  "single most important step" — funds move `user_cash → user_locked`
+  through the ledger in the *same transaction* that creates the
+  `payments` row, so there is no window in which a player can both
+  request a withdrawal and stake the same birr. Bonus funds are excluded
+  structurally (only `user_cash` is ever debited), not by a conditional
+  check. Auto-approves under a configurable limit (account age, amount,
+  lifetime deposits ≥ withdrawals); otherwise lands in the admin review
+  queue.
+- **`services/payments/payout_worker.py`** — a real Redis Streams
+  consumer group (the first one in this codebase), so more than one
+  worker replica can safely share the payout queue and a crashed
+  worker's in-flight job gets redelivered rather than lost. Exactly-once
+  *dispatch* is the provider's own job (`our_ref` is passed as Chapa's
+  idempotency reference), so it's safe — not just tolerated — for a
+  redelivered job to call `create_payout()` again; what this module
+  guarantees on its own side is that a payment already in a terminal
+  state is never re-settled, via the same `ledger.post()` idempotency-key
+  discipline used everywhere else in this codebase. Failure or explicit
+  rejection reverses the lock, returning the exact amount to `user_cash`.
+- **`services/admin/queries.py`** gained the review queue:
+  `list_pending_withdrawals`, `approve_withdrawal_admin` (audit-logged,
+  enqueues the real payout job), `reject_withdrawal_admin`
+  (ledger-reversed, audit-logged) — both safe no-ops if the payment isn't
+  in `review` any more. New RBAC permissions `payments:view` and
+  `payments:approve`.
+- **`services/bot/handlers.py`**'s `/withdraw <amount> <telebirr number>
+  <full name>` works end to end — real validation errors, real
+  auto-approve-vs-review outcome reported back to the player.
+
+Two real, open gaps from spec 8.3/8.4's anti-fraud rules, not oversights:
+holder-name-matches-account-name can't be meaningfully checked without a
+real KYC/identity pipeline (comparing against Telegram's self-reported
+display name would be theater, not a control), and the auto-approve rule's
+"risk score below threshold" has no risk-scoring system to check against —
+none of spec 8.4's collusion/device-fingerprint/velocity flags are built.
+See `DECISIONS.md`.
+
 **Admin console (Phase 7):**
 - **`services/admin/auth.py`** — a completely separate authentication path
   from players: username + bcrypt password + TOTP 2FA, Redis-backed session
@@ -272,5 +313,13 @@ is even touched, a webhook arriving after a successful poll is a no-op,
 and a mismatched amount does not credit -- plus a real HTTP POST to the
 payments webhook route crediting the ledger and a live-connected
 WebSocket actually receiving the resulting `balance_update` push, no
-mocking anywhere in that chain; see `DECISIONS.md`. `mypy --strict` is clean across the
+mocking anywhere in that chain, and for withdrawals: a real
+`RoundEngine.join()` failing with `insufficient_funds` right after a
+withdrawal locks the same balance, a genuinely concurrent
+`asyncio.gather` of a stake and a withdrawal against the same money
+proving at most one ever succeeds, a simulated crashed payout worker
+whose redelivered job still settles to the ledger exactly once even
+though the (idempotent-on-`our_ref`) provider gets called again, and a
+rejected payout returning the exact amount to `user_cash`; see
+`DECISIONS.md`. `mypy --strict` is clean across the
 whole codebase.

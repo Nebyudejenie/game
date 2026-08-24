@@ -25,6 +25,7 @@ from packages.core import ledger
 from packages.core.config import get_settings
 from packages.core.redis_conn import get_redis
 from services.engine.round_engine import load_card_pool
+from services.payments.withdrawals import PAYOUT_STREAM
 
 # Every test that needs a fresh user picks the next id off this counter,
 # seeded randomly so re-runs of the suite never collide with leftover rows
@@ -63,6 +64,18 @@ async def redis():
     r = get_redis()
     yield r
     await r.aclose()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def clean_payout_stream(redis):
+    """The 'payouts' Redis Stream (services/payments/withdrawals.py) is
+    real, shared, session-lived state -- a withdrawal test can legitimately
+    enqueue a real job onto it without ever consuming it. Clearing it before
+    every test keeps payout_worker.process_next()'s "the next job"
+    unambiguous, the same reasoning next_telegram_id()/unique_phone() exist
+    for uniqueness collisions, just applied to a shared queue instead.
+    """
+    await redis.delete(PAYOUT_STREAM)
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")

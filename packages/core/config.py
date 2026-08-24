@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     public_base_url: str = ""
     min_deposit_etb: Decimal = Decimal("10.00")
     daily_deposit_cap_etb: Decimal = Decimal("50000.00")
+    min_withdraw_etb: Decimal = Decimal("50.00")
+    # Auto-approved without landing in the admin review queue.
+    auto_approve_withdraw_etb: Decimal = Decimal("2000.00")
+    # kyc_level must be >= 2 for any withdrawal above this amount.
+    kyc_required_above_etb: Decimal = Decimal("5000.00")
+    # A succeeded deposit within this window blocks a withdrawal request --
+    # the chargeback window on a reversible rail (spec 8.3).
+    withdraw_chargeback_window_minutes: int = 30
 
     # Phase 7 -- comma-separated IPs; empty means unrestricted (dev-friendly
     # default). Set for production: admin console should only be reachable

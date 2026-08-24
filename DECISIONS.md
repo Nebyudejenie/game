@@ -5,6 +5,122 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-24 — Phase 6 (withdrawals, spec Prompt 8 / section 8.3-8.4)
+
+Built the payout side: `services/payments/withdrawals.py` (validation gate,
+instant fund-lock, auto-approve rule, admin review queue hooks) and
+`services/payments/payout_worker.py` (a real Redis Streams consumer group
+-- the first one in this codebase; `services/engine/commands.py`'s own
+comment already flagged the payout queue as the place consumer groups
+would eventually be needed, unlike the per-room command stream which only
+ever has one reader).
+
+**"The single most important step" (the spec's own words) is tested
+directly, not just by inference:** `request_withdrawal()` moves
+`user_cash -amount` / `user_locked +amount` through `ledger.post()` inside
+the same transaction that creates the `payments` row -- there is no
+`await` between "decide to lock" and "lock is committed". Proved by
+`test_withdrawal_locks_funds_immediately_so_a_later_stake_fails` (a
+withdrawal for a user's entire balance, followed by a real
+`RoundEngine.join()` attempt, which correctly fails with
+`insufficient_funds`) and, for the actually-concurrent case, by
+`test_concurrent_withdrawal_and_stake_never_both_succeed` (`asyncio.gather`
+on both against the same balance; exactly one succeeds, regardless of
+which). Bonus funds are excluded from withdrawals structurally, not by a
+conditional check -- `request_withdrawal()` only ever debits `user_cash`,
+never `user_bonus`, so `test_bonus_funds_cannot_be_withdrawn` is really
+testing that the ledger's own `InsufficientFunds` fires when only
+`user_bonus` is funded.
+
+**Exactly-once payout dispatch is the provider's job, not the worker's --
+and the worker is written to assume that, not fight it.** Spec: "a crashed
+payout worker mid-job → the job is redelivered and the provider is called
+exactly once (via our_ref idempotency)." Read literally, a worker cannot
+itself guarantee it calls an external API exactly once across a crash --
+what it *can* guarantee is passing the same `our_ref` every time, and
+trusting the provider to treat that as an idempotency key (this is also
+what `chapa.py`'s `create_payout()` already does: `our_ref` goes into
+Chapa's own `reference` field). So `payout_worker.process_one()` is safe to
+call `provider.create_payout()` again after a redelivery -- it only skips
+work for a payment already in a *terminal* state (`succeeded`/`failed`),
+never for `processing` (which is exactly the state a crash mid-call would
+leave behind).
+`test_crashed_worker_job_is_redelivered_and_settles_exactly_once` simulates
+the crash directly (forces a payment into `processing`, as if a previous
+worker died right after that transition) and confirms the
+ledger still settles exactly once (one `ledger_transactions` row for the
+`payout-settle-{our_ref}` idempotency key) even though the provider's
+`create_payout` genuinely gets called again.
+
+**The consumer group reads each worker's own pending entries (id `"0"`)
+before new ones (id `">"`)**, so a worker that restarts under the same
+consumer name picks its own abandoned jobs back up without needing
+`XCLAIM`/`XAUTOCLAIM` across different consumer identities -- deliberately
+the simplest mechanism that satisfies the spec's own test list; reclaiming
+a *different* crashed consumer's pending entries (for a multi-replica
+deployment where the dead consumer never comes back) is a real gap, noted
+below.
+
+**`kyc_level` (0-2) already existed on `users` since Phase 0's own schema**
+(present in the original ledger-foundation migration, unused until now) --
+no new migration needed for the KYC gate. `MIN_WITHDRAW_ETB` (50 ETB),
+`AUTO_APPROVE_WITHDRAW_ETB` (2,000 ETB), and `KYC_REQUIRED_ABOVE_ETB`
+(5,000 ETB) are placeholder business parameters, same caveat as Phase 5's
+deposit constants -- `idea.md` gives example figures in prose, not
+authoritative ones.
+
+**Two anti-fraud rules from spec 8.3's validation gate were deliberately
+NOT built, and are real, open gaps, not oversights:**
+- **"Payout method holder_name matches account name."** This codebase has
+  no independent identity-verification source to check a claimed holder
+  name against -- Telegram's `display_name` is self-reported and trivially
+  spoofable, so comparing against it would be theater, not a real control.
+  Building this for real needs an actual KYC/identity pipeline, which is
+  out of scope for this pass. `request_withdrawal()` accepts whatever
+  holder name the bot command supplies.
+- **"Risk score below threshold" (part of the auto-approve rule).** No
+  risk-scoring system exists (spec 8.4's collusion/device-fingerprint/
+  velocity flags are all unbuilt -- `risk_flags` was never more than a
+  placeholder table name in the spec's own section 4.5). The auto-approve
+  rule here checks amount, account age, and lifetime-deposits-vs-
+  withdrawals only; every anti-fraud rule in spec 8.4's table is unbuilt.
+
+**Bot UX is deliberately minimal, not the full spec flow.** `/deposit`
+already collects only an amount (Phase 5); `/withdraw <amount>
+<telebirr number> <full name>` follows the same reasoning -- a single
+space-separated command instead of a multi-step aiogram FSM conversation
+for choosing a payout method from a saved list. There is no "saved payout
+methods" UX; every withdrawal takes a fresh `payment_methods` upsert
+(the table itself, and its `(user_id, kind, account_ref)` unique
+constraint, already existed from Phase 5's migration). Method kind is
+hardcoded to `telebirr` (`withdrawals.DEFAULT_METHOD_KIND`) -- the one
+rail every provider in the spec's table covers -- since the bot doesn't
+yet ask which rail to use.
+
+**Still deferred from Phase 5, now covering both deposits and
+withdrawals:** the Telegram bot confirmation message (spec 8.3 step 8:
+"Bot notifies the user with the reason"). `services/payments` remains a
+separate process from the bot, and `services/bot/handlers.py`'s own tested
+invariant is that nothing calls `bot.send_message` except `Notifier`. This
+still needs a small Redis-Streams (or pub/sub) channel the bot process
+consumes and forwards through its own `Notifier` -- deliberately not built
+this pass either, so it can be done once for both money-movement
+directions rather than twice. In the meantime: a depositing/withdrawing
+player sees the bot's own synchronous reply to `/deposit`/`/withdraw`
+(which does carry real status), the Mini App gets the live
+`balance_update` WebSocket push once money actually moves, and the admin
+console's audit log and payments queue give full visibility either way.
+
+**Admin review queue additions:** `services/admin/queries.py` gained
+`list_pending_withdrawals`, `approve_withdrawal_admin` (audit-logged,
+enqueues the real payout job), and `reject_withdrawal_admin`
+(ledger-reversed, audit-logged) -- both idempotent no-ops if the payment
+isn't in `review` any more, matching `void_round_admin`'s established
+pattern. Two new RBAC permissions, `payments:view` (support/finance/ops/
+superadmin) and `payments:approve` (finance/superadmin), mirroring the
+existing `users:adjust_balance` role split since a withdrawal approval is
+exactly that kind of money-movement action.
+
 ## 2026-08-22 — Phase 5 (deposits, spec Prompt 7 / section 8.1-8.2)
 
 Built `services/payments/`: a provider-agnostic `PaymentProvider` Protocol

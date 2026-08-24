@@ -29,6 +29,13 @@
   "deposit.checkout_ready": "Tap below to complete your {amount} ETB deposit.",
   "deposit.checkout_button": "💳 Pay {amount} ETB",
   "withdraw.not_available": "Withdrawals are launching soon. Please check back shortly.",
+  "withdraw.usage": "Usage: /withdraw <amount> <telebirr number> <full name>. Minimum {min} ETB.",
+  "withdraw.invalid_amount": "Please enter a valid amount, for example: /withdraw 200 0911223344 Abebe Kebede",
+  "withdraw.below_minimum": "The minimum withdrawal is {min} ETB.",
+  "withdraw.kyc_required": "This amount needs identity verification first. Please contact support.",
+  "withdraw.recent_deposit": "For your security, withdrawals aren't available for a short time after a deposit. Please try again later.",
+  "withdraw.requested_approved": "✅ Withdrawal of {amount} ETB requested and approved. It's on its way.",
+  "withdraw.requested_review": "Withdrawal of {amount} ETB requested. It's under review and you'll be notified once it's processed.",
   "limits.not_available": "Play-limit settings are launching soon.",
 
   "history.header": "Your recent game and money activity:",

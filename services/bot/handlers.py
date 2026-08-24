@@ -28,7 +28,7 @@ from services.bot.registration import (
     get_registered_user,
     register_from_contact,
 )
-from services.payments import deposits
+from services.payments import deposits, withdrawals
 from services.payments.chapa import ChapaProvider
 
 router = Router(name="jobingo-bot")
@@ -301,12 +301,78 @@ async def cmd_deposit(
 
 
 @router.message(Command("withdraw"))
-async def cmd_withdraw(message: Message, pool: asyncpg.Pool, notifier: Notifier) -> None:
+async def cmd_withdraw(
+    message: Message,
+    command: CommandObject,
+    pool: asyncpg.Pool,
+    redis: Redis,
+    notifier: Notifier,
+    settings: Settings,
+) -> None:
     assert message.from_user is not None
     language = await _language_for(pool, message.from_user.id)
-    if not await _require_registered(message, pool, notifier, language):
+    user = await get_registered_user(pool, message.from_user.id)
+    if user is None:
+        await notifier.send(message.chat.id, t("error.not_registered", language))
         return
-    await notifier.send(message.chat.id, t("withdraw.not_available", language))
+
+    if not settings.chapa_api_key:
+        await notifier.send(message.chat.id, t("withdraw.not_available", language))
+        return
+
+    parts = (command.args or "").split(maxsplit=2)
+    if len(parts) < 3:
+        await notifier.send(
+            message.chat.id, t("withdraw.usage", language, min=str(settings.min_withdraw_etb))
+        )
+        return
+    raw_amount, account_ref, holder_name = parts
+    try:
+        amount = Decimal(raw_amount)
+    except InvalidOperation:
+        amount = None
+    if amount is None or amount <= 0:
+        await notifier.send(message.chat.id, t("withdraw.invalid_amount", language))
+        return
+
+    provider = ChapaProvider(settings.chapa_api_key)
+    try:
+        intent = await withdrawals.request_withdrawal(
+            pool,
+            redis,
+            provider,
+            user_id=user.id,
+            amount=amount,
+            method_kind=withdrawals.DEFAULT_METHOD_KIND,
+            account_ref=account_ref,
+            holder_name=holder_name,
+            min_withdraw=settings.min_withdraw_etb,
+            auto_approve_limit=settings.auto_approve_withdraw_etb,
+            kyc_threshold=settings.kyc_required_above_etb,
+            chargeback_window_minutes=settings.withdraw_chargeback_window_minutes,
+        )
+    except withdrawals.BelowMinimumWithdrawal:
+        await notifier.send(
+            message.chat.id, t("withdraw.below_minimum", language, min=str(settings.min_withdraw_etb))
+        )
+        return
+    except withdrawals.InsufficientAvailableBalance:
+        await notifier.send(message.chat.id, t("wallet.insufficient", language))
+        return
+    except withdrawals.KycLevelTooLow:
+        await notifier.send(message.chat.id, t("withdraw.kyc_required", language))
+        return
+    except withdrawals.RecentReversibleDeposit:
+        await notifier.send(message.chat.id, t("withdraw.recent_deposit", language))
+        return
+    except withdrawals.UnknownWithdrawer:
+        await notifier.send(message.chat.id, t("error.generic", language))
+        return
+
+    if intent.status == withdrawals.STATUS_APPROVED:
+        await notifier.send(message.chat.id, t("withdraw.requested_approved", language, amount=str(amount)))
+    else:
+        await notifier.send(message.chat.id, t("withdraw.requested_review", language, amount=str(amount)))
 
 
 @router.message(Command("limits"))

@@ -14,10 +14,12 @@ from decimal import Decimal
 from typing import Any
 
 import asyncpg
+from redis.asyncio import Redis
 
 from packages.core import bingo, ledger
 from services.admin import audit
 from services.engine.refunds import refund_round
+from services.payments.withdrawals import enqueue_payout
 
 
 async def search_users(pool: asyncpg.Pool, query: str, limit: int = 20) -> list[dict[str, Any]]:
@@ -420,3 +422,96 @@ async def daily_ggr(pool: asyncpg.Pool, on_date: date) -> dict[str, Any]:
         on_date,
     )
     return {"date": on_date.isoformat(), "ggr": str(revenue), "rounds_settled": rounds_settled}
+
+
+async def list_pending_withdrawals(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+    rows = await pool.fetch(
+        """
+        SELECT p.id, p.user_id, u.display_name, p.our_ref, p.amount, p.status, p.created_at,
+               pm.kind AS method_kind, pm.account_ref, pm.holder_name
+        FROM payments p
+        JOIN users u ON u.id = p.user_id
+        LEFT JOIN payment_methods pm ON pm.id = p.method_id
+        WHERE p.direction = 'out' AND p.status = 'review'
+        ORDER BY p.created_at
+        """
+    )
+    return [dict(r) for r in rows]
+
+
+async def approve_withdrawal_admin(
+    pool: asyncpg.Pool,
+    redis: Redis,
+    *,
+    admin_id: int,
+    payment_id: int,
+    reason: str | None,
+    ip_address: str | None,
+) -> bool:
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT our_ref, status FROM payments WHERE id = $1 AND direction = 'out' FOR UPDATE",
+                payment_id,
+            )
+            if row is None or row["status"] != "review":
+                return False
+            await conn.execute(
+                "UPDATE payments SET status = 'approved', updated_at = now() WHERE id = $1", payment_id
+            )
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="withdrawals.approve",
+                target_type="payment",
+                target_id=str(payment_id),
+                before={"status": "review"},
+                after={"status": "approved"},
+                reason=reason,
+                ip_address=ip_address,
+            )
+            our_ref = row["our_ref"]
+
+    await enqueue_payout(redis, our_ref=our_ref, payment_id=payment_id)
+    return True
+
+
+async def reject_withdrawal_admin(
+    pool: asyncpg.Pool, *, admin_id: int, payment_id: int, reason: str, ip_address: str | None
+) -> bool:
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT user_id, amount, status FROM payments WHERE id = $1 AND direction = 'out' FOR UPDATE",
+                payment_id,
+            )
+            if row is None or row["status"] != "review":
+                return False
+
+            locked = await ledger.get_or_create_account(conn, row["user_id"], "user_locked")
+            cash = await ledger.get_or_create_account(conn, row["user_id"], "user_cash")
+            await ledger.post(
+                conn,
+                "refund",
+                [ledger.Entry(locked.id, -row["amount"]), ledger.Entry(cash.id, row["amount"])],
+                idempotency_key=f"payout-reject-{payment_id}",
+                payment_id=payment_id,
+            )
+            await conn.execute(
+                "UPDATE payments SET status = 'rejected', failure_reason = $2, updated_at = now() "
+                "WHERE id = $1",
+                payment_id,
+                reason,
+            )
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="withdrawals.reject",
+                target_type="payment",
+                target_id=str(payment_id),
+                before={"status": "review"},
+                after={"status": "rejected"},
+                reason=reason,
+                ip_address=ip_address,
+            )
+    return True

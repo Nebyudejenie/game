@@ -19,6 +19,8 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     "rooms:manage": frozenset({"ops", "superadmin"}),
     "reports:view": frozenset({"finance", "superadmin"}),
     "audit:view": frozenset({"superadmin"}),
+    "payments:view": frozenset({"support", "finance", "ops", "superadmin"}),
+    "payments:approve": frozenset({"finance", "superadmin"}),
 }
 
 
