@@ -5,6 +5,66 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-24 — Nightly ledger reconciliation job: `packages/core/reconcile_job.py`
+
+Spec section 14's definition of done requires: "ledger sum equals balance
+cache for every account, verified nightly, zero drift over 30 days."
+`ledger.reconcile()` (built in Phase 0, exercised indirectly ever since by
+every test that touches money) already recomputes each account's balance
+from `SUM(ledger_entries.amount)` and compares it to the maintained
+`account_balances` cache -- what was missing was anything that actually
+runs it as a standalone job a real deployment could schedule.
+
+This is the **first genuinely runnable CLI entrypoint in the codebase**.
+Every other background process built this session -- `EngineWorker`,
+`Notifier`, `payout_worker`, `notification_relay` -- exists only as a
+class/function with an `async run_forever()`-shaped API; nothing wires any
+of them into an actual OS process, and that's been a consistent, deliberate
+scope boundary (process orchestration and deployment topology are left to
+deployment time, not invented speculatively). `reconcile_job.py` is
+architecturally different: it's a one-shot batch job meant to be invoked
+*by* an external scheduler (cron, a systemd timer, a k8s CronJob), not a
+long-running loop that needs orchestration -- so a real `if __name__ ==
+"__main__":` wrapper is genuinely in scope here in a way it wasn't for the
+others.
+
+Shape: `reconcile_all(pool)` is the testable core (takes a pool directly, no
+process concerns); `main()` configures structured logging, runs it, and
+exits 1 with a logged `ledger_reconciliation_failed` event (including every
+mismatched account id and both the cached and computed balance) on any
+drift, or 0 with `ledger_reconciliation_ok` when clean. A real deployment's
+scheduler should alert loudly on the non-zero exit, not retry quietly --
+any drift at all means `ledger.post()`'s row-locked transactional writes
+were somehow bypassed, which should never happen.
+
+`configure_logging()` (structured JSON logging via `structlog`, built in an
+earlier phase) had never actually been called anywhere in the codebase
+before this -- every other module only imported `get_logger()` and relied
+on whatever default logging config happened to be in effect. This job is
+the first real caller of `configure_logging()`, matching how a real
+process's `main()` should set up logging once, at startup.
+
+Caught in my own test draft before ever running it: the drift-detection
+tests simulate a cache/ledger mismatch by corrupting `account_balances`
+directly via raw SQL (`UPDATE ... SET balance = balance + 999`), since
+there's no other way to construct that state -- `ledger.post()`'s row locks
+make it otherwise unreachable. That corruption runs against the same
+shared, long-lived database every other test in the session also uses;
+leaving it in place would have permanently failed reconciliation for every
+subsequent test run until the next full `docker compose down -v`. Both
+tests now wrap the corrupting `UPDATE` and the assertion in `try/finally`
+so the balance is always restored.
+
+Verified with a full clean-slate rebuild (`docker compose down -v` → `up
+-d` → `alembic upgrade head` → `mypy` → full suite) specifically to make
+sure this held up from a genuinely fresh database, not just the
+already-warm one it was developed against: `mypy` clean across 59 source
+files, `pytest tests/` 627 passed / 13 deselected, `-m load` 5 passed,
+`-m chaos_infra` 1 passed, `-m e2e` 7 passed. Zero ledger drift across the
+full accumulated test history of the session -- deposits, withdrawals,
+stakes, payouts, refunds, and thousands of concurrent-stake contention
+scenarios all reconcile cleanly.
+
 ## 2026-08-24 — SantimPay/ArifPay adapters not built: their API docs are unreachable from this environment
 
 Attempted to build the remaining two provider adapters spec 8.1's table

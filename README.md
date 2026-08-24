@@ -397,6 +397,22 @@ fairness verification actually possible instead of only "provable" for
 whoever happened to be connected at the exact second the round ended. See
 `DECISIONS.md`.
 
+**Nightly ledger reconciliation:**
+- **`packages/core/reconcile_job.py`** — spec section 14's definition of
+  done requires "ledger sum equals balance cache for every account,
+  verified nightly, zero drift over 30 days." `ledger.reconcile()` already
+  did the comparison; this is the actual runnable job — the first genuine
+  `if __name__ == "__main__":` CLI entrypoint in the codebase (every other
+  background process, `EngineWorker`/`Notifier`/`payout_worker`/
+  `notification_relay`, is a class/function only, with process
+  orchestration left to deployment time throughout this session).
+  `python -m packages.core.reconcile_job` exits 0 and logs
+  `ledger_reconciliation_ok` when every account's cached balance agrees
+  with its ledger entries, or exits 1 and logs every mismatched account
+  (`ledger_reconciliation_failed`) otherwise — meant to be invoked by a
+  real cron/systemd-timer/k8s CronJob that alerts loudly on the non-zero
+  exit. See `DECISIONS.md`.
+
 **Load and chaos testing (spec section 10.3):**
 - **A real money-safety bug found and fixed by this phase's own load
   test, not by review:** `RoundEngine.join()`'s idle-room bootstrap had no
