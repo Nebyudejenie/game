@@ -80,6 +80,12 @@ docker compose -f deploy/docker-compose.yml up -d prometheus
 #     (packages/core/reconcile_job.py has no long-running /metrics of its
 #     own to scrape). Set PUSHGATEWAY_URL=http://localhost:9092 in .env.
 docker compose -f deploy/docker-compose.yml up -d pushgateway
+
+# 11. Optional: Grafana dashboards over the same metrics -- provisioned
+#     automatically (deploy/grafana/), no manual setup. Brings up
+#     Prometheus too. Browse http://localhost:3001 (anonymous viewer
+#     access enabled for local dev; admin/jobingo for editing).
+docker compose -f deploy/docker-compose.yml up -d grafana
 ```
 
 To actually play with it: start the gateway (`uvicorn services.gateway.app:app
@@ -479,8 +485,18 @@ whoever happened to be connected at the exact second the round ended. See
   Pushgateway (`deploy/docker-compose.yml`'s `pushgateway` service) when
   `PUSHGATEWAY_URL` is set, which Prometheus then scrapes. Verified
   against the actual `prom/pushgateway` binary, not just an automated
-  test double — see `DECISIONS.md`. Grafana dashboards and OpenTelemetry
-  traces are real, buildable next steps, not built yet.
+  test double — see `DECISIONS.md`.
+- **Grafana** (`deploy/grafana/`) — a real dashboard, ten panels, one per
+  metric above, provisioned as code (datasource + dashboard JSON both
+  loaded from files on container startup, never clicked through by hand).
+  A `grafana` service in `deploy/docker-compose.yml`, same
+  `profiles: ["observability"]` gating. Verified by querying the exact
+  PromQL expression the "Concurrent connections" panel uses through
+  Grafana's own datasource proxy API and watching it move `0 → 1 → 0`
+  across a real WebSocket connect/disconnect — not a hand-typed query
+  against Prometheus directly, the literal thing the panel itself runs.
+  See `DECISIONS.md`. OpenTelemetry traces for the deposit/payout paths
+  are a real, buildable next step, not built yet.
 
 **Load and chaos testing (spec section 10.3):**
 - **A real money-safety bug found and fixed by this phase's own load

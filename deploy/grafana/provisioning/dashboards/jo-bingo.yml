@@ -1,0 +1,13 @@
+# Points Grafana at deploy/grafana/dashboards/*.json (mounted into the
+# container -- see docker-compose.yml) so the dashboard itself is real,
+# version-controlled config, not something an operator builds by hand in
+# the UI and forgets to export.
+apiVersion: 1
+
+providers:
+  - name: jo-bingo
+    folder: ""
+    type: file
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards

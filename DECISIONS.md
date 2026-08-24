@@ -5,6 +5,67 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-24 — Grafana dashboards, provisioned as code, verified with a real query drill (closes spec 10.4's "+ Grafana")
+
+Spec section 10.4 pairs "Prometheus + Grafana" as one bullet; the
+Prometheus half (metrics, alerts, scrape config) was built and verified
+two entries below. This closes the Grafana half.
+
+- **`deploy/grafana/provisioning/datasources/prometheus.yml`** — the
+  Prometheus datasource, provisioned on container startup rather than
+  clicked through by hand in the UI (and forgotten). Given a fixed
+  `uid: prometheus` deliberately, not left to Grafana's auto-generated
+  one -- a provisioned *dashboard* JSON has to reference its datasource by
+  a stable id, and the standard `${DS_PROMETHEUS}` template-variable
+  pattern only resolves on dashboard *import* through the UI, not on
+  file-based provisioning (found by actually provisioning a first draft
+  and getting "no data" on every panel, not by reading Grafana's docs
+  fully upfront).
+- **`deploy/grafana/dashboards/jo-bingo.json`** — one real dashboard, ten
+  panels, one per metric `packages/core/metrics.py` defines: concurrent
+  connections, rooms active, payout queue depth, live house revenue
+  (stats), bingo calls/sec, ledger txn/sec by kind, command-to-ack
+  latency p50/p95/p99, claim validation time p50/p95/p99, deposit success
+  rate over a 15-minute window, and rounds voided per hour (time series).
+  Every panel's `expr` is real PromQL against the real metric names, not
+  placeholder text.
+- **`deploy/grafana/provisioning/dashboards/jo-bingo.yml`** — the file
+  provisioner pointing Grafana at the JSON above.
+- A `grafana` service in `deploy/docker-compose.yml`
+  (`grafana/grafana-oss:11.3.1` -- the exact tag confirmed to actually
+  exist via a real `docker pull` before pinning it, the same discipline
+  as Prometheus/Pushgateway's version pins), profile-gated the same way
+  as `prometheus`/`pushgateway`, with `depends_on: [prometheus]` since an
+  unprovisioned datasource would make every panel show "no data" on first
+  boot. Anonymous viewer access enabled for local dev convenience (a
+  throwaway `admin`/`jobingo` login also exists) -- explicitly a dev-only
+  default, not a production hardening decision; a real deployment would
+  set `GF_SECURITY_ADMIN_PASSWORD` from a real secret and leave anonymous
+  access off.
+
+**Verified with a real drill, matching the Prometheus entry's own
+discipline:** started the real gateway app, started
+prometheus+pushgateway+grafana for real, confirmed via Grafana's own
+`/api/dashboards/uid/jo-bingo` that all ten panels provisioned, then
+queried the *exact* panel expression the "Concurrent connections" panel
+uses (`sum(gateway_connections)`) through Grafana's own datasource proxy
+API (`/api/datasources/proxy/uid/prometheus/api/v1/query`) -- not a
+hand-typed query against Prometheus directly, but the literal thing the
+dashboard panel itself would run. Watched it go `0 -> 1 -> 0` as a real
+WebSocket client connected and disconnected. This is the full chain
+proven end to end: instrumentation -> `/metrics` -> Prometheus scrape ->
+Grafana datasource -> dashboard panel query.
+
+**Not built:** OpenTelemetry traces for the deposit/payout paths, the one
+remaining item in spec 10.4. Real, buildable, deliberately left for a
+following pass.
+
+Full clean-slate rebuild (this pass touched only `deploy/` config, no
+Python source, but re-verified anyway per this session's own discipline):
+mypy clean across 60 source files, `pytest tests/` 639 passed / 13
+deselected (unchanged), `-m load` 5 passed, `-m chaos_infra` 1 passed,
+`-m e2e` 7 passed.
+
 ## 2026-08-24 — Closed the reconcile_job Pushgateway gap flagged in the previous entry
 
 The observability pass just below flagged one honest gap: the

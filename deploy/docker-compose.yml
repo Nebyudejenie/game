@@ -71,6 +71,31 @@ services:
       # Host 9092 -- next free slot after Prometheus's own 9091 above.
       - "9092:9091"
 
+  # Optional: dashboards over the same real metrics (spec section 10.4
+  # pairs "Prometheus + Grafana" as one bullet). Datasource and dashboard
+  # are both provisioned from files under deploy/grafana/ -- version
+  # controlled, not built by hand in the UI and forgotten. Also
+  # profile-gated; start with
+  # `docker compose -f deploy/docker-compose.yml up -d grafana` (brings up
+  # prometheus too, via depends_on, since an unprovisioned datasource
+  # would make every panel show "no data").
+  grafana:
+    image: grafana/grafana-oss:11.3.1
+    profiles: ["observability"]
+    depends_on:
+      - prometheus
+    ports:
+      # Host 3001, not Grafana's default 3000 -- same reasoning as every
+      # other port in this file: avoid clashing with another project.
+      - "3001:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      GF_SECURITY_ADMIN_PASSWORD: "jobingo"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+
 volumes:
   jobingo_postgres_data:
   jobingo_redis_data:

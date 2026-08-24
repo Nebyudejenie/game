@@ -1,0 +1,15 @@
+# Auto-provisioned on Grafana startup -- an operator never clicks through
+# "Add data source" by hand. "prometheus" is the docker-compose service
+# name, reachable by that name on the shared jobingo_default network (the
+# same reasoning deploy/prometheus/prometheus.yml's own pushgateway target
+# uses container DNS instead of host.docker.internal).
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
