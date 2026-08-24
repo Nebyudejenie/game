@@ -19,11 +19,11 @@ import asyncpg
 from fastapi import WebSocket, WebSocketDisconnect
 from redis.asyncio import Redis
 
-from packages.core import metrics, telegram_auth
+from packages.core import metrics, rate_limit, telegram_auth
 from packages.core.telegram_auth import InvalidInitData
 from services.engine import commands
 from services.engine.commands import CommandTimeout
-from services.gateway import queries, rate_limit
+from services.gateway import queries
 from services.gateway.fanout import ConnectionQueue, FanoutHub
 
 AUTH_TIMEOUT_SECONDS = 5.0

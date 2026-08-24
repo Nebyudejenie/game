@@ -22,6 +22,7 @@
   "deposit.not_available": "Deposits are launching soon. Please check back shortly.",
   "deposit.usage": "Usage: /deposit <amount>. Minimum {min} ETB.",
   "deposit.invalid_amount": "Please enter a valid amount, for example: /deposit 200",
+  "deposit.rate_limited": "Too many deposit attempts. Please wait a bit and try again.",
   "deposit.below_minimum": "The minimum deposit is {min} ETB.",
   "deposit.daily_cap_exceeded": "You've reached today's deposit limit. Please try again tomorrow.",
   "deposit.self_excluded": "Your account is currently self-excluded and can't make deposits.",

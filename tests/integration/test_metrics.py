@@ -264,6 +264,7 @@ async def test_deposit_outcomes_counter_increments_on_a_real_credit(pool, redis,
     user_id = await create_funded_user(conn, Decimal("0.00"))
     intent = await deposits.create_deposit_intent(
         pool,
+        redis,
         _FakeCheckoutProvider(),
         user_id=user_id,
         amount=Decimal("25.00"),

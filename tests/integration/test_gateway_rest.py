@@ -199,6 +199,41 @@ async def test_api_deposit_succeeds_and_returns_a_checkout_url(gateway_server, p
     assert row["amount"] == Decimal("150.00")
 
 
+async def test_api_deposit_rate_limited_after_five_in_a_row(gateway_server, pool, conn, fake_chapa):
+    # Spec section 9.2: "deposit 5/hour" -- the same rate limit
+    # test_bot_handlers.py proves through the bot's /deposit command,
+    # proven here through the Mini App's REST path instead, since both
+    # call the same create_deposit_intent() but are two independent
+    # callers that could each forget to wire the check correctly.
+    telegram_id = next_telegram_id()
+    init_data = build_init_data(telegram_id)
+    async with httpx.AsyncClient() as client:
+        await client.get(f"{http_base(gateway_server)}/api/me", headers={"Authorization": f"tma {init_data}"})
+    user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+    await conn.execute(
+        "UPDATE users SET phone_e164 = $2 WHERE id = $1",
+        user_row["id"],
+        f"+2519{telegram_id % 100_000_000:08d}",
+    )
+
+    async with httpx.AsyncClient() as client:
+        for i in range(5):
+            response = await client.post(
+                f"{http_base(gateway_server)}/api/deposit",
+                headers={"Authorization": f"tma {init_data}"},
+                json={"amount": "10"},
+            )
+            assert response.status_code == 200, f"attempt {i + 1}: {response.text}"
+
+        response = await client.post(
+            f"{http_base(gateway_server)}/api/deposit",
+            headers={"Authorization": f"tma {init_data}"},
+            json={"amount": "10"},
+        )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "rate_limited"
+
+
 @pytest.fixture
 def fake_chapa_payout():
     original = gateway_app.state.chapa

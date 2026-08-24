@@ -22,6 +22,7 @@
   "deposit.not_available": "ገቢ ማድረግ በቅርቡ ይጀምራል። እባክዎ ትንሽ ይታገሱ።",
   "deposit.usage": "አጠቃቀም፦ /deposit <መጠን>። ዝቅተኛው {min} ብር ነው።",
   "deposit.invalid_amount": "እባክዎ ትክክለኛ መጠን ያስገቡ፣ ለምሳሌ፦ /deposit 200",
+  "deposit.rate_limited": "በጣም ብዙ የገቢ ሙከራዎች። እባክዎ ትንሽ ቆይተው እንደገና ይሞክሩ።",
   "deposit.below_minimum": "ዝቅተኛው ገቢ {min} ብር ነው።",
   "deposit.daily_cap_exceeded": "የዛሬውን የገቢ ገደብ ደርሰዋል። እባክዎ ነገ እንደገና ይሞክሩ።",
   "deposit.self_excluded": "አካውንትዎ በራስ-ገደብ ላይ ስለሆነ ገቢ ማድረግ አይችሉም።",

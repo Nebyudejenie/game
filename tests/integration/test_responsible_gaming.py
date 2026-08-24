@@ -41,7 +41,7 @@ class _NullProvider:
         raise NotImplementedError
 
 
-async def _deposit(pool, conn, user_id, amount, *, provider=None, **overrides):
+async def _deposit(pool, redis, conn, user_id, amount, *, provider=None, **overrides):
     kwargs = dict(
         user_id=user_id,
         amount=amount,
@@ -51,7 +51,7 @@ async def _deposit(pool, conn, user_id, amount, *, provider=None, **overrides):
         daily_cap=Decimal("1000000.00"),
     )
     kwargs.update(overrides)
-    return await deposits.create_deposit_intent(pool, provider or _NullProvider(), **kwargs)
+    return await deposits.create_deposit_intent(pool, redis, provider or _NullProvider(), **kwargs)
 
 
 # --- get_or_create_limits / set_deposit_limit / set_loss_limit -------------
@@ -258,32 +258,32 @@ async def test_today_net_loss_reflects_stakes_and_payouts(pool, conn):
 # --- deposit-side enforcement ----------------------------------------------
 
 
-async def test_deposit_blocked_while_cooling_off(pool, conn):
+async def test_deposit_blocked_while_cooling_off(pool, redis, conn):
     user_id = await create_user(conn)
     await responsible_gaming.cool_off(conn, user_id, duration_hours=24)
     with pytest.raises(deposits.DepositorCoolingOff):
-        await _deposit(pool, conn, user_id, Decimal("100.00"))
+        await _deposit(pool, redis, conn, user_id, Decimal("100.00"))
 
 
-async def test_deposit_blocked_when_banned(pool, conn):
+async def test_deposit_blocked_when_banned(pool, redis, conn):
     user_id = await create_user(conn)
     await conn.execute("UPDATE users SET status = 'banned' WHERE id = $1", user_id)
     with pytest.raises(deposits.DepositorBanned):
-        await _deposit(pool, conn, user_id, Decimal("100.00"))
+        await _deposit(pool, redis, conn, user_id, Decimal("100.00"))
 
 
-async def test_per_user_deposit_cap_tighter_than_global_is_enforced(pool, conn):
+async def test_per_user_deposit_cap_tighter_than_global_is_enforced(pool, redis, conn):
     user_id = await create_user(conn)
     await responsible_gaming.set_deposit_limit(conn, user_id, Decimal("50.00"))
     with pytest.raises(deposits.DailyDepositCapExceeded):
-        await _deposit(pool, conn, user_id, Decimal("100.00"), daily_cap=Decimal("1000000.00"))
+        await _deposit(pool, redis, conn, user_id, Decimal("100.00"), daily_cap=Decimal("1000000.00"))
 
 
-async def test_per_user_deposit_cap_under_global_still_allows_a_smaller_deposit(pool, conn):
+async def test_per_user_deposit_cap_under_global_still_allows_a_smaller_deposit(pool, redis, conn):
     user_id = await create_user(conn)
     await responsible_gaming.set_deposit_limit(conn, user_id, Decimal("50.00"))
     intent = await _deposit(
-        pool, conn, user_id, Decimal("30.00"), daily_cap=Decimal("1000000.00"), provider=FakePaymentProvider()
+        pool, redis, conn, user_id, Decimal("30.00"), daily_cap=Decimal("1000000.00"), provider=FakePaymentProvider()
     )
     assert intent.our_ref.startswith("DEP-")
 

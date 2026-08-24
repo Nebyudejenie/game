@@ -522,6 +522,24 @@ Spec section 10.4 (Observability) is now fully addressed: metrics, alerts,
 dashboards, and traces, every one verified with a real drill against the
 real binary, not just config review.
 
+**Deposit rate limiting (spec section 9.2):** the last of the four
+listed rate limits (`claim` 5/round, `take_card` 10/min, `deposit`
+5/hour, WS messages 30/s) that wasn't actually enforced anywhere —
+confirmed by grepping every deposit call site and finding no check on
+either the bot's `/deposit` command or the Mini App's `/api/deposit`
+route. `packages/core/rate_limit.py` (moved from `services/gateway/`,
+since it's no longer gateway-specific) gained a `DEPOSIT` bucket; the
+check lives inside `deposits.create_deposit_intent()` itself — one
+choke point both callers go through, not duplicated logic that could
+drift out of sync. Verified through both real call paths: a real
+aiogram dispatch test (`test_bot_handlers.py`) and a real HTTP test
+(`test_gateway_rest.py`), each driving 5 successful deposits then
+confirming a real 6th is rejected. See `DECISIONS.md` — including a
+debugging detour where the first test draft asserted the wrong outcome
+because of a wrong assumption about the shared test environment's Chapa
+credentials, caught by actually introspecting the failure rather than
+loosening the assertion.
+
 **Load and chaos testing (spec section 10.3):**
 - **A real money-safety bug found and fixed by this phase's own load
   test, not by review:** `RoundEngine.join()`'s idle-room bootstrap had no

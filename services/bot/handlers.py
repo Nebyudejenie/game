@@ -240,6 +240,7 @@ async def cmd_deposit(
     message: Message,
     command: CommandObject,
     pool: asyncpg.Pool,
+    redis: Redis,
     notifier: Notifier,
     settings: Settings,
 ) -> None:
@@ -270,6 +271,7 @@ async def cmd_deposit(
     try:
         intent = await deposits.create_deposit_intent(
             pool,
+            redis,
             provider,
             user_id=user.id,
             amount=amount,
@@ -278,6 +280,9 @@ async def cmd_deposit(
             min_deposit=settings.min_deposit_etb,
             daily_cap=settings.daily_deposit_cap_etb,
         )
+    except deposits.DepositRateLimited:
+        await notifier.send(message.chat.id, t("deposit.rate_limited", language))
+        return
     except deposits.BelowMinimumDeposit:
         await notifier.send(
             message.chat.id, t("deposit.below_minimum", language, min=str(settings.min_deposit_etb))

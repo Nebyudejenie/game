@@ -91,6 +91,7 @@ async def test_deposit_credit_notifies_the_depositor(pool, redis, conn):
         provider = FakePaymentProvider()
         intent = await deposits.create_deposit_intent(
             pool,
+            redis,
             provider,
             user_id=user_id,
             amount=Decimal("120.00"),

@@ -5,6 +5,83 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-24 — Deposit rate limiting: the last unenforced limit in spec 9.2's list
+
+Spec section 9.2's rate-limit table: "per-user token buckets -- `claim`
+5/round, `take_card` 10/min, `deposit` 5/hour, WS messages 30/s." Three of
+four were already enforced (`services/gateway/rate_limit.py`'s `CLAIM`/
+`TAKE_CARD`/`WS_MESSAGES` buckets, applied in
+`services/gateway/connection.py`); `deposit 5/hour` was not applied
+anywhere -- confirmed by grepping every deposit call site
+(`services/bot/handlers.py`'s `/deposit` command, `services/gateway/
+app.py`'s `/api/deposit` REST route) and finding no rate-limit check on
+either path. A genuine, previously-unnoticed gap, not something blocked on
+credentials or a product decision.
+
+- **`packages/core/rate_limit.py`** (moved from `services/gateway/
+  rate_limit.py` -- nothing about the Lua token-bucket script or its
+  bucket constants is gateway-specific, and `services/payments/deposits.py`
+  now needs the same utility, so it belongs where every other
+  service-spanning utility in this codebase already lives). Only one
+  importer needed updating (`services/gateway/connection.py`); no direct
+  test file referenced the old path.
+- New `DEPOSIT = {"capacity": 5, "refill_per_second": 5.0 / 3600.0}`
+  bucket constant.
+- **The check lives inside `deposits.create_deposit_intent()` itself**,
+  first thing in the function, rather than duplicated at both call sites
+  -- a single choke point that can't be forgotten by a future caller,
+  matching this codebase's established "one shared path" philosophy
+  (`refunds.refund_round()`, `deposits._apply_confirmed_status()`, ...).
+  This required adding `redis: Redis` to `create_deposit_intent()`'s
+  signature (in the `pool, redis, provider` order already established by
+  `handle_webhook()` in the same file) and threading it through both real
+  call sites and every test call site -- 18 call sites total across the
+  codebase, all updated and re-verified.
+- New `DepositRateLimited(DepositRejected)` exception; both callers map it
+  to a translated rejection (`deposit.rate_limited` in the bot's
+  `en.json`/`am.json`, `wallet.error.rate_limited` in the Mini App's
+  locale files -- the Mini App's error handling already dynamically
+  builds `wallet.error.${detail}` from the REST API's error code, so no
+  JS change was needed there, only the locale string and the
+  `_DEPOSIT_ERROR_CODES` dict entry).
+
+**A real debugging detour worth recording:** the first version of the new
+bot-handler test asserted the wrong outcome because of a wrong assumption
+-- that `bot_setup`'s shared test `Settings` has no Chapa credentials, so
+`/deposit` would hit the early "not available" guard. It doesn't:
+`tests/integration/conftest.py` sets `CHAPA_API_KEY`/`PUBLIC_BASE_URL` env
+vars (for the payments-app webhook tests, which do need a provider
+constructed at startup) that `Settings()` picks up process-wide, so the
+guard never fires and `cmd_deposit` really does construct a real
+`ChapaProvider` and attempt a genuine network call -- confirmed directly
+(a standalone script hit a real `ConnectTimeout` after several seconds).
+Caught by actually debugging the failing assertion (`dp["settings"]`
+introspection, not just re-reading the source) rather than loosening the
+assertion to match whatever came back. Fixed by monkeypatching
+`services.bot.handlers.ChapaProvider` for that one test (`cmd_deposit`
+constructs the provider inline rather than taking it as an injected
+dependency, so this is the only way to reach the real
+`create_deposit_intent()` logic without touching the network) -- which
+also made the test far more useful: it now proves a real 6th rapid
+`/deposit` genuinely gets rejected, not just that the handler doesn't
+crash on the new `redis` parameter.
+
+**Verified for real on both call paths**, not just at the `deposits.py`
+level: `tests/integration/test_bot_handlers.py::
+test_deposit_command_rate_limited_after_five_in_a_row` drives 5 successful
+deposits then a rejected 6th through the actual aiogram dispatcher (real
+DI resolution of the new `redis` parameter, not assumed safe by analogy to
+`pool`/`notifier`/`settings`); `tests/integration/test_gateway_rest.py::
+test_api_deposit_rate_limited_after_five_in_a_row` proves the same thing
+through the Mini App's real HTTP `/api/deposit` route.
+
+Full clean-slate rebuild: mypy clean across 61 source files, `pytest
+tests/` 645 passed / 13 deselected (up from 643), `-m load` 5/5 passed
+(one instance of the same already-documented shared-host p99 contention
+on `test_load_multiroom.py`, confirmed transient by immediate isolated
+retry -- see the entry two below), `-m chaos_infra` 1 passed, `-m e2e` 7
+passed.
+
 ## 2026-08-24 — OpenTelemetry traces for deposit and payout paths (closes spec 10.4)
 
 Spec section 10.4's last unaddressed item: "Traces (OpenTelemetry): deposit

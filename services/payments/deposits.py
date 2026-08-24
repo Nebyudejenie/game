@@ -20,7 +20,7 @@ import asyncpg
 import structlog
 from redis.asyncio import Redis
 
-from packages.core import ledger, metrics, responsible_gaming, tracing
+from packages.core import ledger, metrics, rate_limit, responsible_gaming, tracing
 from packages.core.notifications import notify_user
 from services.gateway.queries import user_balance_snapshot
 from services.payments.provider import PaymentProvider
@@ -40,6 +40,10 @@ class DepositRejected(Exception):
     type and so services/bot/handlers.py's AST-based no-hardcoded-strings
     check never has to see a reason->locale-key string table.
     """
+
+
+class DepositRateLimited(DepositRejected):
+    pass
 
 
 class BelowMinimumDeposit(DepositRejected):
@@ -79,6 +83,7 @@ class DepositIntent:
 
 async def create_deposit_intent(
     pool: asyncpg.Pool,
+    redis: Redis,
     provider: PaymentProvider,
     *,
     user_id: int,
@@ -91,6 +96,13 @@ async def create_deposit_intent(
     with _tracer.start_as_current_span(
         "deposit.create_intent", attributes={"user_id": user_id, "amount": str(amount)}
     ) as span:
+        # Rate-limited before anything else (spec section 9.2: "deposit
+        # 5/hour") -- a cheap Redis round-trip gates every DB write and
+        # provider call below it, the same rate-limit-first ordering
+        # services/gateway/connection.py's own _run_action() uses.
+        if not await rate_limit.allow(redis, "deposit", str(user_id), **rate_limit.DEPOSIT):
+            raise DepositRateLimited(f"user {user_id} exceeded the deposit rate limit")
+
         if amount < min_deposit:
             raise BelowMinimumDeposit(f"amount {amount} is below the minimum {min_deposit}")
 

@@ -243,6 +243,56 @@ async def _register(dp, bot, session) -> int:
     return telegram_id
 
 
+async def test_deposit_command_rate_limited_after_five_in_a_row(pool, bot_ctx, monkeypatch):
+    # bot_setup's shared Settings has real-looking (but fake) Chapa
+    # credentials -- tests/integration/conftest.py sets them so the
+    # payments app's lifespan can construct a provider at all -- so
+    # cmd_deposit's own real ChapaProvider(settings.chapa_api_key) would
+    # otherwise make a genuine, slowly-timing-out network call (confirmed
+    # directly: ConnectTimeout after several seconds). cmd_deposit
+    # constructs the provider inline rather than taking it as an injected
+    # dependency, so the only way to exercise the real
+    # create_deposit_intent() path here without touching the network is
+    # to monkeypatch the class itself, the same fake-the-network-boundary
+    # discipline every other provider-touching test in this codebase uses.
+    #
+    # This proves two real things through the actual bot dispatch path,
+    # not just through deposits.py directly: cmd_deposit's new
+    # `redis: Redis` parameter resolves correctly via aiogram's real
+    # dependency injection (a wiring mistake here would raise, not
+    # silently no-op), and the spec section 9.2 "deposit 5/hour" rate
+    # limit genuinely blocks a 6th rapid attempt end to end.
+    class _FakeChapaProvider:
+        def __init__(self, api_key: str) -> None:
+            self.name = "chapa"
+
+        async def create_checkout(self, *, amount, user_ref, our_ref, return_url):
+            from services.payments.provider import CheckoutResult
+
+            return CheckoutResult(
+                checkout_url=f"https://pay.test/{our_ref}", provider_ref=our_ref, raw_response={}
+            )
+
+    monkeypatch.setattr("services.bot.handlers.ChapaProvider", _FakeChapaProvider)
+
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+
+    for i in range(5):
+        await dp.feed_update(bot, make_text_update(telegram_id, "/deposit 100"))
+        await _settle()
+        assert len(session.sent) == 1, f"attempt {i + 1}: {session.sent}"
+        assert "Tap below" in session.sent[0].text or "ከታች ያለውን ይጫኑ" in session.sent[0].text, (
+            f"attempt {i + 1} should have succeeded: {session.sent[0].text}"
+        )
+        session.sent.clear()
+
+    await dp.feed_update(bot, make_text_update(telegram_id, "/deposit 100"))
+    await _settle()
+    assert len(session.sent) == 1
+    assert "wait a bit" in session.sent[0].text or "ትንሽ ቆይተው" in session.sent[0].text
+
+
 async def test_limits_deposit_sets_the_cap_instantly_on_first_use(pool, bot_ctx):
     dp, bot, session = bot_ctx
     telegram_id = await _register(dp, bot, session)

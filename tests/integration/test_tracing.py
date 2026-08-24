@@ -64,10 +64,11 @@ class _FakeProvider:
         return PayoutResult(provider_ref=f"chapa-{our_ref}", status="succeeded", raw_response={})
 
 
-async def test_create_deposit_intent_produces_real_nested_spans(pool, conn):
+async def test_create_deposit_intent_produces_real_nested_spans(pool, redis, conn):
     user_id = await create_funded_user(conn, Decimal("0.00"))
     await deposits.create_deposit_intent(
         pool,
+        redis,
         _FakeProvider(),
         user_id=user_id,
         amount=Decimal("25.00"),
@@ -97,6 +98,7 @@ async def test_apply_confirmed_status_span_records_the_real_outcome(pool, redis,
     user_id = await create_funded_user(conn, Decimal("0.00"))
     intent = await deposits.create_deposit_intent(
         pool,
+        redis,
         _FakeProvider(),
         user_id=user_id,
         amount=Decimal("30.00"),

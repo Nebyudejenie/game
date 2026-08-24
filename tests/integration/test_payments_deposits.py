@@ -69,12 +69,13 @@ async def _cash_balance(conn, user_id: int) -> Decimal:
     return await ledger.balance(conn, account.id)
 
 
-async def test_deposit_below_minimum_is_rejected(pool, conn):
+async def test_deposit_below_minimum_is_rejected(pool, redis, conn):
     provider = FakePaymentProvider()
     user_id = await create_user(conn)
     with pytest.raises(deposits.BelowMinimumDeposit):
         await deposits.create_deposit_intent(
             pool,
+            redis,
             provider,
             user_id=user_id,
             amount=Decimal("5.00"),
@@ -85,13 +86,14 @@ async def test_deposit_below_minimum_is_rejected(pool, conn):
         )
 
 
-async def test_self_excluded_user_cannot_deposit(pool, conn):
+async def test_self_excluded_user_cannot_deposit(pool, redis, conn):
     provider = FakePaymentProvider()
     user_id = await create_user(conn)
     await conn.execute("UPDATE users SET status = 'self_excluded' WHERE id = $1", user_id)
     with pytest.raises(deposits.DepositorSelfExcluded):
         await deposits.create_deposit_intent(
             pool,
+            redis,
             provider,
             user_id=user_id,
             amount=Decimal("100.00"),
@@ -102,12 +104,13 @@ async def test_self_excluded_user_cannot_deposit(pool, conn):
         )
 
 
-async def test_daily_cap_exceeded_on_second_deposit(pool, conn):
+async def test_daily_cap_exceeded_on_second_deposit(pool, redis, conn):
     provider = FakePaymentProvider()
     user_id = await create_user(conn)
     small_cap = Decimal("150.00")
     await deposits.create_deposit_intent(
         pool,
+        redis,
         provider,
         user_id=user_id,
         amount=Decimal("100.00"),
@@ -119,6 +122,7 @@ async def test_daily_cap_exceeded_on_second_deposit(pool, conn):
     with pytest.raises(deposits.DailyDepositCapExceeded):
         await deposits.create_deposit_intent(
             pool,
+            redis,
             provider,
             user_id=user_id,
             amount=Decimal("100.00"),
@@ -129,11 +133,12 @@ async def test_daily_cap_exceeded_on_second_deposit(pool, conn):
         )
 
 
-async def test_checkout_creation_marks_payment_processing(pool, conn):
+async def test_checkout_creation_marks_payment_processing(pool, redis, conn):
     provider = FakePaymentProvider()
     user_id = await create_user(conn)
     intent = await deposits.create_deposit_intent(
         pool,
+        redis,
         provider,
         user_id=user_id,
         amount=Decimal("200.00"),
@@ -153,6 +158,7 @@ async def test_valid_webhook_credits_the_ledger_exactly_once(pool, redis, conn):
     user_id = await create_user(conn)
     intent = await deposits.create_deposit_intent(
         pool,
+        redis,
         provider,
         user_id=user_id,
         amount=Decimal("200.00"),
@@ -178,6 +184,7 @@ async def test_same_webhook_delivered_100_times_concurrently_credits_exactly_onc
     user_id = await create_user(conn)
     intent = await deposits.create_deposit_intent(
         pool,
+        redis,
         provider,
         user_id=user_id,
         amount=Decimal("50.00"),
@@ -211,6 +218,7 @@ async def test_invalid_signature_is_rejected_and_does_not_credit(pool, redis, co
     user_id = await create_user(conn)
     intent = await deposits.create_deposit_intent(
         pool,
+        redis,
         provider,
         user_id=user_id,
         amount=Decimal("200.00"),
@@ -235,6 +243,7 @@ async def test_mismatched_amount_does_not_credit_and_flags_for_review(pool, redi
     user_id = await create_user(conn)
     intent = await deposits.create_deposit_intent(
         pool,
+        redis,
         provider,
         user_id=user_id,
         amount=Decimal("200.00"),
@@ -264,6 +273,7 @@ async def test_webhook_arriving_after_a_successful_poll_is_a_noop(pool, redis, c
     user_id = await create_user(conn)
     intent = await deposits.create_deposit_intent(
         pool,
+        redis,
         provider,
         user_id=user_id,
         amount=Decimal("75.00"),
@@ -301,6 +311,7 @@ async def test_failed_status_marks_payment_failed_without_crediting(pool, redis,
     user_id = await create_user(conn)
     intent = await deposits.create_deposit_intent(
         pool,
+        redis,
         provider,
         user_id=user_id,
         amount=Decimal("30.00"),

@@ -4,6 +4,13 @@ One Lua script does the read-refill-check-consume cycle atomically so
 concurrent requests against the same bucket can't race each other into
 over-granting tokens. Bucket keys follow the spec's own `rl:{scope}:{id}`
 convention.
+
+Lives in packages/core, not services/gateway (where it started), because
+services/payments/deposits.py needs the same "deposit 5/hour" bucket the
+spec asks for -- nothing about the Lua script or the bucket constants is
+gateway-specific, so packages/core is where every service-spanning
+utility in this codebase already lives (ledger, bingo, telegram_auth,
+responsible_gaming, ...).
 """
 
 from __future__ import annotations
@@ -79,3 +86,4 @@ async def allow(
 WS_MESSAGES = {"capacity": 30, "refill_per_second": 30.0}
 TAKE_CARD = {"capacity": 10, "refill_per_second": 10.0 / 60.0}
 CLAIM = {"capacity": 5, "refill_per_second": 5.0 / 60.0}
+DEPOSIT = {"capacity": 5, "refill_per_second": 5.0 / 3600.0}

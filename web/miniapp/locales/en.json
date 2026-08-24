@@ -57,6 +57,7 @@
   "wallet.withdraw_approved": "✅ Withdrawal approved and on its way.",
   "wallet.withdraw_review": "Withdrawal submitted and under review.",
   "wallet.error.invalid_amount": "Please enter a valid amount.",
+  "wallet.error.rate_limited": "Too many deposit attempts. Please wait a bit and try again.",
   "wallet.error.below_minimum": "That's below the minimum amount.",
   "wallet.error.daily_cap_exceeded": "You've reached today's deposit limit.",
   "wallet.error.self_excluded": "Your account is currently self-excluded.",

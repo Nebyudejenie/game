@@ -149,6 +149,7 @@ async def api_round_fairness(
 # reply. Provider-side/unknown failures collapse to one generic code,
 # matching the bot's own choice not to expose raw internal error text.
 _DEPOSIT_ERROR_CODES: dict[type[Exception], str] = {
+    deposits.DepositRateLimited: "rate_limited",
     deposits.BelowMinimumDeposit: "below_minimum",
     deposits.DailyDepositCapExceeded: "daily_cap_exceeded",
     deposits.DepositorSelfExcluded: "self_excluded",
@@ -189,6 +190,7 @@ async def api_create_deposit(
     try:
         intent = await deposits.create_deposit_intent(
             app.state.pool,
+            app.state.redis,
             app.state.chapa,
             user_id=user_id,
             amount=amount,

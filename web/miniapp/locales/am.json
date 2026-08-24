@@ -57,6 +57,7 @@
   "wallet.withdraw_approved": "✅ ወጪ ጸድቋል እና በመንገድ ላይ ነው።",
   "wallet.withdraw_review": "ወጪ ገብቷል እና እየተገመገመ ነው።",
   "wallet.error.invalid_amount": "እባክዎ ትክክለኛ መጠን ያስገቡ።",
+  "wallet.error.rate_limited": "በጣም ብዙ የገቢ ሙከራዎች። እባክዎ ትንሽ ቆይተው እንደገና ይሞክሩ።",
   "wallet.error.below_minimum": "ይህ ከዝቅተኛው መጠን በታች ነው።",
   "wallet.error.daily_cap_exceeded": "የዛሬውን የገቢ ገደብ ደርሰዋል።",
   "wallet.error.self_excluded": "አካውንትዎ በራስ-ገደብ ላይ ነው።",
