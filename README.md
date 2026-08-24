@@ -102,9 +102,13 @@ authenticate with; the E2E tests stub it (see
 would supply real `initData`.
 
 Copy `.env.example` to `.env` if you want to override any connection
-settings; everything works fine with the defaults baked into
-`packages/core/config.py`, which already point at the docker-compose ports
-above.
+settings; most defaults are baked into `packages/core/config.py`, which
+already point at the docker-compose ports above. One exception:
+`PHONE_ENCRYPTION_KEY` has no safe empty default (registration can't
+function without it) — `.env.example` ships a real, working dev key, but
+you do need the actual `.env` file copied over for anything that touches
+registration to run outside the test suite (which sets its own fixed key
+directly, so `pytest` works with no `.env` at all).
 
 ## What's actually implemented
 
@@ -539,6 +543,23 @@ debugging detour where the first test draft asserted the wrong outcome
 because of a wrong assumption about the shared test environment's Chapa
 credentials, caught by actually introspecting the failure rather than
 loosening the assertion.
+
+**Phone numbers encrypted at rest (spec section 9.2):**
+`packages/core/phone_crypto.py` stores every phone number as two derived
+values instead of plaintext — AES-256-GCM ciphertext
+(`encrypt_phone`/`decrypt_phone`) for confidentiality, plus a
+deterministic HMAC-SHA256 "blind index" (`phone_lookup_hash`) that alone
+carries the UNIQUE constraint and exact-match lookups a random-nonce
+ciphertext can't support in SQL. Both keys derive from one required
+`PHONE_ENCRYPTION_KEY` via HKDF. A real product tradeoff came with this:
+encryption breaks the admin console's substring phone search
+structurally, and that choice (exact-match only, vs. keeping a plaintext
+last-4-digits fragment, vs. not encrypting) was put to the user rather
+than picked unilaterally — exact-match won. Migration
+`1d14ec5fac7d_phone_encryption.py` backfills every existing row through
+the app's own real encryption functions and was verified both directions
+(upgrade and downgrade) against real seeded data, not just "the DDL
+runs." See `DECISIONS.md`.
 
 **Load and chaos testing (spec section 10.3):**
 - **A real money-safety bug found and fixed by this phase's own load

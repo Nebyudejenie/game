@@ -19,6 +19,7 @@ from aiogram.methods.send_message import SendMessage
 from aiogram.types import Chat, Contact, Message, TelegramObject, Update, User
 
 from packages.core.config import Settings
+from packages.core.phone_crypto import decrypt_phone
 from services.bot.app import build_dispatcher
 from services.bot.notifier import Notifier
 from tests.integration.conftest import next_telegram_id
@@ -181,10 +182,10 @@ async def test_valid_contact_completes_registration(pool, bot_ctx):
     assert "Nebyu" in session.sent[0].text
 
     row = await pool.fetchrow(
-        "SELECT phone_e164, display_name FROM users WHERE telegram_id = $1", telegram_id
+        "SELECT phone_e164_encrypted, display_name FROM users WHERE telegram_id = $1", telegram_id
     )
     assert row is not None
-    assert row["phone_e164"] == phone
+    assert decrypt_phone(bytes(row["phone_e164_encrypted"])) == phone
     assert row["display_name"] == "Nebyu"
 
 

@@ -13,6 +13,7 @@ from decimal import Decimal
 import httpx
 import pytest
 
+from packages.core.phone_crypto import encrypt_phone, phone_lookup_hash
 from services.engine.round_engine import RoundEngine, load_room_config
 from services.gateway.app import app as gateway_app
 from tests.integration.conftest import build_init_data, create_funded_user, create_room, fund_user, next_telegram_id
@@ -23,6 +24,15 @@ from tests.integration.test_round_engine import wait_until
 
 def http_base(gateway_server: str) -> str:
     return gateway_server.replace("ws://", "http://").replace("/ws", "")
+
+
+async def _set_phone(conn, user_id: int, phone: str, *, extra_sql: str = "") -> None:
+    await conn.execute(
+        f"UPDATE users SET phone_e164_encrypted = $2, phone_lookup_hash = $3{extra_sql} WHERE id = $1",
+        user_id,
+        encrypt_phone(phone),
+        phone_lookup_hash(phone),
+    )
 
 
 async def test_api_me_requires_authorization_header(gateway_server):
@@ -117,11 +127,7 @@ async def test_api_deposit_rejects_below_minimum(gateway_server, pool, conn):
     async with httpx.AsyncClient() as client:
         await client.get(f"{http_base(gateway_server)}/api/me", headers={"Authorization": f"tma {init_data}"})
     user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
-    await conn.execute(
-        "UPDATE users SET phone_e164 = $2 WHERE id = $1",
-        user_row["id"],
-        f"+2519{telegram_id % 100_000_000:08d}",
-    )
+    await _set_phone(conn, user_row["id"], f"+2519{telegram_id % 100_000_000:08d}")
 
     async with httpx.AsyncClient() as client:
         response = await client.post(
@@ -155,10 +161,8 @@ async def test_api_deposit_blocked_when_self_excluded(gateway_server, pool, conn
     async with httpx.AsyncClient() as client:
         await client.get(f"{http_base(gateway_server)}/api/me", headers={"Authorization": f"tma {init_data}"})
     user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
-    await conn.execute(
-        "UPDATE users SET phone_e164 = $2, status = 'self_excluded' WHERE id = $1",
-        user_row["id"],
-        f"+2519{telegram_id % 100_000_000:08d}",
+    await _set_phone(
+        conn, user_row["id"], f"+2519{telegram_id % 100_000_000:08d}", extra_sql=", status = 'self_excluded'"
     )
 
     async with httpx.AsyncClient() as client:
@@ -177,11 +181,7 @@ async def test_api_deposit_succeeds_and_returns_a_checkout_url(gateway_server, p
     async with httpx.AsyncClient() as client:
         await client.get(f"{http_base(gateway_server)}/api/me", headers={"Authorization": f"tma {init_data}"})
     user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
-    await conn.execute(
-        "UPDATE users SET phone_e164 = $2 WHERE id = $1",
-        user_row["id"],
-        f"+2519{telegram_id % 100_000_000:08d}",
-    )
+    await _set_phone(conn, user_row["id"], f"+2519{telegram_id % 100_000_000:08d}")
 
     async with httpx.AsyncClient() as client:
         response = await client.post(
@@ -210,11 +210,7 @@ async def test_api_deposit_rate_limited_after_five_in_a_row(gateway_server, pool
     async with httpx.AsyncClient() as client:
         await client.get(f"{http_base(gateway_server)}/api/me", headers={"Authorization": f"tma {init_data}"})
     user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
-    await conn.execute(
-        "UPDATE users SET phone_e164 = $2 WHERE id = $1",
-        user_row["id"],
-        f"+2519{telegram_id % 100_000_000:08d}",
-    )
+    await _set_phone(conn, user_row["id"], f"+2519{telegram_id % 100_000_000:08d}")
 
     async with httpx.AsyncClient() as client:
         for i in range(5):

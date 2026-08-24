@@ -5,6 +5,82 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-24 — Phone numbers encrypted at rest (spec 9.2), with a real product tradeoff surfaced and confirmed
+
+Spec section 9.2: "PII: phone numbers encrypted at rest; logs must never
+contain full numbers or `initData` strings." The logging half was already
+done (`packages/core/logging.py`'s `_redact`); phone numbers themselves
+were plain `text` in the `users` table -- a real, unaddressed gap, found
+while auditing the rest of section 9.2 for what "deposit rate limiting"
+(the entry below) had left unchecked.
+
+**A genuine product decision, not an engineering default -- asked, not
+guessed:** `services/admin/queries.py`'s `search_users()` supported
+substring phone search (`WHERE phone_e164 ILIKE '%...%'`). Encryption
+breaks that structurally: AES-GCM's random nonce means the same phone
+encrypts differently every time, so equality (let alone substring
+matching) can't be checked against ciphertext in SQL. Enforcing the
+UNIQUE constraint and admin search at all needs a deterministic "blind
+index" (a hash of the plaintext), which only ever supports *exact* match.
+Presented the real tradeoff to the user directly rather than picking one:
+exact-match only, keep a plaintext last-4-digits fragment, or skip
+encryption to keep substring search. **Chosen: exact-match only** (the
+recommended, strongest-privacy option) -- admin phone search now requires
+the complete number; name and Telegram-id search are unaffected.
+
+**`packages/core/phone_crypto.py`** -- every phone number becomes two
+derived values, never one:
+- `encrypt_phone()` / `decrypt_phone()`: AES-256-GCM, random 12-byte
+  nonce, for confidentiality.
+- `phone_lookup_hash()`: deterministic HMAC-SHA256, the "blind index"
+  that carries the UNIQUE constraint and every exact-match lookup
+  (registration's duplicate-phone check, admin search) without ever
+  comparing ciphertext.
+
+Both keys are derived via HKDF from one `PHONE_ENCRYPTION_KEY` root
+secret (new, required `Settings` field -- no safe empty default, unlike
+`PUSHGATEWAY_URL`/`OTEL_EXPORTER_ENDPOINT`, since registration cannot
+function without it in *any* environment, dev/test included, the same as
+`DATABASE_URL`/`REDIS_URL`). Real domain separation, not two independent
+secrets to manage: a key good enough to decrypt phone numbers must never
+also double as the lookup-hash key by accident.
+
+**Migration (`1d14ec5fac7d_phone_encryption.py`)** replaces the plaintext
+`phone_e164` column with `phone_e164_encrypted bytea` +
+`phone_lookup_hash text UNIQUE`, backfilling every existing row through
+the app's own real `encrypt_phone()`/`phone_lookup_hash()` functions
+(following this repo's own precedent -- `89519947d424_cards_pool.py`
+already calls app code from inside a migration). Both `upgrade()` and
+`downgrade()` were verified against real seeded data, not just "the DDL
+runs": seeded plaintext rows before upgrading, confirmed the backfilled
+ciphertext decrypts back to the exact original numbers and the lookup
+hash matches, then downgraded and confirmed the original plaintext values
+were restored exactly.
+
+Every call site touching `phone_e164` updated: `services/bot/
+registration.py` (encrypts on write, decrypts on read; the
+`UniqueViolationError` constraint-name check now matches
+`phone_lookup_hash`, not `phone_e164`), `services/gateway/queries.py`'s
+`user_phone()`, and `services/admin/queries.py`'s `search_users()` /
+`get_user_detail()` (both decrypt for display; `search_users()` only
+adds the exact-match `phone_lookup_hash` clause when the query string
+itself normalizes to a complete, valid E.164 number -- a genuine partial
+string simply matches nothing, exactly the confirmed tradeoff). 18 test
+call sites across 6 files updated to write/read the new columns.
+
+**Verified for real:** a new `test_search_users_does_not_match_a_genuine_
+partial_phone` locks in the confirmed tradeoff (a 5-digit fragment no
+longer matches); the existing "search by phone fragment" test was
+re-examined and found to actually test a *complete* number in a different
+format (bare national digits vs full E.164), not a true substring --
+renamed to reflect that, since it still correctly passes under exact-match
+search once normalized.
+
+Full clean-slate rebuild (a real schema migration this time, verified
+against a truly fresh database from empty): mypy clean across 63 source
+files, `pytest tests/` 646 passed / 13 deselected, `-m load` 5 passed,
+`-m chaos_infra` 1 passed, `-m e2e` 7 passed.
+
 ## 2026-08-24 — Deposit rate limiting: the last unenforced limit in spec 9.2's list
 
 Spec section 9.2's rate-limit table: "per-user token buckets -- `claim`

@@ -61,6 +61,15 @@ class Settings(BaseSettings):
     # from a known office/VPN range.
     admin_ip_allowlist: str = ""
 
+    # 64 hex characters (32 bytes) -- packages/core/phone_crypto.py derives
+    # both the phone-number encryption key and the lookup-hash key from
+    # this one root secret via HKDF. Unlike CHAPA_API_KEY etc., this has no
+    # safe empty default: registration cannot function without it in any
+    # environment, dev/test included, the same way DATABASE_URL/REDIS_URL
+    # don't have empty defaults either. Generate one with:
+    # python -c "import secrets; print(secrets.token_hex(32))"
+    phone_encryption_key: str = ""
+
     # Observability -- empty means reconcile_job.py only logs its result
     # (still fully correct: a real scheduler already alerts on the process's
     # own non-zero exit code); set to enable pushing the mismatch count to a

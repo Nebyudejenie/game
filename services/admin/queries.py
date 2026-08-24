@@ -18,36 +18,56 @@ from redis.asyncio import Redis
 
 from packages.core import bingo, ledger
 from packages.core.notifications import notify_user
+from packages.core.phone_crypto import decrypt_phone, phone_lookup_hash
 from services.admin import audit
+from services.bot.phone import normalize_ethiopian_phone
 from services.engine.refunds import refund_round
 from services.payments.withdrawals import enqueue_payout
 
 
+def _with_decrypted_phone(row: dict[str, Any]) -> dict[str, Any]:
+    blob = row.pop("phone_e164_encrypted")
+    row["phone_e164"] = decrypt_phone(bytes(blob)) if blob is not None else None
+    return row
+
+
 async def search_users(pool: asyncpg.Pool, query: str, limit: int = 20) -> list[dict[str, Any]]:
+    # Phone matching is exact only (spec section 9.2: numbers are
+    # encrypted at rest) -- a random-nonce ciphertext can't support
+    # substring search, and phone_lookup_hash is only ever computed from a
+    # genuinely complete, correctly-formatted E.164 number, so a partial
+    # digit string simply matches nothing rather than silently degrading
+    # to name/telegram_id-only search. A real product tradeoff, confirmed
+    # with the user rather than picked unilaterally -- see DECISIONS.md.
+    normalized = normalize_ethiopian_phone(query)
+    phone_hash = phone_lookup_hash(normalized) if normalized else None
+
     rows = await pool.fetch(
         """
-        SELECT id, telegram_id, display_name, phone_e164, status, kyc_level, created_at
+        SELECT id, telegram_id, display_name, phone_e164_encrypted, status, kyc_level, created_at
         FROM users
-        WHERE phone_e164 ILIKE '%' || $1 || '%'
-           OR display_name ILIKE '%' || $1 || '%'
-           OR telegram_id::text = $1
+        WHERE phone_lookup_hash = $1
+           OR display_name ILIKE '%' || $2 || '%'
+           OR telegram_id::text = $2
         ORDER BY created_at DESC
-        LIMIT $2
+        LIMIT $3
         """,
+        phone_hash,
         query,
         limit,
     )
-    return [dict(r) for r in rows]
+    return [_with_decrypted_phone(dict(r)) for r in rows]
 
 
 async def get_user_detail(pool: asyncpg.Pool, user_id: int) -> dict[str, Any] | None:
     user_row = await pool.fetchrow(
-        "SELECT id, telegram_id, display_name, phone_e164, status, kyc_level, language, "
+        "SELECT id, telegram_id, display_name, phone_e164_encrypted, status, kyc_level, language, "
         "created_at, last_seen_at FROM users WHERE id = $1",
         user_id,
     )
     if user_row is None:
         return None
+    user_dict = _with_decrypted_phone(dict(user_row))
 
     async with pool.acquire() as conn:
         cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
@@ -59,7 +79,7 @@ async def get_user_detail(pool: asyncpg.Pool, user_id: int) -> dict[str, Any] | 
             "locked": str(await ledger.balance(conn, locked.id)),
         }
 
-    return {**dict(user_row), "balances": balances}
+    return {**user_dict, "balances": balances}
 
 
 async def get_user_ledger_history(

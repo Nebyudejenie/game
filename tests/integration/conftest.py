@@ -24,6 +24,13 @@ os.environ.setdefault("CHAPA_API_KEY", "test-chapa-secret-for-suite")
 # unless a public base URL is configured (same "not available yet"
 # discipline as the bot's own /deposit command) -- tests need one set.
 os.environ.setdefault("PUBLIC_BASE_URL", "https://app.test")
+# packages/core/phone_crypto.py has no safe empty default (registration
+# cannot function without it) -- a fixed, obviously-not-production key so
+# every test run derives the exact same encryption/lookup subkeys, the
+# same reasoning TELEGRAM_BOT_TOKEN above is fixed rather than randomized.
+os.environ.setdefault(
+    "PHONE_ENCRYPTION_KEY", "e3ac1d8cf1864fbd35540bf4a462be1bf0a7beec9c59cf28c50e4166f760c197"
+)
 
 from packages.core import ledger
 from packages.core.config import get_settings

@@ -19,6 +19,7 @@ from decimal import Decimal
 
 import pytest
 
+from packages.core.phone_crypto import encrypt_phone, phone_lookup_hash
 from services.engine.round_engine import RoundEngine, load_room_config
 from services.gateway.app import app as gateway_app
 from tests.integration.conftest import build_init_data, create_funded_user, create_room, fund_user, next_telegram_id
@@ -95,8 +96,12 @@ async def test_deposit_flow_opens_a_checkout_link(gateway_server, browser, pool,
 
         user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
         assert user_row is not None
+        phone = f"+2519{telegram_id % 100_000_000:08d}"
         await conn.execute(
-            "UPDATE users SET phone_e164 = $2 WHERE id = $1", user_row["id"], f"+2519{telegram_id % 100_000_000:08d}"
+            "UPDATE users SET phone_e164_encrypted = $2, phone_lookup_hash = $3 WHERE id = $1",
+            user_row["id"],
+            encrypt_phone(phone),
+            phone_lookup_hash(phone),
         )
 
         await _open_wallet_tab(page, "deposit")

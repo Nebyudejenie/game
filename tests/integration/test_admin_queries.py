@@ -9,6 +9,7 @@ from decimal import Decimal
 import pytest
 
 from packages.core import ledger
+from packages.core.phone_crypto import encrypt_phone, phone_lookup_hash
 from services.admin import queries
 from services.engine.round_engine import RoundEngine, load_room_config
 from tests.integration.conftest import (
@@ -21,17 +22,43 @@ from tests.integration.test_admin_auth import create_test_admin
 from tests.integration.test_round_engine import wait_until
 
 
-async def test_search_users_finds_by_phone_fragment(pool, conn):
-    telegram_id = next_telegram_id()
-    phone = unique_phone()
-    row = await conn.fetchrow(
-        "INSERT INTO users (telegram_id, display_name, phone_e164) VALUES ($1, $2, $3) RETURNING id",
-        telegram_id,
-        "Findable Person",
-        phone,
+async def _create_user_with_phone(conn, phone: str, display_name: str = "Findable Person"):
+    return await conn.fetchrow(
+        "INSERT INTO users (telegram_id, display_name, phone_e164_encrypted, phone_lookup_hash) "
+        "VALUES ($1, $2, $3, $4) RETURNING id",
+        next_telegram_id(),
+        display_name,
+        encrypt_phone(phone),
+        phone_lookup_hash(phone),
     )
+
+
+async def test_search_users_finds_by_exact_phone_in_national_format(pool, conn):
+    # phone[-9:] is the bare 9-digit national number (no country code) --
+    # a different accepted *format* of the same complete number
+    # (normalize_ethiopian_phone() accepts both), not a true substring
+    # fragment. Phone search is exact-match only once numbers are
+    # encrypted (see services/admin/queries.py's search_users) -- this
+    # still matches because it's the whole number, just spelled
+    # differently, and normalization makes both forms hash identically.
+    phone = unique_phone()
+    row = await _create_user_with_phone(conn, phone)
     results = await queries.search_users(pool, phone[-9:])
     assert any(r["id"] == row["id"] for r in results)
+    match = next(r for r in results if r["id"] == row["id"])
+    assert match["phone_e164"] == phone
+
+
+async def test_search_users_does_not_match_a_genuine_partial_phone(pool, conn):
+    # A real substring of the number (missing digits, not just a
+    # differently-formatted whole number) must not match -- this is
+    # exactly the capability lost by encrypting phone numbers at rest,
+    # confirmed as an acceptable tradeoff with the user (see DECISIONS.md).
+    phone = unique_phone()
+    row = await _create_user_with_phone(conn, phone, display_name="Not Findable By Fragment")
+    partial = phone[-5:]  # genuinely incomplete -- not a valid national number on its own
+    results = await queries.search_users(pool, partial)
+    assert not any(r["id"] == row["id"] for r in results)
 
 
 async def test_get_user_detail_includes_real_balances(pool, conn):
