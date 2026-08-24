@@ -202,3 +202,77 @@ async def test_miniapp_full_gameplay_flow(gateway_server, browser, pool, redis, 
     finally:
         await engine.stop()
         await asyncio.wait_for(task, timeout=15)
+
+
+async def test_verify_draw_button_shows_a_verified_seed(gateway_server, browser, pool, redis, card_pool, conn):
+    """Spec section 14's definition of done: "a player can independently
+    verify any round's draw from the published seed." This is that button,
+    clicked for real, against a round that actually ran to completion --
+    not just a check that /api/rounds/{id}/fairness returns the right JSON
+    (test_gateway_rest.py already proves that), but that the UI a player
+    would actually use to see it works.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=8, call_interval_ms=15
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    try:
+        other_player = await create_funded_user(conn)
+        assert (await engine.join(other_player, 2)).ok
+
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('0.00')", timeout=10000
+        )
+
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        assert user_row is not None
+        await fund_user(conn, user_row["id"], Decimal("100.00"))
+        await page.reload()
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('100.00')", timeout=10000
+        )
+
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page.wait_for_selector(room_selector, timeout=10000)
+        await page.click(room_selector)
+        await page.wait_for_selector("#screen-lobby.active", timeout=10000)
+        cells = await page.query_selector_all(".card-grid-cell")
+        await cells[9].click()  # card #10
+        await page.click("#lobby-cta")
+        await page.wait_for_function(
+            "document.getElementById('lobby-cta').textContent.includes('10')", timeout=5000
+        )
+
+        await page.wait_for_selector("#screen-game.active", timeout=25000)
+        await page.wait_for_selector("#screen-result.active", timeout=90000)
+
+        await page.click("#verify-draw-btn")
+        await page.wait_for_selector("#fairness-panel:not(.hidden)", timeout=5000)
+        await page.wait_for_function(
+            "document.getElementById('fairness-verified').textContent.length > 0", timeout=10000
+        )
+
+        verified_text = await page.text_content("#fairness-verified")
+        assert verified_text and "✅" in verified_text, f"draw did not verify: {verified_text!r}"
+
+        seed_hex = await page.text_content("#fairness-seed")
+        hash_hex = await page.text_content("#fairness-hash")
+        assert seed_hex and len(seed_hex.strip()) == 64  # 32 bytes, hex-encoded
+        assert hash_hex and len(hash_hex.strip()) == 64  # sha256, hex-encoded
+
+        await page.screenshot(path="/tmp/miniapp-fairness.png")
+        assert console_errors == [], f"JS errors during verify-draw flow: {console_errors}"
+        await page.close()
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)

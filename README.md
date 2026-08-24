@@ -210,6 +210,20 @@ above.
   no route back to the wallet button in the test stub, a mismatched
   Amharic substring check) — see `DECISIONS.md`.
 
+**Provably-fair verification, made real** — spec section 14's definition
+of done requires "a player can independently verify any round's draw from
+the published seed." The Mini App's "Verify draw" button had existed since
+Phase 4 with no click handler attached — clicking it did nothing. Fixed:
+a new player-facing `GET /api/rounds/{id}/fairness` route on
+`services/gateway/app.py` (reusing `services/admin/queries.
+get_round_fairness()` directly — none of that data is admin-restricted),
+and the result screen now shows the committed hash, the revealed seed, and
+a ✅/❌ verified indicator when clicked. Tested with a genuine independent
+check (the test hashes the revealed seed itself and asserts it matches the
+pre-committed hash, not just trusting the server's own "verified" field)
+and a real Chromium browser playing an actual round to completion and
+clicking the actual button. See `DECISIONS.md`.
+
 **Deposits (Phase 5):**
 - **`services/payments/provider.py`** — a provider-agnostic
   `PaymentProvider` Protocol (`create_checkout` / `verify_webhook` /
@@ -240,10 +254,15 @@ above.
   of need, unused until now); `web/miniapp/js/app.js` picks it up live —
   the header balance and an open wallet screen update without a reload.
 
-Only SantimPay/ArifPay were left unbuilt (no live credentials for either
-were available this session), and live testing against Chapa's own sandbox
-hasn't happened for the same reason — see `DECISIONS.md` for exactly what
-that means and what's still open before real money should move through it.
+Only SantimPay/ArifPay were left unbuilt — attempted later in this session
+and blocked on a different, more fundamental issue than credentials:
+their API documentation was unreachable from this environment entirely
+(DNS failures, connection refused). Building either adapter from a
+guessed contract was a deliberate refusal, not an oversight — a wrong
+webhook signature scheme is a real security hole. Live testing against
+Chapa's own sandbox hasn't happened either, for the credentials reason —
+see `DECISIONS.md` for exactly what's still open before real money should
+move through any of this.
 
 **Withdrawals (Phase 6):**
 - **`services/payments/withdrawals.py`** — `request_withdrawal()`: the

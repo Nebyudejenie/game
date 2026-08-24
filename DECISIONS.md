@@ -5,6 +5,77 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-24 — SantimPay/ArifPay adapters not built: their API docs are unreachable from this environment
+
+Attempted to build the remaining two provider adapters spec 8.1's table
+calls for (SantimPay as first failover, ArifPay as second) the same way
+Chapa was built in Phase 5 -- fetch the real, current API contract first,
+then implement precisely against it, never against memory or a guess.
+`developer.santimpay.com` failed DNS resolution; SantimPay's PyPI SDK page
+and npm search both failed to load usable content; `arifpay.org/docs` 404'd
+and `developer.arifpay.org` refused the connection outright. Every attempt
+is a genuine, real block, not a decision to skip this.
+
+**Deliberately not building these from an unverified guess.** This is a
+real-money financial integration -- a wrong webhook signature scheme
+verified against a guessed field name is a genuine forged-webhook security
+hole, not a cosmetic bug, and it would look identical to a correct
+implementation in tests written against my own fakes, only failing (or
+worse, silently accepting a forged payload) against the real service.
+`services/payments/provider.py`'s `PaymentProvider` Protocol already makes
+adding either of these "a new file and nothing else" once real API access
+is available -- `chapa.py` is the template to follow. Building a
+`santimpay.py`/`arifpay.py` file now, unverified, would be strictly worse
+than not having one: it would look done in a `git log` while carrying a
+live-money risk nothing in this session could actually validate.
+
+## 2026-08-24 — The Mini App's "Verify draw" button was dead since Phase 4 -- now real
+
+Spec section 14's own definition of done: "a player can independently
+verify any round's draw from the published seed." The button
+(`#verify-draw-btn`) has existed in `index.html` since Phase 4, but
+`app.js` never attached a click handler to it -- clicking it did nothing.
+Exactly the "looks done, isn't" pattern the CTO instructions rule out, and
+worse than no button at all since it visibly promises a capability that
+silently doesn't exist. Found by checking the spec's own definition-of-done
+list line by line for anything still unaddressed, not by a bug report.
+
+Fixed for real, not by pointing at the existing admin-only fairness route:
+- **New player-facing endpoint**, `GET /api/rounds/{id}/fairness` on
+  `services/gateway/app.py` (`tma`-authenticated, like every other
+  `/api/*` route), reusing `services/admin/queries.get_round_fairness()`
+  directly rather than duplicating its logic -- there is nothing
+  admin-specific in what it returns (`server_seed`, `server_seed_hash`,
+  `client_seed`, `draw_order`, `verified`), since publishing exactly that
+  once a round is terminal is the entire point of a commit-reveal
+  provably-fair scheme. The route requires a valid session only to keep it
+  off the open internet, not because any of the data is restricted to a
+  particular player or the rounds they played.
+- **`web/miniapp/js/state.js`'s pre-existing, always-unused `lastResult`
+  field** (present since Phase 4, never once read) turned out to be built
+  exactly for this: `round_end`'s handler now populates it with the full
+  message (including `round_id`), and the verify button reads it back to
+  know which round to ask about.
+- The result screen gained a `fairness-panel` (hidden until clicked)
+  showing the committed hash, the revealed seed, and a ✅/❌ verified
+  indicator, plus a plain-language explainer of what "verified" actually
+  means -- shown, not just asserted, per the spec's own "shown plainly"
+  language reused from the reality-check requirement next to it.
+
+**Tested with a genuine independent re-check, not just trusting the
+server's own `verified` field.** `test_api_round_fairness_revealed_and_
+independently_verifiable` (new, `test_gateway_rest.py`) hashes the
+revealed `server_seed` itself with `hashlib.sha256` and asserts it equals
+the `server_seed_hash` that was committed before the round ever ran --
+the actual property "provably fair" is supposed to guarantee, checked from
+outside the system under test rather than by asking the system whether it
+agrees with itself. A real Chromium browser test
+(`test_verify_draw_button_shows_a_verified_seed`,
+`test_miniapp_e2e.py`) plays an actual round to completion, clicks the
+real button, and asserts the rendered panel shows a 64-character hex seed,
+a 64-character hex hash, and the ✅ indicator -- passed on the first real
+run.
+
 ## 2026-08-24 — Mini App wallet: deposit/withdraw/history tabs, reality check, session reminders
 
 Closes the last group of explicitly deferred frontend gaps: Phase 5's

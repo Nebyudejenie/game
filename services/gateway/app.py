@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Any
 
 import asyncpg
 from fastapi import FastAPI, Header, HTTPException, WebSocket
@@ -22,6 +23,7 @@ from pydantic import BaseModel
 from packages.core import telegram_auth
 from packages.core.config import get_settings
 from packages.core.redis_conn import get_redis
+from services.admin.queries import get_round_fairness
 from services.gateway import queries
 from services.gateway.connection import ConnectionHandler
 from services.gateway.fanout import FanoutHub
@@ -111,6 +113,27 @@ async def api_me(authorization: str = Header(default="")) -> dict[str, str]:
 async def api_history(authorization: str = Header(default="")) -> list[dict[str, object]]:
     user_id = await _authenticated_user_id(authorization)
     return await queries.user_history(app.state.pool, user_id)
+
+
+@app.get("/api/rounds/{round_id}/fairness")
+async def api_round_fairness(
+    round_id: int, authorization: str = Header(default="")
+) -> dict[str, Any]:
+    """Spec section 14's definition of done: "a player can independently
+    verify any round's draw from the published seed." Reuses
+    services.admin.queries.get_round_fairness() directly -- the same
+    server_seed/hash/draw_order/verified data an admin sees, since none of
+    it is sensitive once a round is terminal (that's the entire point of a
+    commit-reveal provably-fair scheme: it's meant to be publishable).
+    Requires a valid session only to keep this off the open internet, not
+    because the data itself is restricted to any particular player or
+    round they were in.
+    """
+    await _authenticated_user_id(authorization)
+    fairness = await get_round_fairness(app.state.pool, round_id)
+    if fairness is None:
+        raise HTTPException(status_code=404, detail="round not found")
+    return fairness
 
 
 # Every DepositRejected/WithdrawalRejected subclass maps to a short error

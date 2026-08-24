@@ -71,6 +71,16 @@
 
   "session.reminder": "You've been playing for {minutes} minutes.",
 
+  "fairness.verified_label": "Draw verified",
+  "fairness.seed_hash_label": "Committed hash",
+  "fairness.seed_label": "Revealed seed",
+  "fairness.explainer": "The hash was published before the round started; the seed was only revealed after it ended. Hashing the seed must produce the hash above, and the seed must reproduce this exact draw order.",
+  "fairness.close": "Close",
+  "fairness.yes": "✅ Yes",
+  "fairness.no": "❌ No",
+  "fairness.not_yet": "Not revealed yet — the round hasn't finished.",
+  "fairness.error": "Couldn't load verification data. Please try again.",
+
   "connection.reconnecting": "Reconnecting…",
   "connection.offline": "Disconnected",
 

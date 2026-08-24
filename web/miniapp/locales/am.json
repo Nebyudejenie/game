@@ -71,6 +71,16 @@
 
   "session.reminder": "ለ{minutes} ደቂቃዎች ሲጫወቱ ቆይተዋል።",
 
+  "fairness.verified_label": "ጥሪ ተረጋግጧል",
+  "fairness.seed_hash_label": "የተገባ ሃሽ",
+  "fairness.seed_label": "የተገለጠ ዘር",
+  "fairness.explainer": "ሃሽ ዙሩ ከመጀመሩ በፊት ታትሟል፤ ዘሩ የተገለጠው ዙሩ ካለቀ በኋላ ብቻ ነው። ዘሩን ሃሽ ማድረግ ከላይ ያለውን ሃሽ ማምጣት አለበት፣ ዘሩም ይህንን ትክክለኛ የጥሪ ቅደም ተከተል ማምጣት አለበት።",
+  "fairness.close": "ዝጋ",
+  "fairness.yes": "✅ አዎ",
+  "fairness.no": "❌ አይ",
+  "fairness.not_yet": "ገና አልተገለጠም — ዙሩ አላለቀም።",
+  "fairness.error": "የማረጋገጫ መረጃ መጫን አልተቻለም። እባክዎ እንደገና ይሞክሩ።",
+
   "connection.reconnecting": "በመገናኘት ላይ…",
   "connection.offline": "ግንኙነት ተቋርጧል",
 

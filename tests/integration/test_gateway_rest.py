@@ -1,19 +1,24 @@
 """Tests for the gateway's REST endpoints (/api/me, /api/history,
-/api/deposit, /api/withdraw) -- the Mini App wallet screen's data source
-and, for the latter two, its deposit/withdraw tabs. Same auth boundary as
-the WebSocket handshake: `Authorization: tma <initData>`, validated the
-same way.
+/api/deposit, /api/withdraw, /api/rounds/{id}/fairness) -- the Mini App
+wallet screen's data source, the deposit/withdraw tabs, and the player-
+facing provably-fair verification the results screen's "Verify draw"
+button calls. Same auth boundary as the WebSocket handshake:
+`Authorization: tma <initData>`, validated the same way.
 """
 
+import asyncio
+import hashlib
 from decimal import Decimal
 
 import httpx
 import pytest
 
+from services.engine.round_engine import RoundEngine, load_room_config
 from services.gateway.app import app as gateway_app
-from tests.integration.conftest import build_init_data, fund_user, next_telegram_id
+from tests.integration.conftest import build_init_data, create_funded_user, create_room, fund_user, next_telegram_id
 from tests.integration.test_payments_deposits import FakePaymentProvider
 from tests.integration.test_payout_worker import FakePayoutProvider
+from tests.integration.test_round_engine import wait_until
 
 
 def http_base(gateway_server: str) -> str:
@@ -245,3 +250,90 @@ async def test_api_withdraw_succeeds_and_locks_funds(gateway_server, pool, conn,
     body = response.json()
     assert body["our_ref"].startswith("WD-")
     assert body["status"] in ("approved", "review")
+
+
+async def test_api_round_fairness_requires_auth(gateway_server):
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{http_base(gateway_server)}/api/rounds/1/fairness")
+    assert response.status_code == 401
+
+
+async def test_api_round_fairness_404_for_unknown_round(gateway_server):
+    telegram_id = next_telegram_id()
+    init_data = build_init_data(telegram_id)
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{http_base(gateway_server)}/api/rounds/999999999/fairness",
+            headers={"Authorization": f"tma {init_data}"},
+        )
+    assert response.status_code == 404
+
+
+async def test_api_round_fairness_not_revealed_before_round_finishes(
+    gateway_server, pool, redis, card_pool, conn
+):
+    room_id = await create_room(conn, stake=Decimal("10.00"), min_players=5, lobby_seconds=5)
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        p1 = await create_funded_user(conn)
+        assert (await engine.join(p1, 1)).ok
+        round_id = engine.round_id
+
+        telegram_id = next_telegram_id()
+        init_data = build_init_data(telegram_id)
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{http_base(gateway_server)}/api/rounds/{round_id}/fairness",
+                headers={"Authorization": f"tma {init_data}"},
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["revealed"] is False
+        assert "server_seed_hash" in body
+        assert "server_seed" not in body
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
+async def test_api_round_fairness_revealed_and_independently_verifiable(
+    gateway_server, pool, redis, card_pool, conn
+):
+    room_id = await create_room(conn, stake=Decimal("10.00"), min_players=2, call_interval_ms=10)
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        p1 = await create_funded_user(conn)
+        p2 = await create_funded_user(conn)
+        assert (await engine.join(p1, 1)).ok
+        assert (await engine.join(p2, 2)).ok
+
+        await wait_until(lambda: engine.status == "idle" and engine.round_id is None, timeout=15)
+
+        round_row = await pool.fetchrow(
+            "SELECT id FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1", room_id
+        )
+
+        telegram_id = next_telegram_id()
+        init_data = build_init_data(telegram_id)
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{http_base(gateway_server)}/api/rounds/{round_row['id']}/fairness",
+                headers={"Authorization": f"tma {init_data}"},
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["revealed"] is True
+        assert body["verified"] is True
+        assert len(body["draw_order"]) == 75
+
+        # Independent re-check from the test's own side, not just trusting
+        # the server's "verified" flag: hashing the revealed seed really
+        # does reproduce the hash that was committed before the round ran.
+        assert hashlib.sha256(bytes.fromhex(body["server_seed"])).hexdigest() == body["server_seed_hash"]
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)

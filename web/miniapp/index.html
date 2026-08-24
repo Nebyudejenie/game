@@ -94,6 +94,22 @@
       <button id="play-next-btn" class="btn-primary btn-gold" data-i18n="result.play_next"></button>
       <button id="verify-draw-btn" class="btn-secondary" data-i18n="result.verify_draw"></button>
     </div>
+    <div id="fairness-panel" class="fairness-panel hidden">
+      <div class="fairness-row">
+        <span data-i18n="fairness.verified_label"></span>
+        <span id="fairness-verified"></span>
+      </div>
+      <div class="fairness-row">
+        <span data-i18n="fairness.seed_hash_label"></span>
+        <span id="fairness-hash" class="fairness-value"></span>
+      </div>
+      <div class="fairness-row">
+        <span data-i18n="fairness.seed_label"></span>
+        <span id="fairness-seed" class="fairness-value"></span>
+      </div>
+      <p class="wallet-note" data-i18n="fairness.explainer"></p>
+      <button id="fairness-close-btn" class="btn-secondary" data-i18n="fairness.close"></button>
+    </div>
   </main>
 
   <!-- 2.6 Wallet -->

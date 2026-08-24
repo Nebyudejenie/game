@@ -369,6 +369,8 @@ el("reserve-card-btn").addEventListener("click", () => {
 ws.on("round_end", (msg) => {
   el("spectate-banner").classList.add("hidden");
   el("your-card-section").classList.remove("hidden");
+  el("fairness-panel").classList.add("hidden");
+  setState({ lastResult: msg });
 
   const state = getState();
   const userId = state.user ? state.user.id : null;
@@ -424,6 +426,49 @@ el("play-next-btn").addEventListener("click", () => {
   const state = getState();
   if (state.currentRoomId !== null) enterRoom(state.currentRoomId);
   else showScreen("rooms");
+});
+
+// --- provably-fair verification ------------------------------------------
+// Spec section 14 (definition of done): "a player can independently verify
+// any round's draw from the published seed." The server_seed is only ever
+// revealed once a round is terminal (round_engine.py persists it at that
+// point, not before -- see DECISIONS.md, Phase 7); this panel is that
+// reveal, plus the app's own recomputation of it, surfaced to the player.
+
+el("verify-draw-btn").addEventListener("click", async () => {
+  const result = getState().lastResult;
+  const panel = el("fairness-panel");
+  if (!result || result.round_id == null) return;
+
+  el("fairness-verified").textContent = "";
+  el("fairness-hash").textContent = "";
+  el("fairness-seed").textContent = "";
+  panel.classList.remove("hidden");
+
+  try {
+    const response = await fetch(`/api/rounds/${result.round_id}/fairness`, { headers: authHeader() });
+    if (!response.ok) {
+      el("fairness-verified").textContent = t("fairness.error");
+      return;
+    }
+    const data = await response.json();
+    if (!data.revealed) {
+      el("fairness-verified").textContent = t("fairness.not_yet");
+      el("fairness-hash").textContent = data.server_seed_hash || "";
+      return;
+    }
+    const verifiedEl = el("fairness-verified");
+    verifiedEl.textContent = data.verified ? t("fairness.yes") : t("fairness.no");
+    verifiedEl.className = data.verified ? "verified-yes" : "verified-no";
+    el("fairness-hash").textContent = data.server_seed_hash;
+    el("fairness-seed").textContent = data.server_seed;
+  } catch {
+    el("fairness-verified").textContent = t("fairness.error");
+  }
+});
+
+el("fairness-close-btn").addEventListener("click", () => {
+  el("fairness-panel").classList.add("hidden");
 });
 
 // --- wallet --------------------------------------------------------------
