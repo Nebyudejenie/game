@@ -129,6 +129,7 @@ class RoundEngine:
         self._stop_requested = False
         self._round_active_event = asyncio.Event()
         self._winner_lock = asyncio.Lock()
+        self._round_start_lock = asyncio.Lock()
         self._settlement_task: asyncio.Task[None] | None = None
 
         self._round_id: int | None = None
@@ -194,8 +195,20 @@ class RoundEngine:
 
     async def join(self, user_id: int, card_no: int, *, auto_mark: bool = True) -> JoinResult:
         if self._status == "idle":
-            await self._start_new_round()
-            self._round_active_event.set()
+            # Many joins can arrive concurrently against a genuinely idle
+            # room (a burst of players hitting an empty room at once) --
+            # without this lock, every one of them would see "idle" before
+            # the first had a chance to flip it to "lobby", and each would
+            # try to INSERT the same next round seq number, raising a
+            # UniqueViolationError on rounds_room_id_seq_key instead of
+            # just joining the one round that actually got created. The
+            # inner re-check is what makes only the first caller actually
+            # start a round; everyone else finds it already started once
+            # they get the lock.
+            async with self._round_start_lock:
+                if self._status == "idle":
+                    await self._start_new_round()
+                    self._round_active_event.set()
 
         if self._status != "lobby":
             return JoinResult(False, "not_joinable")

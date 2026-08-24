@@ -5,6 +5,129 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-24 — Phase 8 (load, chaos, launch readiness — spec Prompt 10 / section 10.3)
+
+**A real, previously-undiscovered money-safety race condition was found and
+fixed by this phase's own rush test, before any assertion about seat
+allocation was even checked.** `RoundEngine.join()`'s idle-room bootstrap
+(`if self._status == "idle": await self._start_new_round()`) had no
+synchronization around it. Every prior test that exercised `join()`
+against an idle room did so with the first join effectively alone (awaited
+before any concurrent ones fired), so this path was never exercised by
+genuinely simultaneous callers. `test_load_rush.py`'s 1,000-concurrent-join
+scenario fires exactly that: many players hitting a freshly-idle room at
+once. Result: multiple coroutines all observed `status == "idle"` before
+the first had a chance to flip it, and each tried to `INSERT` the same
+next `(room_id, seq)` round row, raising `UniqueViolationError` on
+`rounds_room_id_seq_key` — a hard crash, not a graceful rejection, for
+what is a completely realistic production scenario (many players arriving
+at once when a room has just gone quiet). Fixed with a dedicated
+`asyncio.Lock` (`_round_start_lock`, separate from the existing
+`_winner_lock` — a different concern) around a double-checked
+idle-status read: the outer check keeps the hot "a round is already
+running" path lock-free, the inner check-after-acquire ensures only the
+first caller among a simultaneous burst actually starts one. Verified at
+1,000 concurrent joins against 100 cards afterward: exactly 100 winners,
+zero double-allocated cards, elapsed ~2-4s. This is the exact kind of gap
+the CTO instructions ask this whole project to catch by actually running
+things at real concurrency, not by reading the code and assuming it's
+fine — and it's precisely why Prompt 10 exists as its own phase instead of
+being treated as optional polish.
+
+**Honest scope gap against the spec's literal target, reported rather than
+hidden.** Spec section 10.3 asks for 10,000 concurrent sockets across 200
+rooms, sustained for a 30-minute soak, on infrastructure this pass doesn't
+have: this environment is a single 4-core / ~8GB dev sandbox where the
+load-generating client and the gateway-under-test share the same process
+and the same CPU cores, not a distributed load rig hitting a real
+multi-replica deployment. Actual measurements taken before settling on the
+numbers kept in the committed tests:
+- 1 room × 1,000 sockets (pre-existing, `test_gateway_fanout.py`): p99
+  ~150-180ms.
+- 100 rooms × 10 sockets = 1,000 sockets total
+  (`test_load_multiroom.py`, new): p99 ~170-205ms across three separate
+  runs — kept as the committed test, spec budget (300ms) comfortably met.
+- 100 rooms × 15 sockets = 1,500 total: p99 ~500ms, spec budget exceeded.
+- 150 rooms × 20 sockets = 3,000 total: p50 alone ranged from ~430ms to
+  ~840ms across two runs — both over budget, and the run-to-run variance
+  itself confirms genuine resource contention on this box, not a stable
+  measurement.
+The honest conclusion: this sandbox's own reliable ceiling for the 300ms
+call-to-render budget sits somewhere around 1,000-1,500 concurrent
+sockets, not 10,000 — a sandbox/infrastructure limit, not necessarily an
+architectural one (the fan-out mechanism itself — one Redis `psubscribe`
+per gateway process, bounded per-connection queues — has no obvious
+10,000-socket ceiling built into it; verifying that requires a real
+multi-replica deployment on real infrastructure this environment doesn't
+have, and testing it here would just be measuring this laptop-class
+machine, not the architecture). This gap is reported, not
+papered over with a lowered assertion pretending to be the real target.
+
+**The "1,000 players rushing one stake tier in 10 seconds" scenario is
+exercised at the engine level, not over real WebSockets** (unlike the
+fan-out tests) — `RoundEngine.join()` called directly, 1,000 times
+concurrently, 10-way contention on every one of only 100 available cards
+(deliberately harder than "1,000 players each grab a free card": every
+single card has real simultaneous claimants). This isolates the property
+actually asked for ("report seat allocation" — correctness under
+concurrency) from WebSocket/gateway transport overhead, which the
+fan-out tests already cover on their own. Real numbers: exactly 100
+winners, 900 `card_taken` rejections, ~2-4s elapsed, zero double-allocated
+seats, exactly 100 stakes landed in the pot (not 1,000) — confirmed via
+`ledger.reconcile()`-equivalent direct pot-sum assertion.
+
+**Chaos: an engine crash with real concurrent stakes.** `test_worker.py`
+already proved crash-recovery works with 2 players; `test_chaos_engine_
+crash.py` (new) proves the exact same mechanism holds at 80 real
+concurrent players with real money staked (`task.cancel()` simulating a
+hard process kill, no graceful shutdown), asserting every one of the 80 is
+refunded to the exact centavo, not just that the round ended up voided.
+
+**Chaos: an actual Redis container restart mid-round**, not a mocked
+disconnect — `test_chaos_redis_restart.py` (new) really runs `docker
+compose restart redis` against the shared dev stack while a round is
+`running` with real staked players. Observed, not assumed: the engine's
+`run_forever()` genuinely crashes with an unhandled `ConnectionError`
+(confirming it does *not* silently and transparently reconnect), and a
+fresh `EngineWorker` against the recovered Redis instance correctly finds
+the round non-terminal and voids + refunds every player exactly. This is
+`packages/core/redis_conn.py`'s own documented promise ("if Redis is
+wiped, the platform must recover fully from Postgres") proven against a
+real outage instead of just asserted in a docstring. Restarting a
+docker-compose service is reversible and scoped to this machine's own dev
+stack — the same category of action as the `docker compose down -v`
+clean-slate rebuilds already performed after every phase this session,
+just narrower (data-preserving vs. destroying volumes).
+
+**Real cross-test pollution found and fixed while building this phase, a
+second real bug (test infrastructure, not application code) surfaced by
+actually running things together instead of assuming isolation:** the
+Redis-restart chaos test was first marked `load` like the others. Running
+the full `-m load` batch afterward showed `test_load_rush.py` failing —
+not on any of its own assertions (seat allocation was correct every time),
+but in its *teardown*, where `engine.stop()` tried to release a room lock
+over a Redis connection the earlier chaos test had already pulled the rug
+out from under. The session-scoped `redis` fixture is shared across every
+test in one pytest process; restarting the real container mid-process
+doesn't just affect the test that did it, every fixture built on that
+connection is affected for the rest of that process's life. Fixed by
+giving container-restarting chaos tests their own marker,
+`chaos_infra` (new — registered in `pyproject.toml`, excluded from both
+the default run and from `-m load` batches), with the rule spelled out in
+the test file's own docstring: always run alone. `test_gateway_fanout.py`
+'s stalled-reader test failed transiently in the same contaminated batch
+run for the same underlying reason, and passed cleanly once the chaos
+test was properly isolated.
+
+**Not built this pass, and honestly out of reach without infrastructure
+this environment doesn't have:** a real 30-minute soak with a memory
+curve across gateway replicas (there is exactly one gateway process here,
+not a fleet), and a genuine Postgres-connection-pool-exhaustion chaos
+scenario (asyncpg's pool already has a bounded `max_size`; exhausting it
+deliberately and confirming graceful backpressure rather than cascading
+failure is a real, valuable test that didn't fit in this pass's scope
+alongside everything above — a good candidate for a focused follow-up).
+
 ## 2026-08-24 — Responsible gaming (spec section 12, the rest of Prompt 9)
 
 Phase 7 (admin console) already built `users.status = 'self_excluded'` and
