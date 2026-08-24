@@ -15,7 +15,7 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import Message
 from redis.asyncio import Redis
 
-from packages.core import ledger
+from packages.core import ledger, responsible_gaming
 from packages.core.config import Settings
 from services.bot import referral
 from services.bot.i18n import SUPPORTED_LANGUAGES, resolve_language, t
@@ -289,7 +289,10 @@ async def cmd_deposit(
     except deposits.DepositorSelfExcluded:
         await notifier.send(message.chat.id, t("deposit.self_excluded", language))
         return
-    except (deposits.UnknownDepositor, deposits.DepositProviderError):
+    except deposits.DepositorCoolingOff:
+        await notifier.send(message.chat.id, t("deposit.cooloff_active", language))
+        return
+    except (deposits.DepositorBanned, deposits.UnknownDepositor, deposits.DepositProviderError):
         await notifier.send(message.chat.id, t("deposit.provider_error", language))
         return
 
@@ -376,12 +379,83 @@ async def cmd_withdraw(
 
 
 @router.message(Command("limits"))
-async def cmd_limits(message: Message, pool: asyncpg.Pool, notifier: Notifier) -> None:
+async def cmd_limits(
+    message: Message, command: CommandObject, pool: asyncpg.Pool, notifier: Notifier
+) -> None:
     assert message.from_user is not None
     language = await _language_for(pool, message.from_user.id)
-    if not await _require_registered(message, pool, notifier, language):
+    user = await get_registered_user(pool, message.from_user.id)
+    if user is None:
+        await notifier.send(message.chat.id, t("error.not_registered", language))
         return
-    await notifier.send(message.chat.id, t("limits.not_available", language))
+
+    parsed = responsible_gaming.parse_limits_command(command.args or "")
+    if parsed.action is None:
+        await notifier.send(message.chat.id, t("limits.usage", language))
+        return
+    assert parsed.value is not None
+
+    if parsed.action is responsible_gaming.LimitsAction.SET_DEPOSIT:
+        try:
+            amount = Decimal(parsed.value)
+        except InvalidOperation:
+            await notifier.send(message.chat.id, t("limits.invalid_amount", language))
+            return
+        if amount <= 0:
+            await notifier.send(message.chat.id, t("limits.invalid_amount", language))
+            return
+        async with pool.acquire() as conn:
+            applied_now = await responsible_gaming.set_deposit_limit(conn, user.id, amount)
+        if applied_now:
+            await notifier.send(message.chat.id, t("limits.deposit_set", language, amount=str(amount)))
+        else:
+            await notifier.send(
+                message.chat.id, t("limits.deposit_set_pending", language, amount=str(amount))
+            )
+        return
+
+    if parsed.action is responsible_gaming.LimitsAction.SET_LOSS:
+        try:
+            amount = Decimal(parsed.value)
+        except InvalidOperation:
+            await notifier.send(message.chat.id, t("limits.invalid_amount", language))
+            return
+        if amount <= 0:
+            await notifier.send(message.chat.id, t("limits.invalid_amount", language))
+            return
+        async with pool.acquire() as conn:
+            applied_now = await responsible_gaming.set_loss_limit(conn, user.id, amount)
+        if applied_now:
+            await notifier.send(message.chat.id, t("limits.loss_set", language, amount=str(amount)))
+        else:
+            await notifier.send(
+                message.chat.id, t("limits.loss_set_pending", language, amount=str(amount))
+            )
+        return
+
+    if parsed.action is responsible_gaming.LimitsAction.COOL_OFF:
+        hours = responsible_gaming.COOLOFF_DURATIONS_HOURS.get(parsed.value.lower())
+        if hours is None:
+            await notifier.send(message.chat.id, t("limits.cooloff_invalid_duration", language))
+            return
+        async with pool.acquire() as conn:
+            await responsible_gaming.cool_off(conn, user.id, hours)
+        await notifier.send(message.chat.id, t("limits.cooloff_set", language, hours=hours))
+        return
+
+    if parsed.action is responsible_gaming.LimitsAction.SELF_EXCLUDE:
+        if parsed.value.lower() != responsible_gaming.SELF_EXCLUDE_CONFIRMATION_TOKEN:
+            await notifier.send(message.chat.id, t("limits.selfexclude_confirm", language))
+            return
+        await responsible_gaming.self_exclude(pool, user.id)
+        await notifier.send(
+            message.chat.id,
+            t(
+                "limits.selfexclude_done",
+                language,
+                days=responsible_gaming.SELF_EXCLUSION_MINIMUM_DAYS,
+            ),
+        )
 
 
 @router.message(Command("language"))

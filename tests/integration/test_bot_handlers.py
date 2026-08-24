@@ -9,6 +9,7 @@ processed exactly once.
 import itertools
 import random
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest_asyncio
 from aiogram import Bot
@@ -213,8 +214,6 @@ async def test_start_shows_registration_prompt_for_new_user(bot_ctx):
 
 
 async def test_balance_reflects_real_ledger_state(pool, conn, bot_ctx):
-    from decimal import Decimal
-
     from tests.integration.conftest import fund_user
 
     dp, bot, session = bot_ctx
@@ -233,3 +232,109 @@ async def test_balance_reflects_real_ledger_state(pool, conn, bot_ctx):
 
     assert len(session.sent) == 1
     assert "75.00" in session.sent[0].text
+
+
+async def _register(dp, bot, session) -> int:
+    telegram_id = next_telegram_id()
+    contact_update = make_contact_update(telegram_id, contact_user_id=telegram_id, phone=unique_phone())
+    await dp.feed_update(bot, contact_update)
+    await _settle()
+    session.sent.clear()
+    return telegram_id
+
+
+async def test_limits_deposit_sets_the_cap_instantly_on_first_use(pool, bot_ctx):
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+
+    await dp.feed_update(bot, make_text_update(telegram_id, "/limits deposit 500"))
+    await _settle()
+
+    assert len(session.sent) == 1
+    assert "500" in session.sent[0].text
+
+    user_id = await pool.fetchval("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+    cap = await pool.fetchval(
+        "SELECT daily_deposit_cap FROM responsible_gaming_limits WHERE user_id = $1", user_id
+    )
+    assert cap == Decimal("500.00")
+
+
+async def test_limits_deposit_increase_is_deferred_and_says_so(pool, bot_ctx):
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+
+    await dp.feed_update(bot, make_text_update(telegram_id, "/limits deposit 100"))
+    await _settle()
+    session.sent.clear()
+
+    await dp.feed_update(bot, make_text_update(telegram_id, "/limits deposit 900"))
+    await _settle()
+
+    assert len(session.sent) == 1
+    assert "900" in session.sent[0].text
+
+    user_id = await pool.fetchval("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+    row = await pool.fetchrow(
+        "SELECT daily_deposit_cap, pending_daily_deposit_cap FROM responsible_gaming_limits "
+        "WHERE user_id = $1",
+        user_id,
+    )
+    assert row["daily_deposit_cap"] == Decimal("100.00")  # unchanged for now
+    assert row["pending_daily_deposit_cap"] == Decimal("900.00")
+
+
+async def test_limits_cooloff_invalid_duration_is_rejected(pool, bot_ctx):
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+
+    await dp.feed_update(bot, make_text_update(telegram_id, "/limits cooloff nextweek"))
+    await _settle()
+
+    assert len(session.sent) == 1
+    user_id = await pool.fetchval("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+    row = await pool.fetchrow(
+        "SELECT * FROM responsible_gaming_limits WHERE user_id = $1", user_id
+    )
+    assert row is None  # nothing was ever created -- the command never got that far
+
+
+async def test_limits_cooloff_valid_duration_sets_it(pool, bot_ctx):
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+
+    await dp.feed_update(bot, make_text_update(telegram_id, "/limits cooloff 24h"))
+    await _settle()
+
+    assert len(session.sent) == 1
+    user_id = await pool.fetchval("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+    cooloff_until = await pool.fetchval(
+        "SELECT cooloff_until FROM responsible_gaming_limits WHERE user_id = $1", user_id
+    )
+    assert cooloff_until is not None
+
+
+async def test_limits_selfexclude_without_confirm_does_nothing(pool, bot_ctx):
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+
+    await dp.feed_update(bot, make_text_update(telegram_id, "/limits selfexclude"))
+    await _settle()
+
+    assert len(session.sent) == 1
+    user_id = await pool.fetchval("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+    status = await pool.fetchval("SELECT status FROM users WHERE id = $1", user_id)
+    assert status == "active"
+
+
+async def test_limits_selfexclude_confirm_applies_it(pool, bot_ctx):
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+
+    await dp.feed_update(bot, make_text_update(telegram_id, "/limits selfexclude confirm"))
+    await _settle()
+
+    assert len(session.sent) == 1
+    user_id = await pool.fetchval("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+    status = await pool.fetchval("SELECT status FROM users WHERE id = $1", user_id)
+    assert status == "self_excluded"

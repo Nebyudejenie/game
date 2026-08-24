@@ -20,7 +20,7 @@ import asyncpg
 import structlog
 from redis.asyncio import Redis
 
-from packages.core import ledger
+from packages.core import ledger, responsible_gaming
 from services.gateway.queries import user_balance_snapshot
 from services.payments.provider import PaymentProvider
 
@@ -49,6 +49,14 @@ class DailyDepositCapExceeded(DepositRejected):
 
 
 class DepositorSelfExcluded(DepositRejected):
+    pass
+
+
+class DepositorBanned(DepositRejected):
+    pass
+
+
+class DepositorCoolingOff(DepositRejected):
     pass
 
 
@@ -87,6 +95,15 @@ async def create_deposit_intent(
             raise UnknownDepositor(f"user {user_id} does not exist")
         if user_status == "self_excluded":
             raise DepositorSelfExcluded(f"user {user_id} is self-excluded")
+        if user_status == "banned":
+            raise DepositorBanned(f"user {user_id} is banned")
+
+        limits = await responsible_gaming.get_or_create_limits(conn, user_id)
+        if limits.cooloff_until is not None and datetime.now(UTC) < limits.cooloff_until:
+            raise DepositorCoolingOff(f"user {user_id} is cooling off until {limits.cooloff_until}")
+
+        user_cap = responsible_gaming.effective_deposit_cap(limits)
+        effective_cap = min(daily_cap, user_cap) if user_cap is not None else daily_cap
 
         today_total = await conn.fetchval(
             """
@@ -97,8 +114,8 @@ async def create_deposit_intent(
             """,
             user_id,
         )
-        if today_total + amount > daily_cap:
-            raise DailyDepositCapExceeded(f"user {user_id} would exceed the daily cap {daily_cap}")
+        if today_total + amount > effective_cap:
+            raise DailyDepositCapExceeded(f"user {user_id} would exceed the daily cap {effective_cap}")
 
         ref_row = await conn.fetchrow(
             "SELECT 'DEP-' || extract(year from now())::text || '-' || "

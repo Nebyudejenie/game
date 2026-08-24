@@ -5,6 +5,122 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-24 — Responsible gaming (spec section 12, the rest of Prompt 9)
+
+Phase 7 (admin console) already built `users.status = 'self_excluded'` and
+wired it into deposits. This pass completes the rest of Prompt 9's
+explicit test list -- "self-exclusion must block play, deposits, and
+marketing" and "a limit increase does not take effect for 24 hours" -- via
+a new `packages/core/responsible_gaming.py`, chosen as a `packages/core`
+module rather than living inside one service because it's a shared
+domain concern three different services need to call into (the engine's
+join gate, the payments deposit gate, and the bot's self-service `/limits`
+command), the same reasoning `ledger.py`/`bingo.py` already live there.
+
+**Cool-off is purely timestamp-driven, never a `users.status` value.**
+`responsible_gaming_limits.cooloff_until` is the sole source of truth;
+nothing sets or reads a "cooling_off" status enum, and nothing needs a
+scheduled job to lift a cool-off when it expires -- the timestamp
+comparison in `check_play_allowed()`/`check_stake_allowed()` naturally
+stops blocking the moment `now() >= cooloff_until`.
+`test_cool_off_lifts_itself_after_expiry` proves this: a cool-off is set,
+its timestamp is directly backdated into the past (no code path exists to
+manually "lift" a cool-off, so the test does the only thing an admin or a
+cron job restoring from a snapshot could ever do -- wait for time to
+pass), and the very next `join()` call succeeds with no other state
+change anywhere.
+
+**Self-exclusion, by contrast, deliberately has no lift path at all,
+anywhere in this codebase.** `self_exclude()` sets both
+`users.status = 'self_excluded'` (the same column every other status
+check already reads) and `self_excluded_until` for record-keeping, but
+there is no `un_self_exclude()` function, no admin route to clear it, no
+duration check gating a reversal. That absence, not a duration check, is
+what actually satisfies spec section 12's "irreversible for the period" --
+a duration check can be miscalculated or bypassed; a nonexistent function
+cannot. `SELF_EXCLUSION_MINIMUM_DAYS = 180` ("6 months minimum") is
+enforced as a floor on the way in (`SelfExclusionTooShort` if a caller
+asks for less), not on the way out.
+
+**"Blocks registration by the same phone" needed no new code at all** --
+`register_from_contact()`'s existing-user lookup is keyed on
+`telegram_id`, not phone, so a self-excluded user creating a fresh
+Telegram account and trying to register with the same number hits
+`phone_e164`'s pre-existing UNIQUE constraint and gets the same
+`PhoneAlreadyRegistered` any duplicate-phone registration attempt already
+gets. `test_self_excluded_users_phone_cannot_register_a_second_account`
+proves the structural guarantee holds; nothing needed to change in
+`services/bot/registration.py`.
+
+**The engine's join() gate is deliberately one combined SQL query in the
+common case, not three or four separate ones.** The first version of this
+wired `check_play_allowed()` (status + cool-off, 2 queries) and
+`get_or_create_limits()` (1-3 queries, since it's insert-if-missing) as
+two separate calls inside `RoundEngine.join()` -- correct, but it broke
+`test_full_round_35_players_ledger_balances` (35 sequential joins against
+a 1-second lobby window), because `join()` is a hot path and the added
+per-call latency pushed the whole sequence past the lobby timer before
+all 35 could join. Not a logic bug, a real performance regression from
+adding real work to a hot path. Fixed by adding `check_stake_allowed()`,
+one query combining status, cool-off, and the loss-cap fields together
+(a plain read-only `SELECT ... LEFT JOIN`, not `get_or_create_limits()`'s
+insert-if-missing path, since a missing limits row and an all-NULL one
+mean the same thing for a read) -- one round-trip in the common
+no-limits-set case, two only when a loss cap is actually configured
+(the `today_net_loss()` query only runs then). This is the kind of gap
+the CTO instructions ask to catch by actually running things, not just
+reading the diff -- caught by the existing test suite immediately, not
+discovered later.
+
+**The loss-cap check reuses `today_net_loss()`'s definition of "loss"
+literally: stakes debited from `user_cash` today minus payouts credited
+to it today.** This deliberately does not distinguish stakes still
+in-flight in a live round from ones already settled -- a stake is a real
+debit the moment `ledger.post()` commits it, win or lose, so it counts
+against the cap immediately, the same way it's already gone from
+`user_cash` immediately. A winning stake's payout later nets back against
+the same day's total when it settles.
+
+**Bot UX: `/limits` is one command with a subcommand parser, not four
+separate commands** (`deposit`/`loss`/`cooloff`/`selfexclude`), matching
+the spec's own command table (`/limits` is listed as the single entry
+point). This created a real friction point with
+`test_bot_no_hardcoded_strings.py`'s AST-based check on
+`services/bot/handlers.py`: any inline string comparison like
+`if subcommand == "deposit"` is itself a hardcoded literal the checker
+(correctly) flags, and locale keys can't be passed as arguments to a
+non-`t()` helper either, since the checker only exempts a literal `t(...)`
+call's own first argument. Resolved by moving the parsing itself into
+`responsible_gaming.parse_limits_command()` (returns a `LimitsAction`
+enum member, not a string) and keeping every locale-key selection in
+`handlers.py` as a direct `if/else` calling `t("literal.key", ...)`
+inline rather than building a key in a variable first -- both patterns
+already established this session (`STATUS_APPROVED`/`STATUS_REVIEW` in
+Phase 6, the `DepositRejected` exception hierarchy in Phase 5) applied to
+a new kind of literal (an enum instead of an exception type).
+
+**Deliberately not built this pass, real open gaps:**
+- **Session-time reminders** ("you've been playing 60 minutes") and the
+  **reality-check display** on the results screen (net position this
+  session). Both are genuinely Mini App frontend + gateway session-tracking
+  features, not responsible-gaming domain logic -- Phase 4's screens were
+  already reviewed and closed, and adding either is its own frontend pass,
+  the same reasoning the Mini App's deposit-amount picker was deferred in
+  Phase 5.
+- **Age gate / ID verification at KYC level 2.** No identity-verification
+  pipeline exists in this codebase (Phase 6 already flagged the same gap
+  for withdrawal holder-name matching) -- `kyc_level` is a plain integer
+  column an admin would have to set by hand today; there's no real
+  verification flow behind it.
+- **`marketing_eligible_user_ids()` has no caller.** No bulk/campaign
+  notification feature exists anywhere in this codebase yet -- `Notifier
+  .send()` is always a reply to one specific user's action, never a
+  broadcast. This function exists so that whenever such a feature is
+  built, its audience query is already correct and already tested,
+  matching the `user:{id}` Redis channel precedent from Phase 3/5 (built
+  ahead of need, proven correct in isolation, wired up once a real
+  producer/consumer exists).
+
 ## 2026-08-24 — Phase 6 (withdrawals, spec Prompt 8 / section 8.3-8.4)
 
 Built the payout side: `services/payments/withdrawals.py` (validation gate,

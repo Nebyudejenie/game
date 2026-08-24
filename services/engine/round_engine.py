@@ -31,7 +31,7 @@ from decimal import Decimal
 import asyncpg
 from redis.asyncio import Redis
 
-from packages.core import bingo, ledger
+from packages.core import bingo, ledger, responsible_gaming
 from packages.core.bingo import Grid
 from packages.core.ledger import Entry, InsufficientFunds
 from services.engine import commands, refunds, settlement
@@ -209,6 +209,11 @@ class RoundEngine:
         idem = f"stake-{round_id}-{user_id}"
 
         async with self._pool.acquire() as conn:
+            block = await responsible_gaming.check_stake_allowed(conn, user_id, self._room.stake)
+            if block.blocked:
+                assert block.reason is not None
+                return JoinResult(False, block.reason)
+
             try:
                 async with conn.transaction():
                     await conn.execute(

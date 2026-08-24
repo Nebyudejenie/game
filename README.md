@@ -250,6 +250,45 @@ display name would be theater, not a control), and the auto-approve rule's
 none of spec 8.4's collusion/device-fingerprint/velocity flags are built.
 See `DECISIONS.md`.
 
+**Responsible gaming (spec section 12):**
+- **`packages/core/responsible_gaming.py`** — deposit and loss limits
+  (instant decrease, 24-hour delay on any increase — the effective cap is
+  computed lazily from a `pending_*`/`pending_*_effective_at` pair, no
+  scheduled job involved), cool-off (purely timestamp-driven —
+  `cooloff_until` lifts itself the moment it passes, no status flip, no
+  cron), and self-exclusion (`users.status = 'self_excluded'`, minimum 180
+  days, and — the thing that actually makes it irreversible — there is no
+  "undo" function anywhere in this codebase, not a duration check standing
+  between a player and reversing it).
+- **`RoundEngine.join()`** now gates every stake through
+  `check_stake_allowed()`: blocks self-excluded, banned, and
+  currently-cooling-off users, and blocks a stake that would push the
+  day's realized net loss past a configured cap — one combined SQL query
+  in the common case (no limits set), since this is a hot path called on
+  every join.
+- **`services/payments/deposits.py`**'s `create_deposit_intent()` also
+  blocks banned and cooling-off users now (self-exclusion was already
+  blocked since Phase 5), and layers an optional tighter per-user deposit
+  cap on top of the platform-wide one.
+- **`services/bot/handlers.py`**'s `/limits` command: `deposit <amount>`,
+  `loss <amount>`, `cooloff <24h|7d|30d>`, `selfexclude confirm` (the
+  explicit `confirm` token is deliberate friction for an irreversible
+  action, not a UX accident).
+- **`marketing_eligible_user_ids()`** — the query spec section 12 asks for
+  ("segment your notification queries by users.status at the query level
+  so it can't be forgotten"), filtering out self-excluded, banned, and
+  currently-cooling-off users. No bulk-notification feature calls it yet
+  (none exists in this codebase), but the audience query itself is
+  correct and tested now, ready for whenever one is built.
+
+Two real gaps, not oversights: session-time reminders and the results
+screen's "net position this session" reality check are Mini App frontend
+features, deferred the same way the deposit-amount picker UI was in
+Phase 5; and the age-gate/KYC-level-2 identity verification has no real
+verification pipeline behind it anywhere in this codebase, the same open
+gap Phase 6 already flagged for withdrawal holder-name matching. See
+`DECISIONS.md`.
+
 **Admin console (Phase 7):**
 - **`services/admin/auth.py`** — a completely separate authentication path
   from players: username + bcrypt password + TOTP 2FA, Redis-backed session
@@ -320,6 +359,15 @@ withdrawal locks the same balance, a genuinely concurrent
 proving at most one ever succeeds, a simulated crashed payout worker
 whose redelivered job still settles to the ledger exactly once even
 though the (idempotent-on-`our_ref`) provider gets called again, and a
-rejected payout returning the exact amount to `user_cash`; see
+rejected payout returning the exact amount to `user_cash`; and for
+responsible gaming: a self-excluded or currently-cooling-off user's real
+`RoundEngine.join()` call failing with the correct reason, a cool-off
+that lifts itself the instant its timestamp passes with no code path
+anywhere touching it, a loss cap computed from real stake/payout ledger
+entries blocking a stake that would exceed it, a limit increase proven
+to still show the old cap 23 hours and 59 minutes in and the new one 24
+hours in, a self-excluded phone number structurally unable to register a
+second account, and the marketing-audience query proven to exclude
+exactly the users spec section 12 says it must; see
 `DECISIONS.md`. `mypy --strict` is clean across the
 whole codebase.
