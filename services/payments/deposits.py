@@ -21,6 +21,7 @@ import structlog
 from redis.asyncio import Redis
 
 from packages.core import ledger, responsible_gaming
+from packages.core.notifications import notify_user
 from services.gateway.queries import user_balance_snapshot
 from services.payments.provider import PaymentProvider
 
@@ -247,9 +248,14 @@ async def _apply_confirmed_status(
                 txn.id,
             )
             user_id = payment["user_id"]
+            credited_amount = payment["amount"]
 
     assert user_id is not None
-    await _publish_balance_update(pool, redis, user_id)
+    snapshot = await _publish_balance_update(pool, redis, user_id)
+    await notify_user(
+        pool, redis, user_id=user_id, key="notify.deposit_confirmed",
+        amount=str(credited_amount), balance=snapshot["cash"],
+    )
     return "credited"
 
 
@@ -309,9 +315,10 @@ async def poll_pending_deposits(
     return credited
 
 
-async def _publish_balance_update(pool: asyncpg.Pool, redis: Redis, user_id: int) -> None:
+async def _publish_balance_update(pool: asyncpg.Pool, redis: Redis, user_id: int) -> dict[str, str]:
     snapshot = await user_balance_snapshot(pool, user_id)
     await redis.publish(f"user:{user_id}", json.dumps({"t": "balance_update", **snapshot}))
+    return snapshot
 
 
 @dataclass(frozen=True)

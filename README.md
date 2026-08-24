@@ -255,6 +255,22 @@ display name would be theater, not a control), and the auto-approve rule's
 none of spec 8.4's collusion/device-fingerprint/velocity flags are built.
 See `DECISIONS.md`.
 
+**Bot notification relay** — the one gap Phase 5 and Phase 6 both
+explicitly deferred to build once, together: `packages/core/
+notifications.py` (producer — `notify_user()`, called after money has
+already moved, never able to make that movement fail) and
+`services/bot/notification_relay.py` (consumer — a real Redis Streams
+consumer group, this codebase's second one, and the only thing outside
+`services/bot/handlers.py` allowed to call `Notifier.send()`, keeping that
+invariant intact even across process boundaries). Wired into a confirmed
+deposit, a payout succeeding or failing, and an admin's explicit
+withdrawal rejection (which alone includes the rejection reason — a
+provider-side failure's raw internal error text is deliberately never
+shown to a player). Its own test suite caught the *third* instance this
+session of the same shared-Redis-Stream test-pollution bug
+(`payout_worker.py`'s queue had the same issue in Phase 6) — fixed with
+the same autouse-cleanup-fixture pattern.
+
 **Responsible gaming (spec section 12):**
 - **`packages/core/responsible_gaming.py`** — deposit and loss limits
   (instant decrease, 24-hour delay on any increase — the effective cap is

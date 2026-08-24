@@ -301,6 +301,7 @@ async def reject_withdrawal(
         raise HTTPException(status_code=422, detail="reason is required")
     rejected = await queries.reject_withdrawal_admin(
         app.state.pool,
+        app.state.redis,
         admin_id=admin.admin_id,
         payment_id=payment_id,
         reason=body.reason,

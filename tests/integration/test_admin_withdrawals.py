@@ -120,7 +120,7 @@ async def test_reject_withdrawal_admin_returns_exact_amount_to_cash(pool, redis,
     assert await _cash(conn, user_id) == Decimal("350.00")
 
     rejected = await queries.reject_withdrawal_admin(
-        pool, admin_id=admin_id, payment_id=payment_id, reason="suspected fraud", ip_address="10.0.0.1"
+        pool, redis, admin_id=admin_id, payment_id=payment_id, reason="suspected fraud", ip_address="10.0.0.1"
     )
     assert rejected is True
 

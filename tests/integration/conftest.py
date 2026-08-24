@@ -23,6 +23,7 @@ os.environ.setdefault("CHAPA_API_KEY", "test-chapa-secret-for-suite")
 
 from packages.core import ledger
 from packages.core.config import get_settings
+from packages.core.notifications import NOTIFICATIONS_STREAM
 from packages.core.redis_conn import get_redis
 from services.engine.round_engine import load_card_pool
 from services.payments.withdrawals import PAYOUT_STREAM
@@ -76,6 +77,18 @@ async def clean_payout_stream(redis):
     for uniqueness collisions, just applied to a shared queue instead.
     """
     await redis.delete(PAYOUT_STREAM)
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def clean_notifications_stream(redis):
+    """Same reasoning as clean_payout_stream, for
+    packages/core/notifications.py's 'bot_notifications' stream -- a
+    deposit/withdrawal test can enqueue a real notification without ever
+    consuming it, and a stale one from an earlier test was confirmed to
+    make notification_relay.process_next() deliver the wrong message to
+    the wrong chat in a later test before this fixture existed.
+    """
+    await redis.delete(NOTIFICATIONS_STREAM)
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")

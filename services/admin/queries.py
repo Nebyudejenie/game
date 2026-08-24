@@ -17,6 +17,7 @@ import asyncpg
 from redis.asyncio import Redis
 
 from packages.core import bingo, ledger
+from packages.core.notifications import notify_user
 from services.admin import audit
 from services.engine.refunds import refund_round
 from services.payments.withdrawals import enqueue_payout
@@ -477,7 +478,7 @@ async def approve_withdrawal_admin(
 
 
 async def reject_withdrawal_admin(
-    pool: asyncpg.Pool, *, admin_id: int, payment_id: int, reason: str, ip_address: str | None
+    pool: asyncpg.Pool, redis: Redis, *, admin_id: int, payment_id: int, reason: str, ip_address: str | None
 ) -> bool:
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -514,4 +515,10 @@ async def reject_withdrawal_admin(
                 reason=reason,
                 ip_address=ip_address,
             )
+            user_id = row["user_id"]
+            amount = row["amount"]
+
+    await notify_user(
+        pool, redis, user_id=user_id, key="notify.withdrawal_rejected", amount=str(amount), reason=reason
+    )
     return True

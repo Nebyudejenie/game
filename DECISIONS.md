@@ -5,6 +5,81 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-24 — Bot notification relay (deposit/withdrawal confirmations, deferred from Phases 5-6)
+
+Closes the gap explicitly deferred twice already: spec 8.2 step 9 ("Bot
+notification: '✅ 200 ETB deposited...'") and 8.3 step 8 ("Bot notifies the
+user with the reason") were both left unbuilt because `services/payments`
+and `services/admin` are separate processes from `services/bot`, and
+`services/bot/handlers.py`'s own docstring makes "nothing calls
+`bot.send_message` except `Notifier`" a load-bearing, tested invariant --
+reaching around that from another process would have quietly broken it.
+Built once for both money directions, as planned.
+
+**`packages/core/notifications.py`** (producer) — `notify_user(conn_or_pool,
+redis, *, user_id, key, **kwargs)` looks up the user's `telegram_id` and
+enqueues onto a `bot_notifications` Redis Stream. Deliberately swallows
+its own failures (logs, never raises): this is called *after* money has
+already moved and committed, and a notification failing to enqueue must
+never look like the money movement itself failed.
+
+**`services/bot/notification_relay.py`** (consumer) — a real Redis Streams
+consumer group, the same shape as `payout_worker.py`'s (the second one in
+this codebase now): reads a queued notification, resolves the user's
+language, and calls `Notifier.send()` -- the one and only thing in this
+module allowed to do that, keeping the "nothing but `Notifier` sends"
+invariant intact even for a notification that originated in a completely
+different process. A Telegram private chat's id is always the user's
+`telegram_id`, so no separate chat-id lookup exists.
+
+Wired into the three places spec 8.2/8.3 actually asks for: a confirmed
+deposit (`deposits.py`'s `_apply_confirmed_status`, reusing the balance
+snapshot `_publish_balance_update` already computes rather than a second
+query), a successful or failed payout (`payout_worker.py`'s `process_one`,
+both branches), and an admin's explicit withdrawal rejection
+(`admin/queries.py`'s `reject_withdrawal_admin`, the one path where a
+human-authored reason is safe to show the player -- see below).
+
+**Provider-side payout failures do not expose the raw failure reason to
+the player; an admin's rejection reason does.** `notify.withdrawal_failed`
+(provider errored, or reported a non-success status) is a generic message
+with no `{reason}` placeholder -- the string `_reverse()` stores in
+`failure_reason` is whatever the provider's exception or status string
+happened to be, not something written for a player to read, and echoing
+raw internal error text back to a user is its own small security/UX
+smell. `notify.withdrawal_rejected` (an admin's own explicit rejection)
+does include `{reason}`, because that text is deliberately authored by a
+human for exactly this purpose when they reject the request.
+
+**A third instance of the same shared-Redis-Stream test-pollution bug
+already found twice this session (`payout_worker.py`'s stream in Phase 6,
+now this one) -- found immediately by the relay's own tests, before
+extending the fix.** The first version of `test_notification_relay.py`
+had five of seven tests fail: not on any real logic, but because an
+earlier test in the same file enqueued a notification without consuming
+it, so a later test's `process_next()` delivered a *different* test's
+stale, wrong-amount, wrong-chat-id message instead of its own. Fixed the
+same way as before -- an autouse `clean_notifications_stream` fixture in
+`conftest.py`, mirroring `clean_payout_stream` exactly. Given this is now
+the third time a shared, session-lived Redis Stream has caused this exact
+class of bug, any *future* Redis Stream this codebase adds should get the
+same autouse-cleanup treatment by default, not as an afterthought once a
+test fails.
+
+**Still not built: where this relay's `run_forever()` actually gets
+started in a real deployment.** This matches an established, consistent
+choice already made for `EngineWorker` and `payout_worker.py` -- this
+codebase builds correct, tested runtime primitives (`process_next()` /
+`run_forever()` functions and classes) but has never wired any of them
+into an actual `main.py`/process-orchestration entrypoint anywhere,
+including `services/bot/app.py`'s `build_app()` itself (which assembles
+the aiohttp webhook app but is never actually called by anything in this
+repo either -- `Notifier.start()`/`.stop()` are likewise only ever called
+by test fixtures). Real deployment wiring (which service runs as which
+process, systemd unit, or container command) has been consistently out of
+scope for this whole session; this relay follows that same line, not a
+new gap specific to it.
+
 ## 2026-08-24 — Phase 8 (load, chaos, launch readiness — spec Prompt 10 / section 10.3)
 
 **A real, previously-undiscovered money-safety race condition was found and

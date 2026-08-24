@@ -1,0 +1,208 @@
+"""Tests for the bot-notification relay (packages/core/notifications.py's
+notify_user() producer, services/bot/notification_relay.py's consumer):
+real money-moving flows (a deposit webhook credit, a payout settling, an
+admin rejecting a withdrawal) actually end up as a real message delivered
+through a real Notifier, not just a Redis Stream entry nobody reads.
+"""
+
+import asyncio
+from decimal import Decimal
+
+from packages.core.notifications import NOTIFICATIONS_STREAM, notify_user
+from services.admin import queries as admin_queries
+from services.bot import notification_relay
+from services.bot.notifier import Notifier
+from services.payments import deposits, payout_worker, withdrawals
+from tests.integration.conftest import fund_user, next_telegram_id
+from tests.integration.test_admin_auth import create_test_admin
+from tests.integration.test_bot_handlers import make_bot
+from tests.integration.test_payments_deposits import FakePaymentProvider
+from tests.integration.test_payments_deposits import _webhook as build_deposit_webhook
+from tests.integration.test_payout_worker import FakePayoutProvider
+
+
+async def _make_notifier() -> tuple[Notifier, object]:
+    bot, session = make_bot()
+    notifier = Notifier(bot)
+    notifier.start()
+    return notifier, session
+
+
+async def _register(conn, telegram_id: int) -> int:
+    row = await conn.fetchrow(
+        "INSERT INTO users (telegram_id, display_name) VALUES ($1, $2) RETURNING id",
+        telegram_id,
+        f"relay-test-{telegram_id}",
+    )
+    return row["id"]
+
+
+async def test_notify_user_enqueues_onto_the_stream(pool, redis, conn):
+    telegram_id = next_telegram_id()
+    user_id = await _register(conn, telegram_id)
+
+    await notify_user(pool, redis, user_id=user_id, key="notify.you_won", amount="10.00")
+
+    length = await redis.xlen(NOTIFICATIONS_STREAM)
+    assert length >= 1
+
+
+async def test_notify_user_is_a_noop_for_an_unknown_user(pool, redis):
+    before = await redis.xlen(NOTIFICATIONS_STREAM)
+    await notify_user(pool, redis, user_id=999_999_999, key="notify.you_won", amount="10.00")
+    after = await redis.xlen(NOTIFICATIONS_STREAM)
+    assert after == before
+
+
+async def test_relay_delivers_a_queued_notification(pool, redis, conn):
+    notifier, session = await _make_notifier()
+    try:
+        telegram_id = next_telegram_id()
+        user_id = await _register(conn, telegram_id)
+        await notify_user(pool, redis, user_id=user_id, key="notify.you_won", amount="42.00")
+
+        delivered = await notification_relay.process_next(
+            pool, redis, notifier, consumer_name=f"test-{telegram_id}"
+        )
+        assert delivered is True
+
+        await asyncio.sleep(0.1)  # Notifier.send() enqueues to its own async worker
+        assert len(session.sent) == 1
+        assert session.sent[0].chat_id == telegram_id
+        assert "42.00" in session.sent[0].text
+    finally:
+        await notifier.stop()
+
+
+async def test_relay_returns_false_when_stream_is_empty(pool, redis):
+    notifier, _session = await _make_notifier()
+    try:
+        delivered = await notification_relay.process_next(pool, redis, notifier, consumer_name="empty-test")
+        assert delivered is False
+    finally:
+        await notifier.stop()
+
+
+async def test_deposit_credit_notifies_the_depositor(pool, redis, conn):
+    notifier, session = await _make_notifier()
+    try:
+        telegram_id = next_telegram_id()
+        user_id = await _register(conn, telegram_id)
+        provider = FakePaymentProvider()
+        intent = await deposits.create_deposit_intent(
+            pool,
+            provider,
+            user_id=user_id,
+            amount=Decimal("120.00"),
+            phone_e164="+251911000000",
+            return_url="https://app.test/return",
+            min_deposit=Decimal("1.00"),
+            daily_cap=Decimal("1000000.00"),
+        )
+        headers, body = build_deposit_webhook(
+            event_id=f"evt-{intent.our_ref}", our_ref=intent.our_ref, status="succeeded", amount="120.00"
+        )
+        outcome = await deposits.handle_webhook(pool, redis, provider, headers=headers, raw_body=body)
+        assert outcome == "credited"
+
+        delivered = await notification_relay.process_next(
+            pool, redis, notifier, consumer_name=f"test-{telegram_id}"
+        )
+        assert delivered is True
+        await asyncio.sleep(0.1)
+
+        assert len(session.sent) == 1
+        assert session.sent[0].chat_id == telegram_id
+        assert "120.00" in session.sent[0].text
+    finally:
+        await notifier.stop()
+
+
+async def test_successful_payout_notifies_the_withdrawer(pool, redis, conn):
+    notifier, session = await _make_notifier()
+    try:
+        telegram_id = next_telegram_id()
+        user_id = await _register(conn, telegram_id)
+        await fund_user(conn, user_id, Decimal("500.00"))
+
+        intent = await withdrawals.request_withdrawal(
+            pool,
+            redis,
+            FakePayoutProvider(),
+            user_id=user_id,
+            amount=Decimal("200.00"),
+            method_kind="telebirr",
+            account_ref="0911223344",
+            holder_name="Test Holder",
+            min_withdraw=Decimal("10.00"),
+            auto_approve_limit=Decimal("100000.00"),
+            kyc_threshold=Decimal("100000.00"),
+            chargeback_window_minutes=0,
+            min_account_age_hours=0,
+        )
+        assert intent.status == withdrawals.STATUS_APPROVED
+
+        outcome = await payout_worker.process_next(
+            pool, redis, FakePayoutProvider(), consumer_name=f"payout-{telegram_id}"
+        )
+        assert outcome == "succeeded"
+
+        delivered = await notification_relay.process_next(
+            pool, redis, notifier, consumer_name=f"test-{telegram_id}"
+        )
+        assert delivered is True
+        await asyncio.sleep(0.1)
+
+        assert len(session.sent) == 1
+        assert session.sent[0].chat_id == telegram_id
+        assert "200.00" in session.sent[0].text
+    finally:
+        await notifier.stop()
+
+
+async def test_admin_rejected_withdrawal_notifies_with_the_reason(pool, redis, conn):
+    notifier, session = await _make_notifier()
+    try:
+        telegram_id = next_telegram_id()
+        user_id = await _register(conn, telegram_id)
+        await fund_user(conn, user_id, Decimal("500.00"))
+
+        intent = await withdrawals.request_withdrawal(
+            pool,
+            redis,
+            FakePayoutProvider(),
+            user_id=user_id,
+            amount=Decimal("300.00"),
+            method_kind="telebirr",
+            account_ref="0911223344",
+            holder_name="Test Holder",
+            min_withdraw=Decimal("10.00"),
+            auto_approve_limit=Decimal("0.00"),  # forces review
+            kyc_threshold=Decimal("1000000.00"),
+            chargeback_window_minutes=0,
+            min_account_age_hours=0,
+        )
+        assert intent.status == withdrawals.STATUS_REVIEW
+
+        admin_id, *_ = await create_test_admin(pool)
+        rejected = await admin_queries.reject_withdrawal_admin(
+            pool,
+            redis,
+            admin_id=admin_id,
+            payment_id=intent.payment_id,
+            reason="account under review",
+            ip_address=None,
+        )
+        assert rejected is True
+
+        delivered = await notification_relay.process_next(
+            pool, redis, notifier, consumer_name=f"test-{telegram_id}"
+        )
+        assert delivered is True
+        await asyncio.sleep(0.1)
+
+        assert len(session.sent) == 1
+        assert "300.00" in session.sent[0].text
+        assert "account under review" in session.sent[0].text
+    finally:
+        await notifier.stop()

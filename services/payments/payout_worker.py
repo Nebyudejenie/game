@@ -24,6 +24,7 @@ from redis.asyncio import Redis
 from redis.exceptions import ResponseError
 
 from packages.core import ledger
+from packages.core.notifications import notify_user
 from services.payments.provider import PaymentProvider
 from services.payments.withdrawals import PAYOUT_STREAM
 
@@ -87,6 +88,7 @@ async def process_one(
     except Exception as exc:
         logger.error("payout_provider_error", our_ref=our_ref, error=str(exc))
         await _reverse(pool, payment_id=payment_id, user_id=user_id, amount=amount, our_ref=our_ref, reason=str(exc))
+        await notify_user(pool, redis, user_id=user_id, key="notify.withdrawal_failed", amount=str(amount))
         await redis.xack(PAYOUT_STREAM, GROUP, msg_id)
         return "failed"
 
@@ -99,6 +101,7 @@ async def process_one(
             our_ref=our_ref,
             provider_ref=result.provider_ref,
         )
+        await notify_user(pool, redis, user_id=user_id, key="notify.withdrawal_succeeded", amount=str(amount))
         await redis.xack(PAYOUT_STREAM, GROUP, msg_id)
         return "succeeded"
 
@@ -106,6 +109,7 @@ async def process_one(
         pool, payment_id=payment_id, user_id=user_id, amount=amount, our_ref=our_ref,
         reason=f"provider reported status={result.status}",
     )
+    await notify_user(pool, redis, user_id=user_id, key="notify.withdrawal_failed", amount=str(amount))
     await redis.xack(PAYOUT_STREAM, GROUP, msg_id)
     return "failed"
 
