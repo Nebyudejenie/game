@@ -175,9 +175,40 @@ above.
   subsetting to the codepoints the current locale files actually use
   (spec budget: 40KB).
 - **`services/gateway/app.py`** now also serves the Mini App's static
-  files and two REST endpoints (`/api/me`, `/api/history`) for the wallet
-  screen, authenticated the same `Authorization: tma <initData>` way as
-  the WebSocket handshake.
+  files and four REST endpoints (`/api/me`, `/api/history`, `/api/deposit`,
+  `/api/withdraw`) for the wallet screen, authenticated the same
+  `Authorization: tma <initData>` way as the WebSocket handshake.
+
+**Mini App wallet completion — deposit, withdraw, history, reality check:**
+- **Deposit and withdraw tabs** (previously "launching soon" placeholders)
+  now work end to end: an amount picker with quick-select chips for
+  deposits, an amount/telebirr-number/holder-name form for withdrawals,
+  both calling the two new gateway REST routes and showing a real,
+  translated outcome — a real checkout link (opened via `tg.openLink`), a
+  real approved/review status, or a specific, translated rejection reason
+  (below minimum, self-excluded, insufficient balance, ...).
+- **History tab** now calls the `/api/history` endpoint that already
+  existed since Phase 4 but was never wired to the UI — every settled
+  round the player was in, with its outcome.
+- **Reality check** (spec section 12: "net position this session, shown
+  plainly") — a running total on every results screen, computed entirely
+  from WebSocket events the client already receives
+  (`web/miniapp/js/state.js`), colored green/red for up/down. Deliberately
+  client-side and reset-on-reload, unlike every *enforced*
+  responsible-gaming control (those are all server-side) — this one is an
+  awareness nudge, not a control that must survive a page reload.
+- **Session-time reminders** ("you've been playing 60 minutes") — same
+  reasoning, same file: a plain client-side timer against
+  `sessionStartedAt`, toasted at 60/120/180 minutes.
+- Verified in a real Chromium browser against the real backend (spec
+  discipline: UI changes get used in a browser, not just asserted against
+  a DOM), including a real fake-provider-backed deposit returning an
+  actual checkout URL and a withdrawal actually locking funds — see
+  `tests/integration/test_miniapp_wallet_e2e.py`. Three real bugs in the
+  new *tests themselves* were caught and fixed by actually running them
+  (a wait condition racing an intermediate status message, a screen with
+  no route back to the wallet button in the test stub, a mismatched
+  Amharic substring check) — see `DECISIONS.md`.
 
 **Deposits (Phase 5):**
 - **`services/payments/provider.py`** — a provider-agnostic
@@ -302,13 +333,13 @@ the same autouse-cleanup-fixture pattern.
   (none exists in this codebase), but the audience query itself is
   correct and tested now, ready for whenever one is built.
 
-Two real gaps, not oversights: session-time reminders and the results
-screen's "net position this session" reality check are Mini App frontend
-features, deferred the same way the deposit-amount picker UI was in
-Phase 5; and the age-gate/KYC-level-2 identity verification has no real
-verification pipeline behind it anywhere in this codebase, the same open
-gap Phase 6 already flagged for withdrawal holder-name matching. See
-`DECISIONS.md`.
+Session-time reminders and the results screen's reality check were
+initially deferred as Mini App frontend work (the same reasoning the
+deposit-amount picker UI was deferred in Phase 5) and have since been
+built — see "Mini App wallet completion" above. One gap remains open: the
+age-gate/KYC-level-2 identity verification has no real verification
+pipeline behind it anywhere in this codebase, the same open gap Phase 6
+already flagged for withdrawal holder-name matching. See `DECISIONS.md`.
 
 **Admin console (Phase 7):**
 - **`services/admin/auth.py`** — a completely separate authentication path

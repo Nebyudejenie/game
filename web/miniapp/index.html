@@ -89,6 +89,7 @@
     <div id="result-title" class="result-title"></div>
     <div id="result-amount" class="result-amount"></div>
     <div id="result-meta" class="result-meta"></div>
+    <div id="result-session" class="result-session"></div>
     <div class="result-actions">
       <button id="play-next-btn" class="btn-primary btn-gold" data-i18n="result.play_next"></button>
       <button id="verify-draw-btn" class="btn-secondary" data-i18n="result.verify_draw"></button>
@@ -114,13 +115,25 @@
       <div class="wallet-balance-row"><span data-i18n="wallet.locked"></span><span id="wallet-locked">0.00 ETB</span></div>
     </div>
     <div id="wallet-pane-deposit" class="wallet-pane hidden">
-      <p class="wallet-note" data-i18n="wallet.not_available"></p>
+      <div class="amount-chips" id="deposit-amount-chips">
+        <button type="button" class="amount-chip" data-amount="50">50</button>
+        <button type="button" class="amount-chip" data-amount="100">100</button>
+        <button type="button" class="amount-chip" data-amount="200">200</button>
+        <button type="button" class="amount-chip" data-amount="500">500</button>
+      </div>
+      <input id="deposit-amount-input" class="wallet-input" type="number" inputmode="decimal" min="0" step="1" data-i18n-placeholder="wallet.amount_placeholder" />
+      <button id="deposit-submit-btn" class="btn-primary" data-i18n="wallet.deposit_submit"></button>
+      <p id="deposit-status" class="wallet-note"></p>
     </div>
     <div id="wallet-pane-withdraw" class="wallet-pane hidden">
-      <p class="wallet-note" data-i18n="wallet.not_available"></p>
+      <input id="withdraw-amount-input" class="wallet-input" type="number" inputmode="decimal" min="0" step="1" data-i18n-placeholder="wallet.amount_placeholder" />
+      <input id="withdraw-account-input" class="wallet-input" type="tel" inputmode="tel" data-i18n-placeholder="wallet.telebirr_placeholder" />
+      <input id="withdraw-name-input" class="wallet-input" type="text" data-i18n-placeholder="wallet.holder_name_placeholder" />
+      <button id="withdraw-submit-btn" class="btn-primary" data-i18n="wallet.withdraw_submit"></button>
+      <p id="withdraw-status" class="wallet-note"></p>
     </div>
     <div id="wallet-pane-history" class="wallet-pane hidden">
-      <p class="wallet-note" data-i18n="wallet.history_empty"></p>
+      <div id="history-list"></div>
     </div>
   </main>
 

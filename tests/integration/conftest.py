@@ -20,6 +20,10 @@ os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-bot-token-for-suite")
 # ChapaProvider from settings.chapa_api_key at startup, so a webhook test
 # needs to know the exact secret to sign its test payloads with.
 os.environ.setdefault("CHAPA_API_KEY", "test-chapa-secret-for-suite")
+# gateway/app.py's /api/deposit route refuses to start a deposit at all
+# unless a public base URL is configured (same "not available yet"
+# discipline as the bot's own /deposit command) -- tests need one set.
+os.environ.setdefault("PUBLIC_BASE_URL", "https://app.test")
 
 from packages.core import ledger
 from packages.core.config import get_settings

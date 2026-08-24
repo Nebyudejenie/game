@@ -32,6 +32,9 @@ function applyStaticTranslations() {
   for (const node of document.querySelectorAll("[data-i18n]")) {
     node.textContent = t(node.dataset.i18n);
   }
+  for (const node of document.querySelectorAll("[data-i18n-placeholder]")) {
+    node.placeholder = t(node.dataset.i18nPlaceholder);
+  }
 }
 
 // --- connection banner ----------------------------------------------------
@@ -371,6 +374,18 @@ ws.on("round_end", (msg) => {
   const userId = state.user ? state.user.id : null;
   const mine = (msg.winners || []).find((w) => w.user_id === userId);
   const stake = state.round ? state.round.stake : "0";
+  // Spectators (joined with no card) never staked this round -- don't
+  // touch the reality-check total for them.
+  const participated = Boolean(state.round && state.round.your_card);
+
+  if (participated) {
+    const delta = mine
+      ? parseFloat(mine.amount)
+      : (msg.winners || []).length > 0
+        ? -parseFloat(stake)
+        : 0; // no winner: the stake was refunded, net zero
+    setState({ sessionNetPosition: state.sessionNetPosition + delta });
+  }
 
   showScreen("result");
   if (mine) {
@@ -389,7 +404,21 @@ ws.on("round_end", (msg) => {
     el("result-amount").textContent = t("result.no_winner");
     el("result-meta").textContent = "";
   }
+  renderSessionTotal();
 });
+
+// Reality check (spec section 12): "net position this session, shown
+// plainly" -- right on the results screen, every time, not buried in the
+// wallet where a losing player has no reason to go look for it.
+function renderSessionTotal() {
+  const total = getState().sessionNetPosition;
+  const node = el("result-session");
+  const sign = total > 0 ? "+" : total < 0 ? "-" : "";
+  node.textContent = t("result.session_total", { sign, amount: Math.abs(total).toFixed(2) });
+  node.classList.remove("positive", "negative");
+  if (total > 0) node.classList.add("positive");
+  else if (total < 0) node.classList.add("negative");
+}
 
 el("play-next-btn").addEventListener("click", () => {
   const state = getState();
@@ -432,23 +461,153 @@ function authHeader() {
   return raw ? { Authorization: `tma ${raw}` } : {};
 }
 
+function setWalletStatus(id, key, kind) {
+  const node = el(id);
+  node.textContent = key ? t(key) : "";
+  node.classList.remove("error", "success");
+  if (kind) node.classList.add(kind);
+}
+
 document.querySelectorAll(".wallet-tab").forEach((tabEl) => {
   tabEl.addEventListener("click", () => {
     document.querySelectorAll(".wallet-tab").forEach((t2) => t2.classList.remove("active"));
     tabEl.classList.add("active");
     document.querySelectorAll(".wallet-pane").forEach((pane) => pane.classList.add("hidden"));
     el(`wallet-pane-${tabEl.dataset.tab}`).classList.remove("hidden");
+    if (tabEl.dataset.tab === "history") loadHistory();
   });
 });
 
 el("open-wallet-btn").addEventListener("click", openWallet);
 el("wallet-back-btn").addEventListener("click", () => showScreen("rooms"));
 
+// --- deposit ---------------------------------------------------------
+
+document.querySelectorAll("#deposit-amount-chips .amount-chip").forEach((chip) => {
+  chip.addEventListener("click", () => {
+    document.querySelectorAll("#deposit-amount-chips .amount-chip").forEach((c) => c.classList.remove("selected"));
+    chip.classList.add("selected");
+    el("deposit-amount-input").value = chip.dataset.amount;
+  });
+});
+
+el("deposit-submit-btn").addEventListener("click", async () => {
+  const amount = el("deposit-amount-input").value;
+  if (!amount || Number(amount) <= 0) {
+    setWalletStatus("deposit-status", "wallet.error.invalid_amount", "error");
+    return;
+  }
+  el("deposit-submit-btn").disabled = true;
+  setWalletStatus("deposit-status", "wallet.deposit_opening", null);
+  try {
+    const response = await fetch("/api/deposit", {
+      method: "POST",
+      headers: { ...authHeader(), "Content-Type": "application/json" },
+      body: JSON.stringify({ amount }),
+    });
+    if (response.status === 503) {
+      setWalletStatus("deposit-status", "wallet.not_available", "error");
+      return;
+    }
+    const data = await response.json();
+    if (!response.ok) {
+      setWalletStatus("deposit-status", `wallet.error.${data.detail || "generic"}`, "error");
+      return;
+    }
+    if (tg) tg.openLink(data.checkout_url);
+    else window.open(data.checkout_url, "_blank");
+    setWalletStatus("deposit-status", "wallet.deposit_ready", "success");
+  } catch {
+    setWalletStatus("deposit-status", "wallet.error.generic", "error");
+  } finally {
+    el("deposit-submit-btn").disabled = false;
+  }
+});
+
+// --- withdraw ----------------------------------------------------------
+
+el("withdraw-submit-btn").addEventListener("click", async () => {
+  const amount = el("withdraw-amount-input").value;
+  const accountRef = el("withdraw-account-input").value.trim();
+  const holderName = el("withdraw-name-input").value.trim();
+  if (!amount || Number(amount) <= 0 || !accountRef || !holderName) {
+    setWalletStatus("withdraw-status", "wallet.error.invalid_amount", "error");
+    return;
+  }
+  el("withdraw-submit-btn").disabled = true;
+  setWalletStatus("withdraw-status", "wallet.withdraw_submitting", null);
+  try {
+    const response = await fetch("/api/withdraw", {
+      method: "POST",
+      headers: { ...authHeader(), "Content-Type": "application/json" },
+      body: JSON.stringify({ amount, account_ref: accountRef, holder_name: holderName }),
+    });
+    if (response.status === 503) {
+      setWalletStatus("withdraw-status", "wallet.not_available", "error");
+      return;
+    }
+    const data = await response.json();
+    if (!response.ok) {
+      setWalletStatus("withdraw-status", `wallet.error.${data.detail || "generic"}`, "error");
+      return;
+    }
+    setWalletStatus(
+      "withdraw-status",
+      data.status === "approved" ? "wallet.withdraw_approved" : "wallet.withdraw_review",
+      "success"
+    );
+  } catch {
+    setWalletStatus("withdraw-status", "wallet.error.generic", "error");
+  } finally {
+    el("withdraw-submit-btn").disabled = false;
+  }
+});
+
+// --- history -------------------------------------------------------------
+
+async function loadHistory() {
+  const list = el("history-list");
+  try {
+    const response = await fetch("/api/history", { headers: authHeader() });
+    if (!response.ok) return;
+    const rows = await response.json();
+    list.innerHTML = "";
+    if (rows.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "wallet-note";
+      empty.textContent = t("wallet.history_empty");
+      list.appendChild(empty);
+      return;
+    }
+    for (const row of rows) {
+      const line = document.createElement("div");
+      line.className = "history-row";
+      const outcome = row.won
+        ? t("wallet.history_won", { amount: row.won_amount })
+        : t("wallet.history_lost");
+      const roundLabel = document.createElement("span");
+      roundLabel.textContent = t("wallet.history_round", { seq: row.seq, stake: row.stake });
+      const outcomeLabel = document.createElement("span");
+      outcomeLabel.className = "history-meta";
+      outcomeLabel.textContent = outcome;
+      line.appendChild(roundLabel);
+      line.appendChild(outcomeLabel);
+      list.appendChild(line);
+    }
+  } catch {
+    /* history pane just keeps whatever it already had */
+  }
+}
+
 // --- toasts / errors -------------------------------------------------
 
 function showToast(messageOrKey) {
   const toast = el("toast");
-  toast.textContent = messageOrKey.includes(".") ? t(messageOrKey) : messageOrKey;
+  // A translation key never contains a space ("error.generic"); an
+  // already-resolved message might still contain a "." (a sentence's full
+  // stop) without being one, so check for both rather than "." alone.
+  const looksLikeKey = messageOrKey.includes(".") && !messageOrKey.includes(" ");
+  toast.textContent = looksLikeKey ? t(messageOrKey) : messageOrKey;
   toast.classList.add("visible");
   clearTimeout(showToast._timer);
   showToast._timer = setTimeout(() => toast.classList.remove("visible"), 2500);
@@ -469,6 +628,29 @@ ws.on("balance_update", (msg) => {
     el("wallet-locked").textContent = `${msg.locked} ETB`;
   }
 });
+
+// --- session-time reminders (spec section 12) -----------------------------
+// "You've been playing 60 minutes" -- a plain awareness nudge, not an
+// enforcement control (self-exclusion/cool-off/limits are already
+// server-enforced -- see packages/core/responsible_gaming.py). Purely
+// client-side and resets on reload by design, the same "this session"
+// framing the reality check above uses.
+
+const SESSION_REMINDER_MINUTES = [60, 120, 180];
+
+function checkSessionReminder() {
+  const state = getState();
+  const elapsedMinutes = Math.floor((Date.now() - state.sessionStartedAt) / 60000);
+  for (const threshold of SESSION_REMINDER_MINUTES) {
+    if (elapsedMinutes >= threshold && !state.sessionRemindersShown.has(threshold)) {
+      state.sessionRemindersShown.add(threshold);
+      showToast(t("session.reminder", { minutes: threshold }));
+      haptics.warning();
+    }
+  }
+}
+
+setInterval(checkSessionReminder, 60000);
 
 // --- Telegram back button -------------------------------------------------
 

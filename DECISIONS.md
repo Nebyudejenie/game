@@ -5,6 +5,93 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-24 — Mini App wallet: deposit/withdraw/history tabs, reality check, session reminders
+
+Closes the last group of explicitly deferred frontend gaps: Phase 5's
+deposit-amount-picker UI, and the responsible-gaming phase's reality-check
+display and session-time reminders (spec section 12). Also closed two
+placeholder panes that weren't explicitly promised but were sitting there
+with working backends behind them (withdraw, history) -- leaving them as
+"launching soon" once the real capability existed would have been exactly
+the kind of stale placeholder the CTO instructions rule out.
+
+**The Mini App had no way to create a deposit or withdrawal at all before
+this pass.** The bot's `/deposit`/`/withdraw` commands call
+`deposits.create_deposit_intent()`/`withdrawals.request_withdrawal()`
+directly as Python (same process); the Mini App is a separate browser
+context that can only reach the backend over HTTP, and no such HTTP surface
+existed. Added `POST /api/deposit` and `POST /api/withdraw` to
+`services/gateway/app.py` (the same `tma`-authenticated REST surface
+`/api/me`/`/api/history` already established), each exception subclass
+mapped to a short error code (`below_minimum`, `self_excluded`,
+`insufficient_balance`, ...) the frontend looks up its own translated
+message for -- the same "distinct type, not a string reason" pattern
+`services/bot/handlers.py` already uses, just surfaced as JSON.
+
+**`app.state.chapa` is now set once at gateway startup and read by both
+routes, rather than each route constructing its own `ChapaProvider`
+inline** (the pattern the bot's own handlers still use). This is a real,
+deliberate deviation from that existing pattern, made specifically so a
+test can swap in a fake provider on the running app the same way
+`test_admin_app.py` already does for `app.state.ip_allowlist` -- without it,
+the deposit/withdraw success path could only ever be tested at the
+rejection-before-network-call layer, the same honest gap already accepted
+for the bot's own `/deposit`. With it, `test_gateway_rest.py` and the new
+Playwright suite both exercise the full real success path, including a
+real checkout URL returned from a fake provider standing in for Chapa.
+
+**The reality check and session-time reminders are entirely client-side,
+by deliberate choice, unlike every other responsible-gaming control.**
+Self-exclusion, cool-off, and the deposit/loss caps are all
+server-enforced (`packages/core/responsible_gaming.py`) because they are
+genuine controls a player must not be able to bypass by reloading the
+page. The reality check ("net position this session") and the 60/120/180-
+minute reminders are explicitly awareness nudges in spec section 12, not
+enforcement -- so tracking them in `web/miniapp/js/state.js`
+(`sessionStartedAt`, `sessionNetPosition`, computed entirely from
+WebSocket events the client already receives) and resetting on reload is
+an honest, proportionate implementation, not a corner cut. Inventing
+server-side session tracking for a UX nudge would have been the actual
+overreach here.
+
+**A real, if narrow, bug fixed on the way: `showToast()`'s "is this a
+translation key or an already-resolved message" heuristic was
+`text.includes(".")`** -- true for every key ("error.generic") but also
+true for any plain English sentence ending in a period, which the new
+session-reminder toast is. Widened to also require no spaces
+(`includes(".") && !includes(" ")`), which still correctly classifies
+every existing call site (`msg.code` values never contain spaces; Amharic
+sentences use "።" not "." and often contain spaces regardless) while
+correctly leaving the reminder message alone.
+
+**Real bugs the new E2E suite caught in itself, not in the app, all fixed
+before the tests were trusted:**
+- `#open-wallet-btn` only exists in the room-list header -- a test written
+  to open the wallet from the *results* screen timed out because there is
+  no path there in this stub (`BackButton.onClick` is a no-op stub, same
+  as the rest of `prepare_page()`'s Telegram shims). Fixed the test, not
+  the app: reload back to the rooms screen first, the same pattern
+  `test_miniapp_e2e.py` already uses elsewhere.
+- Two status-wait assertions checked `textContent.length > 0`, which the
+  *intermediate* "opening…"/"submitting…" message also satisfies --
+  occasionally caught mid-flight instead of the final outcome. Fixed by
+  waiting for the `.error`/`.success` CSS class `setWalletStatus()` only
+  ever adds once the real outcome is known.
+- One assertion fuzzy-matched an expected Amharic substring ("ገምግ") that
+  doesn't actually appear in the real conjugated word
+  ("እየተገመገመ") -- simplified to assert on the `.success` class reaching the
+  DOM (the real proof the request succeeded) rather than pattern-matching
+  translated prose.
+
+**Confirmed, not newly discovered: the pre-existing ~1-in-7-8
+`test_miniapp_full_gameplay_flow` timeout (documented in Phase 4's
+DECISIONS.md entry) reproduced twice more this pass** -- once immediately
+after the `chaos_infra` Redis-restart test, once immediately after a full
+`docker compose down -v` clean-slate rebuild, both times passing cleanly
+on an immediate retry with no code change. Consistent with the existing
+"shared-host contention right after something disruptive just happened"
+explanation already on record; not chased further, same precedent.
+
 ## 2026-08-24 — Bot notification relay (deposit/withdrawal confirmations, deferred from Phases 5-6)
 
 Closes the gap explicitly deferred twice already: spec 8.2 step 9 ("Bot

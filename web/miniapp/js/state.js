@@ -14,6 +14,13 @@ const state = {
   autoMark: true,
   lockedOut: false,
   lastResult: null,
+  // Reality check (spec section 12): a running, display-only total of
+  // stakes vs. winnings since this app instance was opened. Never
+  // authoritative -- the ledger is; this resets on reload by design, the
+  // same way "this session" reads to a player checking a results screen.
+  sessionStartedAt: Date.now(),
+  sessionNetPosition: 0,
+  sessionRemindersShown: new Set(),
 };
 
 const listeners = new Set();

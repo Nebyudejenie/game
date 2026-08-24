@@ -380,6 +380,25 @@
   padding: 12px;
 }
 
+/* Reality check (spec section 12): net position this session, shown
+   plainly right on the results screen, not tucked away in the wallet. */
+.result-session {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 10px;
+  margin: -8px 0 20px;
+}
+
+.result-session.positive {
+  color: var(--call);
+}
+
+.result-session.negative {
+  color: var(--danger);
+}
+
 /* --- 2.6 Wallet -- uses Telegram theme params, not the fixed dark
    game canvas (spec: "Do use theme params for the wallet and settings
    screens"). See wallet.css for the theme-aware overrides. */
@@ -416,4 +435,59 @@
   font-size: var(--fs-sm);
   margin-top: 14px;
   text-align: center;
+}
+
+.amount-chips {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.amount-chip {
+  flex: 1;
+  padding: 10px 0;
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  background: transparent;
+}
+
+.amount-chip.selected {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.wallet-input {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--fs-md);
+}
+
+.wallet-note.error {
+  color: var(--danger);
+}
+
+.wallet-note.success {
+  color: var(--call);
+}
+
+.history-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-sm);
+}
+
+.history-row .history-meta {
+  color: var(--muted);
 }
