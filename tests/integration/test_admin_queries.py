@@ -72,6 +72,110 @@ async def test_get_user_detail_returns_none_for_unknown_user(pool):
     assert await queries.get_user_detail(pool, 999_999_999) is None
 
 
+async def _record_payment(conn, user_id: int, *, direction: str, amount: Decimal) -> None:
+    await conn.execute(
+        """
+        INSERT INTO payments (user_id, direction, provider, our_ref, amount, status)
+        VALUES ($1, $2, 'chapa', $3, $4, 'succeeded')
+        """,
+        user_id,
+        direction,
+        f"TEST-LTV-{next_telegram_id()}",
+        amount,
+    )
+
+
+async def test_get_user_detail_includes_ltv(pool, conn):
+    user_id = await create_funded_user(conn, Decimal("0.00"))
+    await _record_payment(conn, user_id, direction="in", amount=Decimal("500.00"))
+    await _record_payment(conn, user_id, direction="in", amount=Decimal("200.00"))
+    await _record_payment(conn, user_id, direction="out", amount=Decimal("150.00"))
+
+    detail = await queries.get_user_detail(pool, user_id)
+    assert detail is not None
+    assert detail["ltv"]["total_deposited"] == "700.00"
+    assert detail["ltv"]["total_withdrawn"] == "150.00"
+    assert detail["ltv"]["net_ltv"] == "550.00"
+
+
+async def test_top_players_by_ltv_ranks_by_net_contribution(pool, conn):
+    # This session's shared dev database accumulates real payment rows
+    # across every test run, so a small limit isn't reliably big enough to
+    # contain both test users -- a real cross-test-pollution risk this
+    # session has hit before (reconcile_job's idempotency keys, for one).
+    # A limit far larger than any realistic accumulated row count still
+    # proves real DESC ordering; it just doesn't assume either user lands
+    # in an arbitrarily small "top N" slice.
+    high_value_user = await create_funded_user(conn, Decimal("0.00"))
+    await _record_payment(conn, high_value_user, direction="in", amount=Decimal("10000.00"))
+
+    low_value_user = await create_funded_user(conn, Decimal("0.00"))
+    await _record_payment(conn, low_value_user, direction="in", amount=Decimal("50.00"))
+
+    results = await queries.top_players_by_ltv(pool, limit=1_000_000)
+    ids_in_order = [r["user_id"] for r in results]
+    assert ids_in_order.index(high_value_user) < ids_in_order.index(low_value_user)
+
+
+async def test_retention_cohorts_counts_a_user_active_in_their_signup_week(pool, redis, card_pool, conn):
+    room_id = await create_room(conn, stake=Decimal("10.00"), min_players=2, call_interval_ms=10)
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        p1 = await create_funded_user(conn)
+        p2 = await create_funded_user(conn)
+        assert (await engine.join(p1, 1)).ok
+        assert (await engine.join(p2, 2)).ok
+        await wait_until(lambda: engine.status == "idle" and engine.round_id is None, timeout=15)
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+    cohorts = await queries.retention_cohorts(pool, weeks=4)
+    # date_trunc('week', ...) starts on Monday, not necessarily "today" --
+    # find the one cohort that actually contains p1, rather than assuming
+    # which calendar date that lands on.
+    matching = [c for c in cohorts if c["weeks"][0]["active_users"] >= 1]
+    assert matching, f"no cohort showed any week-0 activity: {cohorts}"
+    assert matching[0]["weeks"][0]["retention_rate"] > 0
+
+
+async def test_retention_cohorts_places_a_backdated_signup_in_a_later_week_offset(pool, redis, card_pool, conn):
+    # Signed up 2 weeks before today, active today -- must land at
+    # week_offset 2 in their own cohort's row, not week_offset 0. Exactly
+    # 14 days, not e.g. 15 -- date_trunc('week', ...) is Monday-anchored,
+    # so only a multiple of 7 days reliably shifts the truncated week by a
+    # fixed, predictable number of weeks regardless of which day "now"
+    # itself falls on (confirmed directly: 15 days landed 3 weeks back on
+    # a day this was first run, not 2, because "now" was a Monday).
+    user_id = await create_funded_user(conn)
+    await conn.execute(
+        "UPDATE users SET created_at = now() - interval '14 days' WHERE id = $1", user_id
+    )
+
+    room_id = await create_room(conn, stake=Decimal("10.00"), min_players=2, call_interval_ms=10)
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        other = await create_funded_user(conn)
+        assert (await engine.join(user_id, 1)).ok
+        assert (await engine.join(other, 2)).ok
+        await wait_until(lambda: engine.status == "idle" and engine.round_id is None, timeout=15)
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+    cohort_week = await conn.fetchval(
+        "SELECT date_trunc('week', created_at)::date FROM users WHERE id = $1", user_id
+    )
+    cohorts = await queries.retention_cohorts(pool, weeks=4)
+    cohort = next(c for c in cohorts if c["cohort_week"] == cohort_week.isoformat())
+    assert cohort["weeks"][2]["active_users"] >= 1
+    assert cohort["weeks"][0]["active_users"] == 0
+
+
 async def test_adjust_balance_credits_via_ledger_and_writes_audit_log(pool, conn):
     admin_id, *_ = await create_test_admin(pool)
     user_id = await create_funded_user(conn, Decimal("10.00"))

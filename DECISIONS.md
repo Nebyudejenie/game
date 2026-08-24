@@ -5,6 +5,71 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-24 — Admin reports: player LTV and retention cohorts (spec section 11)
+
+Spec section 11's Reports screen lists "Daily GGR, player LTV, retention
+cohorts, tax export." Only daily GGR existed before this. Bonuses/
+referral rewards (spec section 8.5, and the `bonuses`/`referrals` table
+stubs in section 4.5) were deliberately **not** built in this pass, and
+shouldn't be confused with this entry -- that system needs real business
+parameters this session has no authority to invent (bonus amounts,
+wagering-requirement multipliers, referral reward sizes), the same
+reasoning `risk_flags` was already left unbuilt. LTV and retention
+cohorts, by contrast, are fully computable from data this system already
+has (payments, users, round_entries) with no missing business input, so
+they were genuinely buildable.
+
+- **`player_ltv()`** (folded into `get_user_detail()`'s existing output)
+  and **`top_players_by_ltv()`** (a ranked leaderboard for the Reports
+  screen) -- net cash a player has contributed to the platform over their
+  lifetime: total succeeded deposits minus total succeeded withdrawals.
+  Computed directly from `payments`, not `house_revenue` -- `house_revenue`
+  is one shared account, not itemized per player, so it can't answer a
+  per-player question on its own.
+- **`retention_cohorts()`** -- weekly signup-cohort retention: for each
+  week's new signups, what fraction played at least one round (entered a
+  round that actually started) in each of the following N weeks. One
+  set-based SQL query (a `generate_series` cross join so every
+  cohort/week-offset pair appears even at zero, not just the non-zero
+  rows), not a per-user Python loop -- this report has to scale with real
+  data volume, and this session's own shared dev database (tens of
+  thousands of accumulated test users by now) is a real stress case for
+  exactly that, not a hypothetical one.
+- **A real debugging note, `generate_series`'s reserved-word/type-inference
+  trap:** the first draft of the cohort SQL used `offset` as a column
+  alias (a reserved word in Postgres -- syntax error) and left `$1`'s
+  type ambiguous across two different arithmetic contexts in the same
+  query (`asyncpg.exceptions.UndefinedFunctionError: generate_series(integer,
+  double precision)` -- Postgres inferred `$1` as `double precision` from
+  one usage, breaking `generate_series`'s integer-only signature
+  elsewhere in the same query). Both caught by actually running the query
+  against the real database before wiring it into the codebase, not by
+  reading the SQL and assuming it was right.
+- **A second real debugging note, from the tests themselves:** the first
+  cohort-retention test backdated a user by 15 days expecting a 2-week
+  offset -- wrong, because `date_trunc('week', ...)` is Monday-anchored,
+  and 15 days only reliably maps to a fixed week offset when it's a
+  multiple of 7 (confirmed directly against the real database: "now"
+  happened to be a Monday, so 15 days landed 3 truncated weeks back, not
+  2). Fixed to exactly 14 days. The LTV ranking test had a related but
+  different bug: it assumed a `limit=5` leaderboard slice would contain
+  both test users, but this session's own shared, ever-growing dev
+  database (real accumulated payment rows from every prior test run)
+  meant it sometimes wouldn't -- fixed by using a limit far larger than
+  any realistic accumulated row count, so the assertion tests real DESC
+  ordering without assuming either user lands in an arbitrarily small
+  top-N slice.
+- **Tax export was not attempted.** Unlike LTV/retention, it needs a
+  specific format the Ethiopian tax authority actually requires --
+  genuinely unknown here, and guessing at a compliance-facing export
+  format risks producing something worse than no export at all (silently
+  wrong, not obviously missing). Same reasoning as SantimPay/ArifPay:
+  refuse to guess rather than fake it.
+
+Full clean-slate rebuild: mypy clean across 63 source files, `pytest
+tests/` 650 passed / 13 deselected (up from 646), `-m load` 5 passed,
+`-m chaos_infra` 1 passed, `-m e2e` 7 passed.
+
 ## 2026-08-24 — Phone numbers encrypted at rest (spec 9.2), with a real product tradeoff surfaced and confirmed
 
 Spec section 9.2: "PII: phone numbers encrypted at rest; logs must never

@@ -79,7 +79,133 @@ async def get_user_detail(pool: asyncpg.Pool, user_id: int) -> dict[str, Any] | 
             "locked": str(await ledger.balance(conn, locked.id)),
         }
 
-    return {**user_dict, "balances": balances}
+    return {**user_dict, "balances": balances, "ltv": await player_ltv(pool, user_id)}
+
+
+async def player_ltv(pool: asyncpg.Pool, user_id: int) -> dict[str, Any]:
+    """Net cash this player has contributed to the platform over their
+    lifetime -- total succeeded deposits minus total succeeded
+    withdrawals, the standard "player value" metric a real-money operator
+    tracks (spec section 11's Reports screen: "player LTV"). Computed
+    directly from payments, not house_revenue, since house_revenue is one
+    shared account not itemized per player -- this is the metric that
+    actually is.
+    """
+    row = await pool.fetchrow(
+        """
+        SELECT
+          COALESCE(SUM(amount) FILTER (WHERE direction = 'in'), 0) AS total_deposited,
+          COALESCE(SUM(amount) FILTER (WHERE direction = 'out'), 0) AS total_withdrawn
+        FROM payments
+        WHERE user_id = $1 AND status = 'succeeded'
+        """,
+        user_id,
+    )
+    assert row is not None
+    total_deposited: Decimal = row["total_deposited"]
+    total_withdrawn: Decimal = row["total_withdrawn"]
+    return {
+        "total_deposited": str(total_deposited),
+        "total_withdrawn": str(total_withdrawn),
+        "net_ltv": str(total_deposited - total_withdrawn),
+    }
+
+
+async def top_players_by_ltv(pool: asyncpg.Pool, limit: int = 20) -> list[dict[str, Any]]:
+    """The Reports-screen leaderboard version of player_ltv() -- ranked,
+    not per-user, and computed in one aggregate query rather than N calls.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT
+          p.user_id,
+          u.display_name,
+          COALESCE(SUM(p.amount) FILTER (WHERE p.direction = 'in'), 0) AS total_deposited,
+          COALESCE(SUM(p.amount) FILTER (WHERE p.direction = 'out'), 0) AS total_withdrawn,
+          COALESCE(SUM(p.amount) FILTER (WHERE p.direction = 'in'), 0)
+            - COALESCE(SUM(p.amount) FILTER (WHERE p.direction = 'out'), 0) AS net_ltv
+        FROM payments p
+        JOIN users u ON u.id = p.user_id
+        WHERE p.status = 'succeeded'
+        GROUP BY p.user_id, u.display_name
+        ORDER BY net_ltv DESC
+        LIMIT $1
+        """,
+        limit,
+    )
+    return [
+        {
+            "user_id": r["user_id"],
+            "display_name": r["display_name"],
+            "total_deposited": str(r["total_deposited"]),
+            "total_withdrawn": str(r["total_withdrawn"]),
+            "net_ltv": str(r["net_ltv"]),
+        }
+        for r in rows
+    ]
+
+
+async def retention_cohorts(pool: asyncpg.Pool, weeks: int = 8) -> list[dict[str, Any]]:
+    """Weekly signup-cohort retention (spec section 11's Reports screen:
+    "retention cohorts") -- for each week's new signups, what fraction
+    played at least one round in each of the following `weeks` weeks.
+    "Active" means entered a round that actually started (round_entries
+    joined to a round with a real started_at), not just opened the app.
+
+    One set-based SQL query, not a per-user Python loop -- this report
+    scans every user and every round entry ever recorded, so it has to
+    scale with real data volume, not just look right against a handful of
+    test rows.
+    """
+    rows = await pool.fetch(
+        """
+        WITH cohort AS (
+          SELECT id, date_trunc('week', created_at)::date AS cohort_week
+          FROM users
+        ),
+        cohort_sizes AS (
+          SELECT cohort_week, count(*) AS cohort_size FROM cohort GROUP BY cohort_week
+        ),
+        activity AS (
+          SELECT DISTINCT re.user_id, date_trunc('week', r.started_at)::date AS active_week
+          FROM round_entries re
+          JOIN rounds r ON r.id = re.round_id
+          WHERE r.started_at IS NOT NULL
+        ),
+        retention AS (
+          SELECT
+            c.cohort_week,
+            ((a.active_week - c.cohort_week) / 7)::int AS week_offset,
+            count(DISTINCT c.id) AS active_users
+          FROM cohort c
+          JOIN activity a ON a.user_id = c.id AND a.active_week >= c.cohort_week
+          WHERE a.active_week < c.cohort_week + ($1::int * interval '1 week')
+          GROUP BY c.cohort_week, week_offset
+        )
+        SELECT cs.cohort_week, cs.cohort_size, gs.week_offset, COALESCE(r.active_users, 0) AS active_users
+        FROM cohort_sizes cs
+        CROSS JOIN generate_series(0, $1::int - 1) AS gs(week_offset)
+        LEFT JOIN retention r ON r.cohort_week = cs.cohort_week AND r.week_offset = gs.week_offset
+        ORDER BY cs.cohort_week, gs.week_offset
+        """,
+        weeks,
+    )
+
+    cohorts: dict[date, dict[str, Any]] = {}
+    for row in rows:
+        cohort = cohorts.setdefault(
+            row["cohort_week"],
+            {"cohort_week": row["cohort_week"].isoformat(), "cohort_size": row["cohort_size"], "weeks": []},
+        )
+        cohort_size = row["cohort_size"]
+        cohort["weeks"].append(
+            {
+                "week_offset": row["week_offset"],
+                "active_users": row["active_users"],
+                "retention_rate": round(row["active_users"] / cohort_size, 4) if cohort_size else 0.0,
+            }
+        )
+    return list(cohorts.values())
 
 
 async def get_user_ledger_history(

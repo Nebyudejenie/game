@@ -392,6 +392,20 @@ async def report_ggr(
     return await queries.daily_ggr(app.state.pool, on_date)
 
 
+@app.get("/reports/ltv")
+async def report_ltv(
+    admin: Annotated[AdminSession, Depends(require("reports:view"))], limit: int = 20
+) -> list[dict[str, Any]]:
+    return await queries.top_players_by_ltv(app.state.pool, limit)
+
+
+@app.get("/reports/retention")
+async def report_retention(
+    admin: Annotated[AdminSession, Depends(require("reports:view"))], weeks: int = 8
+) -> list[dict[str, Any]]:
+    return await queries.retention_cohorts(app.state.pool, weeks)
+
+
 # --- audit log ---------------------------------------------------------
 
 

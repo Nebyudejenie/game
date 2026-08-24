@@ -416,8 +416,22 @@ already flagged for withdrawal holder-name matching. See `DECISIONS.md`.
   (suspend/self-exclude), round list/detail, the fairness-verification
   route (`GET /rounds/{id}/fairness` — reveals the committed `server_seed`
   once a round is terminal and independently re-verifies the draw), admin
-  round voiding, room CRUD, a daily GGR report, and the audit log itself
-  (restricted to `superadmin`) — plus an optional source-IP allowlist.
+  round voiding, room CRUD, reports (daily GGR, player LTV, weekly
+  retention cohorts), and the audit log itself (restricted to
+  `superadmin`) — plus an optional source-IP allowlist.
+- **Reports (spec section 11):** player LTV (net lifetime deposits minus
+  withdrawals, both per-user on the user detail view and as a ranked
+  leaderboard) and weekly signup-cohort retention (one set-based SQL
+  query, not a per-user loop, since this has to scale with real data
+  volume) — the two report types from the spec's list that were
+  genuinely computable from data already in the system. Bonuses/referral
+  rewards and tax export were deliberately not attempted: the former
+  needs real business parameters (bonus amounts, wagering multipliers)
+  this session has no authority to invent, the same reasoning
+  `risk_flags` was left unbuilt; the latter needs a specific format the
+  tax authority requires, genuinely unknown here — guessing at a
+  compliance export risks something worse than no export at all. See
+  `DECISIONS.md`.
 
 Building the fairness route surfaced a real gap in Phase 2:
 `round_engine.py` was committing to `server_seed_hash` up front (correct)
