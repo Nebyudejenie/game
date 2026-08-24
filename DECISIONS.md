@@ -5,6 +5,63 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-24 — Closed the reconcile_job Pushgateway gap flagged in the previous entry
+
+The observability pass just below flagged one honest gap: the
+`LedgerReconciliationMismatch` alert rule referenced a
+`ledger_reconciliation_mismatch_count` metric that `reconcile_job.py`
+never actually pushed anywhere, since it's a one-shot CLI job with no
+long-running `/metrics` endpoint of its own. Closed for real, not just
+documented as future work:
+
+- **`packages/core/metrics.py`** gained a dedicated `reconcile_registry`
+  (a separate `CollectorRegistry`, not the shared default one every other
+  metric in this module uses) holding just
+  `ledger_reconciliation_mismatch_count` -- pushing the *shared* default
+  registry from a batch job would drag along a meaningless snapshot of
+  every gateway/engine/ledger/deposit counter at whatever value they
+  happen to hold in that process (all zero, since reconcile_job never
+  touches those code paths), which is not what a Pushgateway push is for.
+- **`packages/core/reconcile_job.py`**'s `main()` now sets the gauge and,
+  if `PUSHGATEWAY_URL` is configured (new `Settings.pushgateway_url`,
+  default empty -- opt-in, matching every other optional integration in
+  this codebase), pushes it via `prometheus_client.push_to_gateway()`
+  under `job="reconcile_job"`. A push failure is caught and logged, never
+  allowed to change the job's own exit code -- an observability-pipeline
+  outage must never mask, or get mistaken for, a real ledger mismatch.
+- **`deploy/docker-compose.yml`** gained a `pushgateway` service
+  (`prom/pushgateway:v1.9.0`, also `profiles: ["observability"]`), and
+  **`deploy/prometheus/prometheus.yml`** gained a scrape job for it with
+  `honor_labels: true` (so a pushed job's own `job`/`instance` labels win
+  over the scrape job's own -- otherwise every batch job pushed here would
+  misleadingly show up labeled `job="pushgateway"`).
+
+**Verified two ways, matching this session's usual split between a fast
+automated regression test and a real manual drill against the genuine
+binary:**
+- `tests/integration/test_reconcile_job.py` gained two tests against a
+  real (if minimal) HTTP server started in-process -- not the literal
+  `prom/pushgateway` image, so the default test suite doesn't gain a new
+  required docker service for one test file. One confirms a real `PUT`
+  request lands with the real mismatch count in genuine Prometheus
+  exposition format; one confirms no request is made at all when
+  `PUSHGATEWAY_URL` is unset.
+- **Manually, against the actual `prom/pushgateway` container**: ran the
+  real CLI with `PUSHGATEWAY_URL` pointed at it on a healthy ledger,
+  confirmed via the Pushgateway's own `/api/v1/metrics` API that
+  `ledger_reconciliation_mismatch_count{job="reconcile_job"}` landed at
+  `0` with `last_push_successful: true`; corrupted a real
+  `account_balances` row, reran the CLI, confirmed exit code 1 and the
+  Pushgateway's value updating to `1`; restored the balance and confirmed
+  a clean run again. The full alert chain (job pushes -> Pushgateway holds
+  -> Prometheus scrapes -> `LedgerReconciliationMismatch` rule evaluates)
+  is now real and provable end to end, the one piece of spec section
+  10.4's alert list that couldn't fire before this entry.
+
+Full clean-slate rebuild: mypy clean across 60 source files, `pytest
+tests/` 639 passed / 13 deselected (up from 637), `-m load` 5 passed,
+`-m chaos_infra` 1 passed, `-m e2e` 7 passed.
+
 ## 2026-08-24 — Observability: real Prometheus metrics, alert rules, and a real scrape drill (spec section 10.4)
 
 Spec section 10.4 was a genuine, unaddressed gap -- "Metrics (Prometheus +

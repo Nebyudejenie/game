@@ -75,6 +75,11 @@ docker compose -f deploy/docker-compose.yml up -d postgres redis
 #    deploy/prometheus/prometheus.yml (8000 gateway, 8001 admin, 8002
 #    payments, 8003 bot), then browse http://localhost:9091
 docker compose -f deploy/docker-compose.yml up -d prometheus
+
+# 10. Optional: let reconcile_job.py push its result to a real Pushgateway
+#     (packages/core/reconcile_job.py has no long-running /metrics of its
+#     own to scrape). Set PUSHGATEWAY_URL=http://localhost:9092 in .env.
+docker compose -f deploy/docker-compose.yml up -d pushgateway
 ```
 
 To actually play with it: start the gateway (`uvicorn services.gateway.app:app
@@ -423,7 +428,9 @@ whoever happened to be connected at the exact second the round ended. See
   with its ledger entries, or exits 1 and logs every mismatched account
   (`ledger_reconciliation_failed`) otherwise — meant to be invoked by a
   real cron/systemd-timer/k8s CronJob that alerts loudly on the non-zero
-  exit. See `DECISIONS.md`.
+  exit. If `PUSHGATEWAY_URL` is set, the mismatch count is also pushed to
+  a real Prometheus Pushgateway (`job="reconcile_job"`) — a push failure
+  is logged but never changes this job's own exit code. See `DECISIONS.md`.
 
 **Backup and restore:**
 - **`deploy/backup.sh`** — real `pg_dump -F custom` against the
@@ -465,11 +472,15 @@ whoever happened to be connected at the exact second the round ended. See
   client connected and disconnected, queried through Prometheus's own
   API. All five alert rules confirmed loaded with `health: ok` against
   the real metric names. See `DECISIONS.md` for the two interpretation
-  calls made explicit ("call-to-ack", "deposit success rate") and one
-  honestly flagged gap (the reconciliation-mismatch alert has no
-  Pushgateway to push its metric yet). Grafana dashboards and
-  OpenTelemetry traces are real, buildable next steps, not built this
-  pass.
+  calls made explicit ("call-to-ack", "deposit success rate").
+- **`ledger_reconciliation_mismatch_count`** — the one alert of the five
+  that needed a batch job (`reconcile_job.py`, no long-running `/metrics`
+  endpoint of its own) to reach Prometheus at all: pushed to a real
+  Pushgateway (`deploy/docker-compose.yml`'s `pushgateway` service) when
+  `PUSHGATEWAY_URL` is set, which Prometheus then scrapes. Verified
+  against the actual `prom/pushgateway` binary, not just an automated
+  test double — see `DECISIONS.md`. Grafana dashboards and OpenTelemetry
+  traces are real, buildable next steps, not built yet.
 
 **Load and chaos testing (spec section 10.3):**
 - **A real money-safety bug found and fixed by this phase's own load

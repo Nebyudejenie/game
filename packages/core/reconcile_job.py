@@ -13,6 +13,15 @@ non-zero exit here, not retry quietly. This module doesn't set up its own
 schedule; wiring a `0 3 * * *` cron entry (or equivalent) to invoke this
 is a deployment-time decision this session has consistently left out of
 scope, the same as every other worker entrypoint in this codebase.
+
+If `PUSHGATEWAY_URL` is set, the mismatch count is also pushed to a real
+Prometheus Pushgateway (job="reconcile_job") -- the standard pattern for a
+one-shot batch job that has no long-running `/metrics` endpoint of its own
+to scrape, and what `deploy/prometheus/alerts.yml`'s
+`LedgerReconciliationMismatch` rule needs to ever actually fire. A push
+failure is logged and never changes this job's own exit code -- an
+observability-pipeline outage must never mask, or get mistaken for, an
+actual ledger mismatch.
 """
 
 from __future__ import annotations
@@ -22,8 +31,9 @@ import sys
 from decimal import Decimal
 
 import asyncpg
+from prometheus_client import push_to_gateway
 
-from packages.core import ledger
+from packages.core import ledger, metrics
 from packages.core.config import get_settings
 from packages.core.logging import configure_logging, get_logger
 
@@ -48,8 +58,23 @@ async def run_reconciliation() -> list[tuple[int, Decimal, Decimal]]:
 
 
 def main() -> int:
-    configure_logging(get_settings().log_level)
+    settings = get_settings()
+    configure_logging(settings.log_level)
     mismatches = asyncio.run(run_reconciliation())
+
+    metrics.ledger_reconciliation_mismatch_count.set(len(mismatches))
+    if settings.pushgateway_url:
+        try:
+            push_to_gateway(
+                settings.pushgateway_url, job="reconcile_job", registry=metrics.reconcile_registry
+            )
+        except Exception:
+            # A Pushgateway outage is an observability-pipeline problem,
+            # not a ledger-integrity one -- it must never flip this job's
+            # own exit code (the signal a real scheduler actually alerts
+            # on) or mask a real mismatch found above.
+            logger.warning("pushgateway_push_failed", exc_info=True)
+
     if mismatches:
         logger.error(
             "ledger_reconciliation_failed",

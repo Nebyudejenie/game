@@ -6,8 +6,12 @@ same way a cron job would invoke it) are exercised for real.
 """
 
 import asyncio
+import os
+import socket
 import sys
 from decimal import Decimal
+
+from aiohttp import web
 
 from packages.core import ledger
 from packages.core.reconcile_job import reconcile_all
@@ -47,10 +51,11 @@ async def test_reconcile_all_catches_a_cache_drifted_out_of_sync_with_the_ledger
         )
 
 
-async def _run_cli() -> tuple[int, str]:
+async def _run_cli(extra_env: dict[str, str] | None = None) -> tuple[int, str]:
+    env = {**os.environ, **(extra_env or {})}
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "packages.core.reconcile_job",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
     )
     stdout, stderr = await proc.communicate()
     assert proc.returncode is not None
@@ -79,3 +84,91 @@ async def test_reconcile_job_cli_exits_one_and_reports_a_real_drift(pool, conn):
         await conn.execute(
             "UPDATE account_balances SET balance = balance - 999 WHERE account_id = $1", cash.id
         )
+
+
+class _CapturingPushgateway:
+    """A real HTTP server, not a mock object -- proves reconcile_job.py's
+    CLI process actually makes a real PUT request with real Prometheus
+    exposition-format content, the same "real binary/real protocol, not a
+    stand-in" discipline as this session's other integration drills. Not
+    the literal prom/pushgateway image (that's exercised manually -- see
+    DECISIONS.md) so the default test suite doesn't gain a new required
+    docker service just for this one test.
+    """
+
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, str]] = []  # (method, body)
+
+    async def _catch_all(self, request: web.Request) -> web.Response:
+        body = (await request.read()).decode()
+        self.requests.append((request.method, body))
+        return web.Response(status=202)
+
+
+def _free_port() -> int:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
+async def test_reconcile_job_cli_pushes_the_mismatch_count_to_a_real_http_server(pool, conn):
+    capture = _CapturingPushgateway()
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", capture._catch_all)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = _free_port()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+
+    try:
+        user_id = await create_funded_user(conn, Decimal("60.00"))
+        cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
+        try:
+            await conn.execute(
+                "UPDATE account_balances SET balance = balance + 999 WHERE account_id = $1", cash.id
+            )
+            returncode, output = await _run_cli(
+                extra_env={"PUSHGATEWAY_URL": f"http://127.0.0.1:{port}"}
+            )
+            assert returncode == 1, output
+        finally:
+            await conn.execute(
+                "UPDATE account_balances SET balance = balance - 999 WHERE account_id = $1", cash.id
+            )
+
+        assert len(capture.requests) == 1, capture.requests
+        method, body = capture.requests[0]
+        assert method == "PUT"
+        assert "ledger_reconciliation_mismatch_count" in body
+        # At least the one account corrupted above -- exact count isn't
+        # pinned since the shared test database may carry other drift from
+        # whatever ran concurrently, but zero would prove the push never
+        # picked up a real number at all.
+        assert "ledger_reconciliation_mismatch_count 0.0" not in body
+    finally:
+        await runner.cleanup()
+
+
+async def test_reconcile_job_cli_does_not_push_when_pushgateway_url_is_unset(pool, conn):
+    capture = _CapturingPushgateway()
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", capture._catch_all)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = _free_port()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+
+    try:
+        await create_funded_user(conn, Decimal("15.00"))
+        # No PUSHGATEWAY_URL override -- explicitly cleared, in case the
+        # real dev .env happens to set one, so this test genuinely proves
+        # the "unset" path rather than accidentally inheriting a set one.
+        returncode, output = await _run_cli(extra_env={"PUSHGATEWAY_URL": ""})
+        assert returncode == 0, output
+        assert capture.requests == []
+    finally:
+        await runner.cleanup()

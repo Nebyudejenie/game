@@ -34,3 +34,12 @@ scrape_configs:
   - job_name: bot
     static_configs:
       - targets: ["host.docker.internal:8003"]
+
+  - job_name: pushgateway
+    # honor_labels: a pushed job's own "job"/"instance" labels (e.g.
+    # reconcile_job.py's job="reconcile_job") should win over this scrape
+    # job's -- otherwise every batch job pushed here would misleadingly
+    # show up labeled job="pushgateway" instead of by its own name.
+    honor_labels: true
+    static_configs:
+      - targets: ["pushgateway:9091"]

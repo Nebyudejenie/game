@@ -24,7 +24,7 @@ not a literal spec quote, in DECISIONS.md.
 
 from __future__ import annotations
 
-from prometheus_client import Counter, Gauge, Histogram
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 
 # --- gateway -----------------------------------------------------------
 
@@ -77,4 +77,20 @@ payout_queue_depth = Gauge(
 
 house_revenue_total = Gauge(
     "house_revenue_total", "Live house_revenue account balance (ETB)"
+)
+
+# --- reconcile_job -----------------------------------------------------
+
+# A one-shot batch job (packages/core/reconcile_job.py), not a scraped
+# long-running process -- pushed to a Prometheus Pushgateway instead of
+# exposed on a /metrics endpoint, the standard pattern for batch jobs. Its
+# own registry, separate from the default one every other metric in this
+# module registers to, so pushing it never drags along an unrelated
+# snapshot of whatever else happens to share this process (in reconcile_job
+# itself, nothing else does; in a test process, everything else would).
+reconcile_registry = CollectorRegistry()
+ledger_reconciliation_mismatch_count = Gauge(
+    "ledger_reconciliation_mismatch_count",
+    "Accounts whose cached balance disagreed with their ledger entries on the last reconciliation run",
+    registry=reconcile_registry,
 )

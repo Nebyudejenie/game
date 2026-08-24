@@ -60,6 +60,17 @@ services:
       # route to host-bound ports otherwise.
       - "host.docker.internal:host-gateway"
 
+  # Optional: lets packages/core/reconcile_job.py (a one-shot CLI job, not
+  # a scraped long-running process) push its result somewhere Prometheus
+  # can alert on -- see PUSHGATEWAY_URL in .env.example. Also profile-gated;
+  # start with `docker compose -f deploy/docker-compose.yml up -d pushgateway`.
+  pushgateway:
+    image: prom/pushgateway:v1.9.0
+    profiles: ["observability"]
+    ports:
+      # Host 9092 -- next free slot after Prometheus's own 9091 above.
+      - "9092:9091"
+
 volumes:
   jobingo_postgres_data:
   jobingo_redis_data:

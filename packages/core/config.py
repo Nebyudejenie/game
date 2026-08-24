@@ -61,6 +61,13 @@ class Settings(BaseSettings):
     # from a known office/VPN range.
     admin_ip_allowlist: str = ""
 
+    # Observability -- empty means reconcile_job.py only logs its result
+    # (still fully correct: a real scheduler already alerts on the process's
+    # own non-zero exit code); set to enable pushing the mismatch count to a
+    # real Prometheus Pushgateway too, since reconcile_job is a one-shot CLI
+    # job with no long-running /metrics endpoint of its own to scrape.
+    pushgateway_url: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:
