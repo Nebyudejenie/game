@@ -25,6 +25,7 @@ from prometheus_client import generate_latest
 from redis.asyncio import Redis
 
 from packages.core.config import Settings
+from packages.core.tracing import configure_tracing
 from services.bot import dedup
 from services.bot.handlers import router
 from services.bot.notifier import Notifier
@@ -63,6 +64,7 @@ def build_bot(settings: Settings) -> Bot:
 
 
 def build_app(bot: Bot, dp: Dispatcher, settings: Settings) -> web.Application:
+    configure_tracing("bot", settings.otel_exporter_endpoint)
     app = web.Application()
 
     async def healthz(_request: web.Request) -> web.Response:

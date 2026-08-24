@@ -96,6 +96,22 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/etc/grafana/dashboards:ro
 
+  # Optional: real OTLP trace collection + UI (spec section 10.4: "deposit
+  # and payout paths end to end"). All-in-one image -- OTLP/HTTP receiver,
+  # storage, and query UI in one container, the simplest real thing to
+  # point OTEL_EXPORTER_ENDPOINT at for local dev. Also profile-gated;
+  # start with `docker compose -f deploy/docker-compose.yml up -d jaeger`.
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    profiles: ["observability"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      # UI + query API.
+      - "16686:16686"
+      # OTLP/HTTP receiver -- set OTEL_EXPORTER_ENDPOINT=http://localhost:4318
+      - "4318:4318"
+
 volumes:
   jobingo_postgres_data:
   jobingo_redis_data:

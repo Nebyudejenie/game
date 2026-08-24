@@ -18,6 +18,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from packages.core import metrics
 from packages.core.config import get_settings
 from packages.core.redis_conn import get_redis
+from packages.core.tracing import configure_tracing
 from services.payments import deposits
 from services.payments.chapa import ChapaProvider
 from services.payments.provider import InvalidSignature
@@ -27,6 +28,7 @@ from services.payments.withdrawals import PAYOUT_STREAM
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
+    configure_tracing("payments", settings.otel_exporter_endpoint)
     app.state.pool = await asyncpg.create_pool(dsn=settings.database_url, min_size=2, max_size=20)
     app.state.redis = get_redis()
     app.state.chapa = ChapaProvider(settings.chapa_api_key)

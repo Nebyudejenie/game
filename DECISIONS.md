@@ -5,6 +5,104 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-24 — OpenTelemetry traces for deposit and payout paths (closes spec 10.4)
+
+Spec section 10.4's last unaddressed item: "Traces (OpenTelemetry): deposit
+and payout paths end to end." Closes the section.
+
+- **`packages/core/tracing.py`** — `configure_tracing(service_name,
+  endpoint)`, opt-in like every other integration in this codebase
+  (`PUSHGATEWAY_URL`, `ADMIN_IP_ALLOWLIST`, ...): empty endpoint is a
+  genuine no-op, since OpenTelemetry's own API already provides a
+  zero-config default no-op tracer -- every `start_as_current_span()` call
+  in `deposits.py`/`withdrawals.py`/`payout_worker.py` is always safe to
+  make whether or not a real collector is configured, no "is tracing on"
+  branch anywhere in business logic. New `Settings.otel_exporter_endpoint`.
+- **Confirmed, not assumed:** `get_tracer()` called at *module import
+  time* (before any app's `lifespan()`/`build_app()` has run
+  `configure_tracing()`) still correctly picks up the real provider once
+  it's configured later -- `trace.get_tracer()` returns a `ProxyTracer`
+  that resolves the active provider at *span-creation* time, not at
+  tracer-acquisition time. Verified directly (span created before
+  `set_tracer_provider()` didn't reach a real exporter; an identical span
+  created after did) rather than trusted from documentation.
+- **Also confirmed directly:** `trace.set_tracer_provider()` silently
+  no-ops on a second call within the same process -- tracing configuration
+  is genuinely process-global, once, matching how `configure_logging()`
+  and every FastAPI `lifespan()` in this codebase already treat startup
+  config.
+- Real spans added to the actual money-moving choke points: `deposit.
+  create_intent` (with a nested `deposit.provider_checkout` child spanning
+  the actual provider call), `deposit.apply_confirmed_status` (outcome as
+  an attribute -- `credited`/`not_succeeded`/`amount_mismatch`/`not_found`/
+  `duplicate`), `withdrawal.request` (status as an attribute), and
+  `payout.dispatch` (with a nested `payout.provider_call` child). Every
+  span wraps a whole existing function body rather than being bolted on
+  separately, so OpenTelemetry's own automatic exception-recording (a
+  raised `BelowMinimumDeposit`/`KycLevelTooLow`/etc. gets attached to the
+  span before propagating) covers every rejection path, not just the
+  success path.
+- `configure_tracing()` wired into `services/payments/app.py`'s
+  `lifespan()` (service `"payments"` -- handles the deposit webhook) and
+  `services/bot/app.py`'s `build_app()` (service `"bot"` -- handles
+  `/deposit` and `/withdraw` command creation, per this codebase's
+  existing architecture where deposit/withdrawal creation is a plain
+  Python call from the bot). `payout_worker.py` gained the span *calls*
+  but no configuration call of its own -- consistent with this session's
+  standing scope boundary that process orchestration for background
+  workers (no real CLI entrypoint exists for it) is deployment-time, not
+  built here; a real deployment configures tracing before constructing a
+  `PayoutWorker` the same way it would wire up its process supervisor.
+- A `jaeger` service in `deploy/docker-compose.yml`
+  (`jaegertracing/all-in-one:1.62.0`, confirmed to exist via a real
+  `docker pull` before pinning), profile-gated the same way as the other
+  observability containers. All-in-one image: OTLP/HTTP receiver, storage,
+  and query UI in one container.
+
+**Verified two ways:**
+- `tests/integration/test_tracing.py` configures a real SDK
+  `TracerProvider` with an `InMemorySpanExporter` once (process-global, so
+  done via module-level setup with a `_clear_spans` autouse fixture
+  between tests) and asserts real exported spans -- including a genuine
+  parent/child relationship check (`inner.parent.span_id ==
+  outer.context.span_id`) across an `await` inside the child, not just
+  that two unrelated spans happen to exist -- for all four instrumented
+  functions.
+- **Manually, against the actual Jaeger binary:** ran a real deposit
+  (`create_deposit_intent` -> `_apply_confirmed_status`), a real
+  withdrawal (`request_withdrawal`), and a real payout dispatch
+  (`payout_worker.process_next`) with tracing configured against a real
+  running Jaeger container, then queried Jaeger's own `/api/traces` API
+  and confirmed every span landed with the correct name, the correct
+  nested parent/child structure, and the correct real attributes
+  (`user_id`, `amount`, `our_ref`, `deposit.outcome`, `withdrawal.status`,
+  `payout.outcome`). A `RecentReversibleDeposit` rejection hit during the
+  drill also showed up as a real recorded exception on its span --
+  confirming OpenTelemetry's automatic exception capture works here for
+  real, not just as a documented feature.
+
+**A genuine, external, non-regression finding surfaced by this pass's own
+clean-slate rebuild, worth recording accurately:** the `-m load` batch's
+`test_load_multiroom.py` (p99 call-to-render budget: 300ms) failed 3 times
+in a row inside the full batch (430-498ms) but passed cleanly every time
+run alone (see the existing note on this test's sensitivity to shared-host
+contention). `ps`/`docker ps` during the failing runs showed the actual
+cause: unrelated projects' containers (`santim-commerce-postgres`,
+`santim-commerce-redis`, `spos-frontend`, `spos-backend`) actively running
+on this same 4-core host at the time, not anything this session's changes
+touched -- today's tracing work only touches
+`deposits.py`/`withdrawals.py`/`payout_worker.py`, entirely disjoint from
+the gateway/round-engine code path this load test exercises, and this
+exact test already carried a documented "sensitive to whatever else is
+sharing this process/CPU" caveat before today. Recorded as confirmation of
+the existing caveat with a concrete identified cause this time, not a new
+problem.
+
+Full clean-slate rebuild: mypy clean across 61 source files, `pytest
+tests/` 643 passed / 13 deselected (up from 639), `-m load` 5/5 passed in
+isolation (1 failed only inside the contended batch run, per above),
+`-m chaos_infra` 1 passed, `-m e2e` 7 passed.
+
 ## 2026-08-24 — Grafana dashboards, provisioned as code, verified with a real query drill (closes spec 10.4's "+ Grafana")
 
 Spec section 10.4 pairs "Prometheus + Grafana" as one bullet; the

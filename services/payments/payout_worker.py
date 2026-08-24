@@ -23,12 +23,13 @@ import structlog
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
 
-from packages.core import ledger
+from packages.core import ledger, tracing
 from packages.core.notifications import notify_user
 from services.payments.provider import PaymentProvider
 from services.payments.withdrawals import PAYOUT_STREAM
 
 logger = structlog.get_logger()
+_tracer = tracing.get_tracer(__name__)
 
 GROUP = "payout-workers"
 _PENDING_STATUSES = ("approved", "processing")
@@ -50,68 +51,77 @@ async def process_one(
     dying mid-call, which is exactly the crash-recovery case the spec asks
     to be tested.
     """
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            payment = await conn.fetchrow(
-                "SELECT id, user_id, amount, method_id, status FROM payments "
-                "WHERE our_ref = $1 FOR UPDATE",
-                our_ref,
-            )
-            if payment is None or payment["status"] not in _PENDING_STATUSES:
-                await redis.xack(PAYOUT_STREAM, GROUP, msg_id)
-                return "skipped"
-
-            if payment["status"] == "approved":
-                await conn.execute(
-                    "UPDATE payments SET status = 'processing', updated_at = now() WHERE id = $1",
-                    payment["id"],
+    with _tracer.start_as_current_span(
+        "payout.dispatch", attributes={"our_ref": our_ref}
+    ) as span:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                payment = await conn.fetchrow(
+                    "SELECT id, user_id, amount, method_id, status FROM payments "
+                    "WHERE our_ref = $1 FOR UPDATE",
+                    our_ref,
                 )
+                if payment is None or payment["status"] not in _PENDING_STATUSES:
+                    await redis.xack(PAYOUT_STREAM, GROUP, msg_id)
+                    span.set_attribute("payout.outcome", "skipped")
+                    return "skipped"
 
-            payment_id = payment["id"]
-            user_id = payment["user_id"]
-            amount = payment["amount"]
-            method_id = payment["method_id"]
+                if payment["status"] == "approved":
+                    await conn.execute(
+                        "UPDATE payments SET status = 'processing', updated_at = now() WHERE id = $1",
+                        payment["id"],
+                    )
 
-    method = await pool.fetchrow(
-        "SELECT kind, account_ref, holder_name FROM payment_methods WHERE id = $1", method_id
-    )
-    assert method is not None
-    method_payload: dict[str, str] = {
-        "kind": method["kind"],
-        "account_ref": method["account_ref"],
-        "holder_name": method["holder_name"],
-        "bank_code": method["kind"],
-    }
+                payment_id = payment["id"]
+                user_id = payment["user_id"]
+                amount = payment["amount"]
+                method_id = payment["method_id"]
 
-    try:
-        result = await provider.create_payout(method=method_payload, amount=amount, our_ref=our_ref)
-    except Exception as exc:
-        logger.error("payout_provider_error", our_ref=our_ref, error=str(exc))
-        await _reverse(pool, payment_id=payment_id, user_id=user_id, amount=amount, our_ref=our_ref, reason=str(exc))
+        method = await pool.fetchrow(
+            "SELECT kind, account_ref, holder_name FROM payment_methods WHERE id = $1", method_id
+        )
+        assert method is not None
+        method_payload: dict[str, str] = {
+            "kind": method["kind"],
+            "account_ref": method["account_ref"],
+            "holder_name": method["holder_name"],
+            "bank_code": method["kind"],
+        }
+
+        try:
+            with _tracer.start_as_current_span("payout.provider_call") as provider_span:
+                provider_span.set_attribute("provider.name", provider.name)
+                result = await provider.create_payout(method=method_payload, amount=amount, our_ref=our_ref)
+        except Exception as exc:
+            logger.error("payout_provider_error", our_ref=our_ref, error=str(exc))
+            await _reverse(pool, payment_id=payment_id, user_id=user_id, amount=amount, our_ref=our_ref, reason=str(exc))
+            await notify_user(pool, redis, user_id=user_id, key="notify.withdrawal_failed", amount=str(amount))
+            await redis.xack(PAYOUT_STREAM, GROUP, msg_id)
+            span.set_attribute("payout.outcome", "failed")
+            return "failed"
+
+        if result.status in ("succeeded", "processing"):
+            await _settle_success(
+                pool,
+                payment_id=payment_id,
+                user_id=user_id,
+                amount=amount,
+                our_ref=our_ref,
+                provider_ref=result.provider_ref,
+            )
+            await notify_user(pool, redis, user_id=user_id, key="notify.withdrawal_succeeded", amount=str(amount))
+            await redis.xack(PAYOUT_STREAM, GROUP, msg_id)
+            span.set_attribute("payout.outcome", "succeeded")
+            return "succeeded"
+
+        await _reverse(
+            pool, payment_id=payment_id, user_id=user_id, amount=amount, our_ref=our_ref,
+            reason=f"provider reported status={result.status}",
+        )
         await notify_user(pool, redis, user_id=user_id, key="notify.withdrawal_failed", amount=str(amount))
         await redis.xack(PAYOUT_STREAM, GROUP, msg_id)
+        span.set_attribute("payout.outcome", "failed")
         return "failed"
-
-    if result.status in ("succeeded", "processing"):
-        await _settle_success(
-            pool,
-            payment_id=payment_id,
-            user_id=user_id,
-            amount=amount,
-            our_ref=our_ref,
-            provider_ref=result.provider_ref,
-        )
-        await notify_user(pool, redis, user_id=user_id, key="notify.withdrawal_succeeded", amount=str(amount))
-        await redis.xack(PAYOUT_STREAM, GROUP, msg_id)
-        return "succeeded"
-
-    await _reverse(
-        pool, payment_id=payment_id, user_id=user_id, amount=amount, our_ref=our_ref,
-        reason=f"provider reported status={result.status}",
-    )
-    await notify_user(pool, redis, user_id=user_id, key="notify.withdrawal_failed", amount=str(amount))
-    await redis.xack(PAYOUT_STREAM, GROUP, msg_id)
-    return "failed"
 
 
 async def _settle_success(

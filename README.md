@@ -86,6 +86,11 @@ docker compose -f deploy/docker-compose.yml up -d pushgateway
 #     Prometheus too. Browse http://localhost:3001 (anonymous viewer
 #     access enabled for local dev; admin/jobingo for editing).
 docker compose -f deploy/docker-compose.yml up -d grafana
+
+# 12. Optional: OpenTelemetry traces for the deposit/payout paths. Set
+#     OTEL_EXPORTER_ENDPOINT=http://localhost:4318 in .env, then browse
+#     http://localhost:16686 to see them.
+docker compose -f deploy/docker-compose.yml up -d jaeger
 ```
 
 To actually play with it: start the gateway (`uvicorn services.gateway.app:app
@@ -495,8 +500,27 @@ whoever happened to be connected at the exact second the round ended. See
   Grafana's own datasource proxy API and watching it move `0 → 1 → 0`
   across a real WebSocket connect/disconnect — not a hand-typed query
   against Prometheus directly, the literal thing the panel itself runs.
-  See `DECISIONS.md`. OpenTelemetry traces for the deposit/payout paths
-  are a real, buildable next step, not built yet.
+  See `DECISIONS.md`.
+- **OpenTelemetry traces** (`packages/core/tracing.py`) — closes spec
+  10.4's last item: "deposit and payout paths end to end." Real spans at
+  the money-moving choke points — `deposit.create_intent` (with a nested
+  `deposit.provider_checkout` child), `deposit.apply_confirmed_status`
+  (outcome as an attribute), `withdrawal.request` (status as an
+  attribute), `payout.dispatch` (with a nested `payout.provider_call`
+  child) — wrapping whole function bodies, so OpenTelemetry's own
+  automatic exception recording covers every rejection path too, not just
+  success. Opt-in via `OTEL_EXPORTER_ENDPOINT`, same pattern as
+  `PUSHGATEWAY_URL`; a `jaeger` service in `deploy/docker-compose.yml`,
+  same profile gating. Verified against the real Jaeger binary: ran a
+  real deposit, withdrawal, and payout dispatch, then confirmed every
+  span landed with the correct name, nesting, and attributes via Jaeger's
+  own API. See `DECISIONS.md` — including a genuine (non-regression)
+  finding about shared-host load-test contention surfaced by this pass's
+  own clean-slate rebuild.
+
+Spec section 10.4 (Observability) is now fully addressed: metrics, alerts,
+dashboards, and traces, every one verified with a real drill against the
+real binary, not just config review.
 
 **Load and chaos testing (spec section 10.3):**
 - **A real money-safety bug found and fixed by this phase's own load

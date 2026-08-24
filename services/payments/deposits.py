@@ -20,12 +20,13 @@ import asyncpg
 import structlog
 from redis.asyncio import Redis
 
-from packages.core import ledger, metrics, responsible_gaming
+from packages.core import ledger, metrics, responsible_gaming, tracing
 from packages.core.notifications import notify_user
 from services.gateway.queries import user_balance_snapshot
 from services.payments.provider import PaymentProvider
 
 logger = structlog.get_logger()
+_tracer = tracing.get_tracer(__name__)
 
 # Anything a webhook or a poll can report the underlying transaction is in.
 _TERMINAL_FAILURE_STATUSES = ("failed", "cancelled")
@@ -87,80 +88,86 @@ async def create_deposit_intent(
     min_deposit: Decimal,
     daily_cap: Decimal,
 ) -> DepositIntent:
-    if amount < min_deposit:
-        raise BelowMinimumDeposit(f"amount {amount} is below the minimum {min_deposit}")
+    with _tracer.start_as_current_span(
+        "deposit.create_intent", attributes={"user_id": user_id, "amount": str(amount)}
+    ) as span:
+        if amount < min_deposit:
+            raise BelowMinimumDeposit(f"amount {amount} is below the minimum {min_deposit}")
 
-    async with pool.acquire() as conn:
-        user_status = await conn.fetchval("SELECT status FROM users WHERE id = $1", user_id)
-        if user_status is None:
-            raise UnknownDepositor(f"user {user_id} does not exist")
-        if user_status == "self_excluded":
-            raise DepositorSelfExcluded(f"user {user_id} is self-excluded")
-        if user_status == "banned":
-            raise DepositorBanned(f"user {user_id} is banned")
+        async with pool.acquire() as conn:
+            user_status = await conn.fetchval("SELECT status FROM users WHERE id = $1", user_id)
+            if user_status is None:
+                raise UnknownDepositor(f"user {user_id} does not exist")
+            if user_status == "self_excluded":
+                raise DepositorSelfExcluded(f"user {user_id} is self-excluded")
+            if user_status == "banned":
+                raise DepositorBanned(f"user {user_id} is banned")
 
-        limits = await responsible_gaming.get_or_create_limits(conn, user_id)
-        if limits.cooloff_until is not None and datetime.now(UTC) < limits.cooloff_until:
-            raise DepositorCoolingOff(f"user {user_id} is cooling off until {limits.cooloff_until}")
+            limits = await responsible_gaming.get_or_create_limits(conn, user_id)
+            if limits.cooloff_until is not None and datetime.now(UTC) < limits.cooloff_until:
+                raise DepositorCoolingOff(f"user {user_id} is cooling off until {limits.cooloff_until}")
 
-        user_cap = responsible_gaming.effective_deposit_cap(limits)
-        effective_cap = min(daily_cap, user_cap) if user_cap is not None else daily_cap
+            user_cap = responsible_gaming.effective_deposit_cap(limits)
+            effective_cap = min(daily_cap, user_cap) if user_cap is not None else daily_cap
 
-        today_total = await conn.fetchval(
-            """
-            SELECT COALESCE(SUM(amount), 0) FROM payments
-            WHERE user_id = $1 AND direction = 'in'
-              AND status IN ('pending', 'processing', 'succeeded')
-              AND created_at >= date_trunc('day', now())
-            """,
-            user_id,
-        )
-        if today_total + amount > effective_cap:
-            raise DailyDepositCapExceeded(f"user {user_id} would exceed the daily cap {effective_cap}")
+            today_total = await conn.fetchval(
+                """
+                SELECT COALESCE(SUM(amount), 0) FROM payments
+                WHERE user_id = $1 AND direction = 'in'
+                  AND status IN ('pending', 'processing', 'succeeded')
+                  AND created_at >= date_trunc('day', now())
+                """,
+                user_id,
+            )
+            if today_total + amount > effective_cap:
+                raise DailyDepositCapExceeded(f"user {user_id} would exceed the daily cap {effective_cap}")
 
-        ref_row = await conn.fetchrow(
-            "SELECT 'DEP-' || extract(year from now())::text || '-' || "
-            "lpad(nextval('payment_ref_seq')::text, 6, '0') AS our_ref"
-        )
-        assert ref_row is not None
-        our_ref: str = ref_row["our_ref"]
+            ref_row = await conn.fetchrow(
+                "SELECT 'DEP-' || extract(year from now())::text || '-' || "
+                "lpad(nextval('payment_ref_seq')::text, 6, '0') AS our_ref"
+            )
+            assert ref_row is not None
+            our_ref: str = ref_row["our_ref"]
+            span.set_attribute("deposit.our_ref", our_ref)
 
-        payment_row = await conn.fetchrow(
-            """
-            INSERT INTO payments (user_id, direction, provider, our_ref, amount, status)
-            VALUES ($1, 'in', $2, $3, $4, 'pending')
-            RETURNING id
-            """,
-            user_id,
-            provider.name,
-            our_ref,
-            amount,
-        )
-        assert payment_row is not None
-        payment_id: int = payment_row["id"]
+            payment_row = await conn.fetchrow(
+                """
+                INSERT INTO payments (user_id, direction, provider, our_ref, amount, status)
+                VALUES ($1, 'in', $2, $3, $4, 'pending')
+                RETURNING id
+                """,
+                user_id,
+                provider.name,
+                our_ref,
+                amount,
+            )
+            assert payment_row is not None
+            payment_id: int = payment_row["id"]
 
-    try:
-        checkout = await provider.create_checkout(
-            amount=amount, user_ref=phone_e164, our_ref=our_ref, return_url=return_url
-        )
-    except Exception as exc:
+        try:
+            with _tracer.start_as_current_span("deposit.provider_checkout") as checkout_span:
+                checkout_span.set_attribute("provider.name", provider.name)
+                checkout = await provider.create_checkout(
+                    amount=amount, user_ref=phone_e164, our_ref=our_ref, return_url=return_url
+                )
+        except Exception as exc:
+            await pool.execute(
+                "UPDATE payments SET status = 'failed', failure_reason = $2, updated_at = now() "
+                "WHERE id = $1",
+                payment_id,
+                str(exc),
+            )
+            raise DepositProviderError(f"provider {provider.name} rejected checkout creation") from exc
+
         await pool.execute(
-            "UPDATE payments SET status = 'failed', failure_reason = $2, updated_at = now() "
-            "WHERE id = $1",
+            "UPDATE payments SET status = 'processing', provider_ref = $2, raw_response = $3, "
+            "updated_at = now() WHERE id = $1",
             payment_id,
-            str(exc),
+            checkout.provider_ref,
+            json.dumps(checkout.raw_response, default=str),
         )
-        raise DepositProviderError(f"provider {provider.name} rejected checkout creation") from exc
 
-    await pool.execute(
-        "UPDATE payments SET status = 'processing', provider_ref = $2, raw_response = $3, "
-        "updated_at = now() WHERE id = $1",
-        payment_id,
-        checkout.provider_ref,
-        json.dumps(checkout.raw_response, default=str),
-    )
-
-    return DepositIntent(payment_id=payment_id, our_ref=our_ref, checkout_url=checkout.checkout_url)
+        return DepositIntent(payment_id=payment_id, our_ref=our_ref, checkout_url=checkout.checkout_url)
 
 
 async def _apply_confirmed_status(
@@ -187,85 +194,93 @@ async def _apply_confirmed_status(
     """
     user_id: int | None = None
 
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            payment = await conn.fetchrow(
-                "SELECT id, user_id, amount, status FROM payments WHERE our_ref = $1 FOR UPDATE",
-                our_ref,
-            )
-            if payment is None:
-                logger.warning("payment_webhook_unknown_ref", our_ref=our_ref, provider=provider_name)
-                return "not_found"
+    with _tracer.start_as_current_span(
+        "deposit.apply_confirmed_status", attributes={"our_ref": our_ref, "status": status}
+    ) as span:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                payment = await conn.fetchrow(
+                    "SELECT id, user_id, amount, status FROM payments WHERE our_ref = $1 FOR UPDATE",
+                    our_ref,
+                )
+                if payment is None:
+                    logger.warning("payment_webhook_unknown_ref", our_ref=our_ref, provider=provider_name)
+                    span.set_attribute("deposit.outcome", "not_found")
+                    return "not_found"
 
-            event_row = await conn.fetchrow(
-                """
-                INSERT INTO payment_events (payment_id, provider, event_id, signature_ok, payload)
-                VALUES ($1, $2, $3, true, $4)
-                ON CONFLICT (provider, event_id) DO NOTHING
-                RETURNING id
-                """,
-                payment["id"],
-                provider_name,
-                event_id,
-                json.dumps(raw, default=str),
-            )
-            if event_row is None or payment["status"] == "succeeded":
-                return "duplicate"
+                event_row = await conn.fetchrow(
+                    """
+                    INSERT INTO payment_events (payment_id, provider, event_id, signature_ok, payload)
+                    VALUES ($1, $2, $3, true, $4)
+                    ON CONFLICT (provider, event_id) DO NOTHING
+                    RETURNING id
+                    """,
+                    payment["id"],
+                    provider_name,
+                    event_id,
+                    json.dumps(raw, default=str),
+                )
+                if event_row is None or payment["status"] == "succeeded":
+                    span.set_attribute("deposit.outcome", "duplicate")
+                    return "duplicate"
 
-            if status != "succeeded":
-                if status in _TERMINAL_FAILURE_STATUSES:
-                    await conn.execute(
-                        "UPDATE payments SET status = $2, updated_at = now() WHERE id = $1",
-                        payment["id"],
-                        status,
+                if status != "succeeded":
+                    if status in _TERMINAL_FAILURE_STATUSES:
+                        await conn.execute(
+                            "UPDATE payments SET status = $2, updated_at = now() WHERE id = $1",
+                            payment["id"],
+                            status,
+                        )
+                    metrics.deposit_outcomes_total.labels(outcome="not_succeeded").inc()
+                    span.set_attribute("deposit.outcome", "not_succeeded")
+                    return "not_succeeded"
+
+                if amount is None or amount != payment["amount"]:
+                    logger.error(
+                        "payment_amount_mismatch",
+                        our_ref=our_ref,
+                        provider_amount=str(amount),
+                        our_amount=str(payment["amount"]),
                     )
-                metrics.deposit_outcomes_total.labels(outcome="not_succeeded").inc()
-                return "not_succeeded"
+                    await conn.execute(
+                        "UPDATE payments SET status = 'review', updated_at = now() WHERE id = $1",
+                        payment["id"],
+                    )
+                    metrics.deposit_outcomes_total.labels(outcome="amount_mismatch").inc()
+                    span.set_attribute("deposit.outcome", "amount_mismatch")
+                    return "amount_mismatch"
 
-            if amount is None or amount != payment["amount"]:
-                logger.error(
-                    "payment_amount_mismatch",
-                    our_ref=our_ref,
-                    provider_amount=str(amount),
-                    our_amount=str(payment["amount"]),
+                provider_account = await ledger.get_or_create_account(conn, None, "provider_settlement")
+                cash_account = await ledger.get_or_create_account(conn, payment["user_id"], "user_cash")
+                txn = await ledger.post(
+                    conn,
+                    "deposit",
+                    [
+                        ledger.Entry(provider_account.id, -payment["amount"]),
+                        ledger.Entry(cash_account.id, payment["amount"]),
+                    ],
+                    idempotency_key=our_ref,
+                    payment_id=payment["id"],
                 )
                 await conn.execute(
-                    "UPDATE payments SET status = 'review', updated_at = now() WHERE id = $1",
+                    "UPDATE payments SET status = 'succeeded', provider_ref = $2, ledger_txn_id = $3, "
+                    "updated_at = now() WHERE id = $1",
                     payment["id"],
+                    provider_ref,
+                    txn.id,
                 )
-                metrics.deposit_outcomes_total.labels(outcome="amount_mismatch").inc()
-                return "amount_mismatch"
+                user_id = payment["user_id"]
+                credited_amount = payment["amount"]
 
-            provider_account = await ledger.get_or_create_account(conn, None, "provider_settlement")
-            cash_account = await ledger.get_or_create_account(conn, payment["user_id"], "user_cash")
-            txn = await ledger.post(
-                conn,
-                "deposit",
-                [
-                    ledger.Entry(provider_account.id, -payment["amount"]),
-                    ledger.Entry(cash_account.id, payment["amount"]),
-                ],
-                idempotency_key=our_ref,
-                payment_id=payment["id"],
-            )
-            await conn.execute(
-                "UPDATE payments SET status = 'succeeded', provider_ref = $2, ledger_txn_id = $3, "
-                "updated_at = now() WHERE id = $1",
-                payment["id"],
-                provider_ref,
-                txn.id,
-            )
-            user_id = payment["user_id"]
-            credited_amount = payment["amount"]
-
-    assert user_id is not None
-    snapshot = await _publish_balance_update(pool, redis, user_id)
-    await notify_user(
-        pool, redis, user_id=user_id, key="notify.deposit_confirmed",
-        amount=str(credited_amount), balance=snapshot["cash"],
-    )
-    metrics.deposit_outcomes_total.labels(outcome="credited").inc()
-    return "credited"
+        assert user_id is not None
+        snapshot = await _publish_balance_update(pool, redis, user_id)
+        await notify_user(
+            pool, redis, user_id=user_id, key="notify.deposit_confirmed",
+            amount=str(credited_amount), balance=snapshot["cash"],
+        )
+        metrics.deposit_outcomes_total.labels(outcome="credited").inc()
+        span.set_attribute("deposit.outcome", "credited")
+        return "credited"
 
 
 async def handle_webhook(

@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     # real Prometheus Pushgateway too, since reconcile_job is a one-shot CLI
     # job with no long-running /metrics endpoint of its own to scrape.
     pushgateway_url: str = ""
+    # Base OTLP endpoint (e.g. http://localhost:4318) for the deposit and
+    # payout traces spec section 10.4 asks for. Empty means tracing calls
+    # are all still safe to make (OpenTelemetry's own no-op default
+    # tracer), just discarded rather than exported anywhere.
+    otel_exporter_endpoint: str = ""
 
 
 @lru_cache
