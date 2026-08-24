@@ -63,6 +63,11 @@ docker compose -f deploy/docker-compose.yml up -d postgres redis
 #    default; install a browser once, then run explicitly
 .venv/bin/playwright install chromium
 .venv/bin/pytest tests/ -m e2e -v -s
+
+# 8. Take a real backup, and restore it into a throwaway database to prove
+#    it's actually usable (never touches the live "jobingo" database)
+./deploy/backup.sh
+./deploy/restore.sh backups/jobingo-<timestamp>.dump
 ```
 
 To actually play with it: start the gateway (`uvicorn services.gateway.app:app
@@ -412,6 +417,22 @@ whoever happened to be connected at the exact second the round ended. See
   (`ledger_reconciliation_failed`) otherwise — meant to be invoked by a
   real cron/systemd-timer/k8s CronJob that alerts loudly on the non-zero
   exit. See `DECISIONS.md`.
+
+**Backup and restore:**
+- **`deploy/backup.sh`** — real `pg_dump -F custom` against the
+  docker-compose Postgres, written to a timestamped file under
+  `backups/` (gitignored).
+- **`deploy/restore.sh`** — real `pg_restore` into a target database,
+  dropping and recreating it first so the result is exactly what's in
+  the dump. Defaults to a separate `jobingo_restore_drill` database, never
+  the live one, so it can never be an accidental overwrite.
+- Verified with a real drill (`tests/integration/test_backup_restore.py`):
+  funds a uniquely-valued user, backs up, restores into a throwaway
+  database, and confirms the exact balance and the full cards pool
+  survived intact — real `pg_dump`/`pg_restore` binaries, not mocked. See
+  `DECISIONS.md` for why "performed in the last 30 days" (spec section
+  14) can't literally be claimed without a real production deployment,
+  and what's provable instead.
 
 **Load and chaos testing (spec section 10.3):**
 - **A real money-safety bug found and fixed by this phase's own load

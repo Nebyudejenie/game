@@ -5,6 +5,53 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-24 — Backup/restore tooling, verified with a real drill: `deploy/backup.sh` + `deploy/restore.sh`
+
+Spec section 14's definition of done requires: "a full restore from backup
+has been performed in the last 30 days." That exact claim -- a fact about
+an operating production system, observed over a real 30-day window -- isn't
+something this session can manufacture: there is no production deployment,
+and no 30 days have elapsed in a build session. What *is* honestly
+buildable and verifiable right now is the underlying capability the claim
+depends on: does a backup taken from this stack actually restore, with the
+data intact, using real tooling an operator would actually run.
+
+No backup/restore tooling existed anywhere in the repo before this --
+confirmed by grepping for `pg_dump`/`pg_restore`/`backup` across the whole
+tree. Built:
+- **`deploy/backup.sh`** — `pg_dump -F custom` against the docker-compose
+  Postgres, written to a timestamped file under `backups/` (gitignored --
+  even a *test* dump can contain real-shaped user financial data and has
+  no business in version control).
+- **`deploy/restore.sh`** — `pg_restore` into a target database, but only
+  after dropping and recreating it first rather than relying on
+  `pg_restore --clean` (which only drops objects it finds a matching
+  `CREATE` for in the dump, silently leaving behind anything created
+  since the backup was taken -- a real restore drill has to guarantee the
+  post-restore database contains *exactly* what's in the dump). Defaults
+  to a separate `jobingo_restore_drill` database, never the live
+  `jobingo` one, specifically so running it can never be an accidental
+  overwrite of real data -- restoring over the live database requires
+  naming it explicitly.
+
+Same scope boundary as `reconcile_job.py` above: these are the actual
+mechanism, invoked directly; wiring a nightly schedule around
+`backup.sh` is a deployment-time decision left out of scope.
+
+**Verified with a real drill, not just a script review:** manually, then
+via `tests/integration/test_backup_restore.py` — funds a uniquely-valued
+user in the real shared test database, runs `backup.sh` as a real
+subprocess, restores the resulting dump into a throwaway
+`jobingo_restore_drill_test` database (never touching the `jobingo`
+database every other test depends on), connects to that throwaway database
+directly, and asserts both the funded user's exact balance and the full
+100-row cards pool survived intact. A second test confirms `restore.sh`
+refuses a missing backup file outright rather than silently no-op'ing.
+Both real `pg_dump`/`pg_restore` binaries (present inside the official
+`postgres:15` image) are exercised for real, the same "real binary, not a
+mock" discipline as every chaos test this session. Leftover dump files and
+the throwaway database are always cleaned up, confirmed empty after a run.
+
 ## 2026-08-24 — Nightly ledger reconciliation job: `packages/core/reconcile_job.py`
 
 Spec section 14's definition of done requires: "ledger sum equals balance
