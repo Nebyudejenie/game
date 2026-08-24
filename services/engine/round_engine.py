@@ -31,7 +31,7 @@ from decimal import Decimal
 import asyncpg
 from redis.asyncio import Redis
 
-from packages.core import bingo, ledger, responsible_gaming
+from packages.core import bingo, ledger, metrics, responsible_gaming
 from packages.core.bingo import Grid
 from packages.core.ledger import Entry, InsufficientFunds
 from services.engine import commands, refunds, settlement
@@ -153,6 +153,17 @@ class RoundEngine:
     @property
     def status(self) -> str:
         return self._status
+
+    def _set_status(self, value: str) -> None:
+        # engine_rooms_active counts idle-vs-not, so it only moves on the
+        # actual idle boundary crossing -- not on every one of the five
+        # status assignments below (settling/running/done are all already
+        # "active" and shouldn't double-increment).
+        if value != "idle" and self._status == "idle":
+            metrics.engine_rooms_active.inc()
+        elif value == "idle" and self._status != "idle":
+            metrics.engine_rooms_active.dec()
+        self._status = value
 
     @property
     def round_id(self) -> int | None:
@@ -329,21 +340,22 @@ class RoundEngine:
         # check. valid stays False unless a real pattern check below passes.
         valid = False
         try:
-            if user_id in self._locked_out:
-                return ClaimResult(False, "locked_out")
-            entry = self._entries.get(user_id)
-            if entry is None:
-                return ClaimResult(False, "not_in_round")
-            if self._status not in ("running", "settling"):
-                return ClaimResult(False, "round_not_running")
+            with metrics.engine_claim_validation_seconds.time():
+                if user_id in self._locked_out:
+                    return ClaimResult(False, "locked_out")
+                entry = self._entries.get(user_id)
+                if entry is None:
+                    return ClaimResult(False, "not_in_round")
+                if self._status not in ("running", "settling"):
+                    return ClaimResult(False, "round_not_running")
 
-            grid = self._card_pool[entry.card_no]
-            won = bingo.winning_patterns(grid, self._called, self._room.win_patterns)
-            valid = bool(won)
-            if not valid:
-                if source == "manual" and self._status == "running":
-                    self._locked_out.add(user_id)
-                return ClaimResult(False, "no_pattern")
+                grid = self._card_pool[entry.card_no]
+                won = bingo.winning_patterns(grid, self._called, self._room.win_patterns)
+                valid = bool(won)
+                if not valid:
+                    if source == "manual" and self._status == "running":
+                        self._locked_out.add(user_id)
+                    return ClaimResult(False, "no_pattern")
         finally:
             if self._round_id is not None:
                 await self._record_claim_attempt(user_id, valid)
@@ -363,7 +375,7 @@ class RoundEngine:
                 return ClaimResult(False, "already_claimed")
 
             if self._status == "running":
-                self._status = "settling"
+                self._set_status("settling")
                 deadline = now + WINNER_TIE_WINDOW_SECONDS
                 self._winner_window_deadline = deadline
                 self._pending_winners.append(
@@ -411,7 +423,7 @@ class RoundEngine:
         assert row is not None
         self._round_id = row["id"]
         self._seq = seq
-        self._status = "lobby"
+        self._set_status("lobby")
         self._server_seed = server_seed
         self._server_seed_hash = server_seed_hash
         self._client_seed = None
@@ -474,7 +486,7 @@ class RoundEngine:
                 draw_order,
             )
 
-        self._status = "running"
+        self._set_status("running")
         self._client_seed = client_seed
         self._draw_order = draw_order
         self._running_started_at = time.monotonic()
@@ -546,6 +558,7 @@ class RoundEngine:
         self._call_index += 1
         number = self._draw_order[self._call_index - 1]
         self._called.add(number)
+        metrics.engine_calls_total.inc()
 
         await self._pool.execute(
             "UPDATE rounds SET call_index = $1 WHERE id = $2", self._call_index, round_id
@@ -660,13 +673,13 @@ class RoundEngine:
             }
         )
 
-        self._status = "done"
+        self._set_status("done")
         await asyncio.sleep(self._room.result_seconds)
         self._reset_to_idle()
 
     def _reset_to_idle(self) -> None:
         self._round_id = None
-        self._status = "idle"
+        self._set_status("idle")
         self._server_seed = None
         self._server_seed_hash = None
         self._client_seed = None

@@ -13,12 +13,15 @@ from contextlib import asynccontextmanager
 
 import asyncpg
 from fastapi import FastAPI, Request, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from packages.core import metrics
 from packages.core.config import get_settings
 from packages.core.redis_conn import get_redis
 from services.payments import deposits
 from services.payments.chapa import ChapaProvider
 from services.payments.provider import InvalidSignature
+from services.payments.withdrawals import PAYOUT_STREAM
 
 
 @asynccontextmanager
@@ -59,3 +62,25 @@ async def healthz() -> dict[str, str]:
         await conn.fetchval("SELECT 1")
     await app.state.redis.ping()
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+async def metrics_endpoint() -> Response:
+    # payout_queue_depth and house_revenue_total are "live" gauges (spec
+    # section 10.4) -- queried fresh on every scrape rather than maintained
+    # incrementally, since a scrape is exactly the moment Prometheus wants
+    # their current value and this avoids a background polling loop for
+    # numbers nothing else in this process needs continuously updated.
+    depth = await app.state.redis.xlen(PAYOUT_STREAM)
+    metrics.payout_queue_depth.set(depth)
+
+    revenue = await app.state.pool.fetchval(
+        """
+        SELECT COALESCE(SUM(b.balance), 0)
+        FROM account_balances b JOIN accounts a ON a.id = b.account_id
+        WHERE a.kind = 'house_revenue'
+        """
+    )
+    metrics.house_revenue_total.set(float(revenue))
+
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

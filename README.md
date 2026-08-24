@@ -68,6 +68,13 @@ docker compose -f deploy/docker-compose.yml up -d postgres redis
 #    it's actually usable (never touches the live "jobingo" database)
 ./deploy/backup.sh
 ./deploy/restore.sh backups/jobingo-<timestamp>.dump
+
+# 9. Optional: real Prometheus metrics scraping (spec section 10.4).
+#    Gated behind a profile, so step 2's plain `up -d` skips it -- start
+#    it explicitly once you have a service running with --port matching
+#    deploy/prometheus/prometheus.yml (8000 gateway, 8001 admin, 8002
+#    payments, 8003 bot), then browse http://localhost:9091
+docker compose -f deploy/docker-compose.yml up -d prometheus
 ```
 
 To actually play with it: start the gateway (`uvicorn services.gateway.app:app
@@ -433,6 +440,36 @@ whoever happened to be connected at the exact second the round ended. See
   `DECISIONS.md` for why "performed in the last 30 days" (spec section
   14) can't literally be claimed without a real production deployment,
   and what's provable instead.
+
+**Observability (spec section 10.4):**
+- **`packages/core/metrics.py`** — real Prometheus metrics (not
+  placeholders): `gateway_connections`, `engine_rooms_active`,
+  `engine_calls_total`, `gateway_command_ack_seconds` (p50/p95/p99 via a
+  Histogram), `engine_claim_validation_seconds`,
+  `engine_rounds_voided_total`, `ledger_transactions_total{kind}`,
+  `deposit_outcomes_total{outcome}` (deposit success rate),
+  `payout_queue_depth`, `house_revenue_total` — wired into the real code
+  paths that produce each signal (`services/gateway/connection.py`,
+  `services/engine/round_engine.py` and `refunds.py`,
+  `packages/core/ledger.py`, `services/payments/deposits.py`).
+- **`/metrics`** on every service with an HTTP surface (gateway, admin,
+  payments, bot), unauthenticated like the existing `/healthz` routes.
+- **`deploy/prometheus/prometheus.yml`** (scrape config) +
+  **`alerts.yml`** (the spec's own five alert conditions, verbatim) + a
+  `prometheus` service in `deploy/docker-compose.yml`, gated behind a
+  `profiles: ["observability"]` so it doesn't start by default — see
+  step 9 above.
+- Verified with a real drill, not just "the config parses": a real
+  gateway process, a real Prometheus container, `gateway_connections`
+  watched moving `0 → 1 → 0` across real scrapes as a real WebSocket
+  client connected and disconnected, queried through Prometheus's own
+  API. All five alert rules confirmed loaded with `health: ok` against
+  the real metric names. See `DECISIONS.md` for the two interpretation
+  calls made explicit ("call-to-ack", "deposit success rate") and one
+  honestly flagged gap (the reconciliation-mismatch alert has no
+  Pushgateway to push its metric yet). Grafana dashboards and
+  OpenTelemetry traces are real, buildable next steps, not built this
+  pass.
 
 **Load and chaos testing (spec section 10.3):**
 - **A real money-safety bug found and fixed by this phase's own load

@@ -5,6 +5,120 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-24 — Observability: real Prometheus metrics, alert rules, and a real scrape drill (spec section 10.4)
+
+Spec section 10.4 was a genuine, unaddressed gap -- "Metrics (Prometheus +
+Grafana): concurrent connections, rooms active, calls/sec, call-to-ack
+p50/p95/p99, claim validation time, ledger txn/sec, deposit success rate,
+payout queue depth, house revenue live... Alerts: balance reconciliation
+mismatch (page immediately), payout queue depth > 50, deposit success
+rate < 90%, p99 call latency > 1 s, any round voided." Unlike
+SantimPay/ArifPay, nothing here needed an unreachable third-party API or a
+credential this session doesn't have, so it was genuinely buildable.
+
+**`packages/core/metrics.py`** defines every metric the spec bullet lists,
+wired into the real code paths that produce each signal:
+- `gateway_connections` (Gauge) -- incremented/decremented at the real
+  auth-success/cleanup points in `services/gateway/connection.py`.
+- `engine_rooms_active` (Gauge) -- a new `RoundEngine._set_status()`
+  helper replaces every raw `self._status = ...` assignment so the gauge
+  moves exactly on the idle-boundary crossing, not on all five status
+  values individually.
+- `engine_calls_total` (Counter), `engine_claim_validation_seconds`
+  (Histogram), `engine_rounds_voided_total` (Counter) -- incremented in
+  `_call_next_number()`, around `claim()`'s pattern-check block, and in
+  `refunds.refund_round()` (the one shared void path every caller uses).
+- `ledger_transactions_total{kind}` (Counter) -- incremented in
+  `ledger.post()`, but only on a genuinely new transaction row (the
+  `ON CONFLICT DO NOTHING ... RETURNING` path), never on an idempotent
+  replay -- "ledger txn/sec" should mean real writes, not retries.
+- `deposit_outcomes_total{outcome}` (Counter) -- incremented in
+  `deposits._apply_confirmed_status()` for `credited` /
+  `not_succeeded` / `amount_mismatch` only; `not_found` isn't a real
+  deposit attempt on our side and `duplicate` is a replay of an outcome
+  already counted once, so counting either would corrupt "deposit success
+  rate."
+- `payout_queue_depth` and `house_revenue_total` (Gauges) -- computed
+  fresh on every `/metrics` scrape (a real `XLEN` on the payout stream, a
+  real `SUM(account_balances.balance)` for `house_revenue`) rather than
+  maintained incrementally, since a scrape is exactly the moment
+  Prometheus wants the current value and this avoids a background polling
+  loop nothing else in the process needs.
+
+**Two interpretation calls, made explicitly rather than guessed silently:**
+- **"Call-to-ack"** is read as the gateway's own command round-trip
+  (join/drop_card/set_auto/claim -> the WS protocol's own `{"t": "ack",
+  ...}` / `claim_result` reply), not the bingo number-call broadcast --
+  the protocol already has a concrete "call ... ack" pair under that name,
+  and "claim validation time" being called out as its own separate metric
+  right next to it only makes sense if "call-to-ack" covers the other
+  three actions too. Documented in `packages/core/metrics.py`'s own
+  docstring as well.
+- **"Deposit success rate"** counts only the three real terminal outcomes
+  (`credited` / `not_succeeded` / `amount_mismatch`), excluding
+  `not_found` and `duplicate` -- see above.
+
+**`/metrics` endpoints** added to every service with an HTTP surface
+(`services/gateway/app.py`, `services/admin/app.py`,
+`services/payments/app.py` via FastAPI's `Response` +
+`prometheus_client.generate_latest()`; `services/bot/app.py` via aiohttp's
+`web.Response`, which -- unlike FastAPI's -- rejects a `content_type`
+string with an embedded `; charset=...`, discovered by actually running
+it, not by reading aiohttp's docs first). Unauthenticated, the same as the
+existing `/healthz` routes -- Prometheus scraping is a network-level
+concern in a real deployment, not an application-auth one, and the
+admin app's optional IP allowlist (`_check_ip_allowlist`) is only wired
+into `current_admin`, not a blanket middleware, so `/metrics` follows
+`/healthz`'s existing precedent rather than inventing a new exposure
+policy.
+
+**`deploy/prometheus/prometheus.yml` + `alerts.yml`**, and a `prometheus`
+service added to `deploy/docker-compose.yml`, gated behind a
+`profiles: ["observability"]` so a plain `docker compose up -d` (used
+throughout this README and every clean-slate rebuild this session runs)
+doesn't start a third container nobody asked for -- confirmed for real
+that explicit `docker compose up -d prometheus` still starts it despite
+the profile (Compose's documented override-by-explicit-name behavior),
+and that `docker compose down` needs `--profile observability` to also
+tear it down, both verified by actually running each command and
+inspecting `docker compose ps`, not assumed from memory. The container
+reaches host-run services (this dev stack doesn't run gateway/admin/
+payments/bot as long-lived docker services -- see the compose file's own
+comment) via `extra_hosts: host.docker.internal:host-gateway`.
+
+**Verified with a real drill, not just "the YAML parses":** started the
+real gateway app on port 8000, started the real Prometheus container,
+confirmed via Prometheus's own `/api/v1/targets` API that the gateway job
+scraped successfully (admin/payments/bot correctly showed `down` -- they
+weren't started for this drill). Connected a real WebSocket client and
+watched `gateway_connections` go `0 -> 1 -> 0` across real scrapes via
+Prometheus's own `/api/v1/query` API as the client connected and
+disconnected -- proof the whole path (instrumentation -> `/metrics` ->
+network reachability -> Prometheus's own scrape+storage) works end to
+end, not just that each piece compiles. `/api/v1/rules` confirmed all
+five alert rules loaded with `health: ok` against the real metric names.
+
+**One honest, flagged gap, not silently skipped:** the
+`LedgerReconciliationMismatch` alert rule references a
+`ledger_reconciliation_mismatch_count` metric that
+`packages/core/reconcile_job.py` doesn't actually push anywhere --
+`reconcile_job.py` is a one-shot CLI job with no long-running `/metrics`
+endpoint of its own (see the earlier reconcile_job entry below), so wiring
+it up needs a real Prometheus Pushgateway (the standard pattern for batch
+jobs), which isn't deployed here. The rule is written against the metric
+name that integration should use, so finishing it later is "add the push
+call to reconcile_job.py," not "invent the alert" -- but until that's
+done, this is the one alert in the spec's own list that can never
+actually fire. Not built now to avoid faking a Pushgateway integration
+under time pressure; a real follow-up, not a design decision.
+
+**Not built this pass, a reasonable next step:** Grafana dashboards
+(spec pairs "Prometheus + Grafana" as one bullet) and OpenTelemetry
+traces for the deposit/payout paths. Both are real, buildable, in-scope
+work -- deliberately left for a following pass rather than folded into an
+already-large one, the same "one well-tested concern per turn" discipline
+this session has used throughout.
+
 ## 2026-08-24 — Backup/restore tooling, verified with a real drill: `deploy/backup.sh` + `deploy/restore.sh`
 
 Spec section 14's definition of done requires: "a full restore from backup

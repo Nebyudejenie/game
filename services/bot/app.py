@@ -21,6 +21,7 @@ from aiogram.enums import ParseMode
 from aiogram.types import TelegramObject, Update
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
+from prometheus_client import generate_latest
 from redis.asyncio import Redis
 
 from packages.core.config import Settings
@@ -68,6 +69,16 @@ def build_app(bot: Bot, dp: Dispatcher, settings: Settings) -> web.Application:
         return web.json_response({"status": "ok"})
 
     app.router.add_get("/healthz", healthz)
+
+    async def metrics_endpoint(_request: web.Request) -> web.Response:
+        # aiohttp's Response rejects a content_type string with an embedded
+        # "; charset=..." (unlike FastAPI's Response, used for this same
+        # endpoint on every other service) -- it wants the media type and
+        # charset as two separate arguments, so CONTENT_TYPE_LATEST can't be
+        # passed through directly here the way it is elsewhere.
+        return web.Response(body=generate_latest(), content_type="text/plain", charset="utf-8")
+
+    app.router.add_get("/metrics", metrics_endpoint)
 
     SimpleRequestHandler(
         dispatcher=dp, bot=bot, secret_token=settings.telegram_webhook_secret or None

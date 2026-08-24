@@ -14,7 +14,8 @@ from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any
 
 import asyncpg
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
 
 from packages.core.config import get_settings
@@ -412,3 +413,8 @@ async def healthz() -> dict[str, str]:
         await conn.fetchval("SELECT 1")
     await app.state.redis.ping()
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+async def metrics_endpoint() -> Response:
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

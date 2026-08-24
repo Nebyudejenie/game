@@ -32,6 +32,34 @@ services:
       timeout: 3s
       retries: 10
 
+  # Optional: real metrics scraping (spec section 10.4), against services
+  # run directly on the host (see deploy/prometheus/prometheus.yml for why
+  # -- this stack only runs Postgres/Redis as long-lived containers).
+  # Start with `docker compose -f deploy/docker-compose.yml up -d prometheus`.
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    # Gated behind a profile so a plain `docker compose up -d` (used
+    # throughout this README, and by every clean-slate rebuild this
+    # session runs) doesn't start a third container nobody asked for.
+    # `docker compose up -d prometheus` still starts it directly --
+    # explicitly naming a profiled service on the command line overrides
+    # profile filtering in Compose.
+    profiles: ["observability"]
+    ports:
+      # Host 9091, not the default 9090 -- same reasoning as Postgres/Redis
+      # above.
+      - "9091:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    extra_hosts:
+      # Lets the container reach services run directly on this host (e.g.
+      # `uvicorn services.gateway.app:app --port 8000`) via a stable name,
+      # the way it would reach a real deployment's actual service replicas
+      # in production -- Docker's own bridge network gives the container no
+      # route to host-bound ports otherwise.
+      - "host.docker.internal:host-gateway"
+
 volumes:
   jobingo_postgres_data:
   jobingo_redis_data:

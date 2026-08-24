@@ -17,6 +17,8 @@ from decimal import Decimal
 import asyncpg
 import asyncpg.pool
 
+from packages.core import metrics
+
 # Every function here is called both with a bare connection (tests, one-off
 # scripts) and with a connection checked out of a pool via `async with
 # pool.acquire() as conn`, which asyncpg wraps in a proxy that isn't a
@@ -247,6 +249,7 @@ async def post(
                 last_entry_id,
             )
 
+        metrics.ledger_transactions_total.labels(kind=txn_row["kind"]).inc()
         return LedgerTransaction(
             id=transaction_id,
             kind=txn_row["kind"],

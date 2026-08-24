@@ -16,8 +16,9 @@ from pathlib import Path
 from typing import Any
 
 import asyncpg
-from fastapi import FastAPI, Header, HTTPException, WebSocket
+from fastapi import FastAPI, Header, HTTPException, Response, WebSocket
 from fastapi.staticfiles import StaticFiles
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
 
 from packages.core import telegram_auth
@@ -67,6 +68,11 @@ async def healthz() -> dict[str, str]:
         await conn.fetchval("SELECT 1")
     await app.state.redis.ping()
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+async def metrics_endpoint() -> Response:
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.websocket("/ws")

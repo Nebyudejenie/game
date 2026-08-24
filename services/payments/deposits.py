@@ -20,7 +20,7 @@ import asyncpg
 import structlog
 from redis.asyncio import Redis
 
-from packages.core import ledger, responsible_gaming
+from packages.core import ledger, metrics, responsible_gaming
 from packages.core.notifications import notify_user
 from services.gateway.queries import user_balance_snapshot
 from services.payments.provider import PaymentProvider
@@ -178,6 +178,12 @@ async def _apply_confirmed_status(
     """Returns 'credited' | 'duplicate' | 'amount_mismatch' | 'not_found' |
     'not_succeeded'. Never raises for a business-logic outcome -- only a
     genuine bug (a broken query, a dead connection) escapes as an exception.
+
+    metrics.deposit_outcomes_total only counts 'credited' /
+    'not_succeeded' / 'amount_mismatch' -- the three real terminal outcomes
+    "deposit success rate" (spec section 10.4) means. 'not_found' isn't a
+    real deposit attempt on our side, and 'duplicate' is a replay of an
+    outcome already counted once.
     """
     user_id: int | None = None
 
@@ -213,6 +219,7 @@ async def _apply_confirmed_status(
                         payment["id"],
                         status,
                     )
+                metrics.deposit_outcomes_total.labels(outcome="not_succeeded").inc()
                 return "not_succeeded"
 
             if amount is None or amount != payment["amount"]:
@@ -226,6 +233,7 @@ async def _apply_confirmed_status(
                     "UPDATE payments SET status = 'review', updated_at = now() WHERE id = $1",
                     payment["id"],
                 )
+                metrics.deposit_outcomes_total.labels(outcome="amount_mismatch").inc()
                 return "amount_mismatch"
 
             provider_account = await ledger.get_or_create_account(conn, None, "provider_settlement")
@@ -256,6 +264,7 @@ async def _apply_confirmed_status(
         pool, redis, user_id=user_id, key="notify.deposit_confirmed",
         amount=str(credited_amount), balance=snapshot["cash"],
     )
+    metrics.deposit_outcomes_total.labels(outcome="credited").inc()
     return "credited"
 
 

@@ -19,7 +19,7 @@ import asyncpg
 from fastapi import WebSocket, WebSocketDisconnect
 from redis.asyncio import Redis
 
-from packages.core import telegram_auth
+from packages.core import metrics, telegram_auth
 from packages.core.telegram_auth import InvalidInitData
 from services.engine import commands
 from services.engine.commands import CommandTimeout
@@ -98,6 +98,7 @@ class ConnectionHandler:
             self._pool, data.user.id, display_name
         )
         self._user_id = user_id
+        metrics.gateway_connections.inc()
         balance = await queries.user_balance_snapshot(self._pool, user_id)
         self._hub.subscribe_user(user_id, self._cq)
 
@@ -235,28 +236,29 @@ class ConnectionHandler:
                 )
                 return
 
-        try:
-            result = await commands.send_command(
-                self._redis, room_id, action, self._user_id, payload
-            )
-        except CommandTimeout:
-            await self._send_error(
-                "room_unavailable",
-                "This room isn't available right now.",
-                "ይህ ክፍል አሁን አይገኝም።",
-            )
-            return
-
-        if action == "claim":
-            await self._ws.send_text(
-                json.dumps({"t": "claim_result", "valid": result.ok, "reason": result.reason})
-            )
-        else:
-            await self._ws.send_text(
-                json.dumps(
-                    {"t": "ack", "for": ack_name, "ok": result.ok, "reason": result.reason}
+        with metrics.gateway_command_ack_seconds.labels(action=action).time():
+            try:
+                result = await commands.send_command(
+                    self._redis, room_id, action, self._user_id, payload
                 )
-            )
+            except CommandTimeout:
+                await self._send_error(
+                    "room_unavailable",
+                    "This room isn't available right now.",
+                    "ይህ ክፍል አሁን አይገኝም።",
+                )
+                return
+
+            if action == "claim":
+                await self._ws.send_text(
+                    json.dumps({"t": "claim_result", "valid": result.ok, "reason": result.reason})
+                )
+            else:
+                await self._ws.send_text(
+                    json.dumps(
+                        {"t": "ack", "for": ack_name, "ok": result.ok, "reason": result.reason}
+                    )
+                )
 
     async def _send_error(self, code: str, message_en: str, message_am: str) -> None:
         await self._ws.send_text(
@@ -288,3 +290,4 @@ class ConnectionHandler:
             self._hub.unsubscribe_room(room_id, self._cq)
         if self._user_id is not None:
             self._hub.unsubscribe_user(self._user_id, self._cq)
+            metrics.gateway_connections.dec()

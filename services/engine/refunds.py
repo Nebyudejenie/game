@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncpg
 
-from packages.core import ledger
+from packages.core import ledger, metrics
 from packages.core.ledger import Entry
 
 TERMINAL_STATUSES = frozenset({"done", "voided"})
@@ -57,4 +57,5 @@ async def refund_round(pool: asyncpg.Pool, round_id: int, *, reason: str) -> boo
                 "UPDATE rounds SET status = 'voided', ended_at = now() WHERE id = $1",
                 round_id,
             )
+    metrics.engine_rounds_voided_total.inc()
     return True
