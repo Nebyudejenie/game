@@ -19,6 +19,17 @@ import pytest
 
 from packages.core import rate_limit
 
+# Low enough that a whole test's execution time (milliseconds, or up to a
+# second or two even under heavy contention for the 50-concurrent test)
+# can never accumulate a full extra token and change an assertion's
+# outcome -- but not the 0.0001 an earlier draft used, which (via
+# rate_limit.py's own ttl = ceil(capacity/refill)+1 formula) gave every
+# key in this file a multi-hour TTL, leaving stale rl:test-* keys on the
+# real, shared Redis instance every integration test uses for hours after
+# each run. At 0.1, the worst case here (capacity=10) still only produces
+# a ~101s TTL.
+_NEGLIGIBLE_REFILL = 0.1
+
 
 def _bucket() -> tuple[str, str]:
     return f"test-{uuid.uuid4()}", f"key-{uuid.uuid4()}"
@@ -28,7 +39,7 @@ async def test_allow_grants_up_to_capacity_then_rejects(redis):
     scope, key = _bucket()
     # refill_per_second effectively zero -- capacity is the only thing
     # that matters within this test's lifetime.
-    bucket = {"capacity": 3, "refill_per_second": 0.0001}
+    bucket = {"capacity": 3, "refill_per_second": _NEGLIGIBLE_REFILL}
 
     results = [await rate_limit.allow(redis, scope, key, **bucket) for _ in range(4)]
     assert results == [True, True, True, False]
@@ -50,7 +61,7 @@ async def test_allow_refills_over_time(redis):
 async def test_different_keys_get_independent_buckets(redis):
     scope = f"test-{uuid.uuid4()}"
     key_a, key_b = f"a-{uuid.uuid4()}", f"b-{uuid.uuid4()}"
-    bucket = {"capacity": 1, "refill_per_second": 0.0001}
+    bucket = {"capacity": 1, "refill_per_second": _NEGLIGIBLE_REFILL}
 
     assert await rate_limit.allow(redis, scope, key_a, **bucket) is True
     assert await rate_limit.allow(redis, scope, key_a, **bucket) is False
@@ -62,7 +73,7 @@ async def test_different_keys_get_independent_buckets(redis):
 async def test_different_scopes_get_independent_buckets(redis):
     key = f"key-{uuid.uuid4()}"
     scope_a, scope_b = f"scope-a-{uuid.uuid4()}", f"scope-b-{uuid.uuid4()}"
-    bucket = {"capacity": 1, "refill_per_second": 0.0001}
+    bucket = {"capacity": 1, "refill_per_second": _NEGLIGIBLE_REFILL}
 
     assert await rate_limit.allow(redis, scope_a, key, **bucket) is True
     assert await rate_limit.allow(redis, scope_a, key, **bucket) is False
@@ -79,7 +90,7 @@ async def test_concurrent_requests_never_over_grant_tokens(redis):
     # spec 9.2's rate limits depend on to actually hold under load, not
     # just under a single sequential caller.
     scope, key = _bucket()
-    bucket = {"capacity": 10, "refill_per_second": 0.0001}
+    bucket = {"capacity": 10, "refill_per_second": _NEGLIGIBLE_REFILL}
 
     results = await asyncio.gather(
         *(rate_limit.allow(redis, scope, key, **bucket) for _ in range(50))
@@ -90,7 +101,7 @@ async def test_concurrent_requests_never_over_grant_tokens(redis):
 
 async def test_cost_can_consume_more_than_one_token(redis):
     scope, key = _bucket()
-    bucket = {"capacity": 10, "refill_per_second": 0.0001}
+    bucket = {"capacity": 10, "refill_per_second": _NEGLIGIBLE_REFILL}
 
     assert await rate_limit.allow(redis, scope, key, cost=7.0, **bucket) is True
     assert await rate_limit.allow(redis, scope, key, cost=4.0, **bucket) is False

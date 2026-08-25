@@ -5,6 +5,54 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — A real `/code-review` pass caught two genuine bugs in yesterday's new test files
+
+Ran a structured code review (`/code-review high`) against the last two
+commits (the `rate_limit.py`/`logging.py`/`keyboards.py` zero-coverage
+test additions) specifically to catch anything a manual read would miss.
+Both findings held up under direct verification, not taken on faith:
+
+- **`test_logging.py` calling `configure_logging()` inside the shared
+  pytest process risked permanently freezing another module's logger.**
+  structlog's `cache_logger_on_first_use=True` (part of
+  `configure_logging()`'s own config) freezes a logger's level filter the
+  first time that specific proxy is actually used -- confirmed directly:
+  called `configure_logging("INFO")`, used a logger once, then called
+  `configure_logging("DEBUG")` and found the *same* logger's DEBUG output
+  still filtered, and confirmed `structlog.reset_defaults()` doesn't undo
+  the freeze either. Every module in this codebase creates a module-level
+  logger at import time (`logger = structlog.get_logger()` in
+  `services/payments/deposits.py` and elsewhere); calling
+  `configure_logging()` for the first time inside the single shared
+  pytest process risked permanently changing whichever of those loggers
+  got used next, for the rest of the whole `pytest tests/` run, depending
+  on unrelated test execution order. `reconcile_job.py` (the only other
+  caller) never hit this because it only ever runs in its own subprocess.
+  **Fixed** by rewriting `test_logging.py` to run `configure_logging()`
+  in a real, throwaway subprocess per test -- the same isolation pattern
+  already established for `reconcile_job.py`'s own CLI tests and the
+  Pushgateway drill, applied here for the same underlying reason
+  (global, process-wide state that only a separate process can safely
+  touch).
+- **`test_rate_limit.py`'s `refill_per_second=0.0001` gave Redis keys
+  multi-hour TTLs.** `rate_limit.py`'s own `ttl = ceil(capacity/refill)+1`
+  formula turns a near-zero refill rate into a near-infinite TTL --
+  confirmed directly: `redis-cli TTL` on the keys these tests had already
+  created showed values up to 98824 seconds (~27.5 hours), not the
+  intended "expires almost immediately." Every `pytest tests/` run was
+  leaving ~7 new stale `rl:test-*` keys on the real, shared Redis
+  instance every integration test uses, none of which would expire for
+  most of a day. **Fixed** by replacing the magic number with a named
+  `_NEGLIGIBLE_REFILL = 0.1` constant (still negligible against any
+  test's actual execution time, but caps the worst-case TTL in this file
+  at ~101 seconds instead of ~27.5 hours) and manually deleting the 10
+  stale keys the buggy version had already left behind.
+
+Full clean-slate rebuild after both fixes: mypy clean across 63 source
+files, `pytest tests/` 671 passed / 13 deselected (unchanged -- both
+fixes corrected existing tests' behavior, not their count), `-m load` 5
+passed, `-m chaos_infra` 1 passed, `-m e2e` 7 passed.
+
 ## 2026-08-24 — Two more zero-coverage modules closed: `logging.py`'s redaction, `keyboards.py`
 
 Same method as the `rate_limit.py` entry directly below: grepped every
