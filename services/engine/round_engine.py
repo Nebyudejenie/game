@@ -254,13 +254,32 @@ class RoundEngine:
             idem = f"stake-{round_id}-{user_id}"
 
             async with self._pool.acquire() as conn:
-                block = await responsible_gaming.check_stake_allowed(conn, user_id, self._room.stake)
-                if block.blocked:
-                    assert block.reason is not None
-                    return JoinResult(False, block.reason)
-
                 try:
                     async with conn.transaction():
+                        # A per-user advisory lock, held for this whole
+                        # transaction: self._join_lock above only serializes
+                        # joins within *this* room, so without this, the same
+                        # user joining two different rooms at once could have
+                        # both check_stake_allowed() calls read today's net
+                        # loss before either stake commits, letting both pass
+                        # a daily_loss_cap that either one alone would have
+                        # blocked. A row lock on the user_cash account would
+                        # only help once that account_balances row exists (it
+                        # doesn't for a brand-new user with no ledger history
+                        # yet), so this uses pg_advisory_xact_lock keyed on
+                        # user_id instead -- unconditional, and released
+                        # automatically on commit or rollback. No other code
+                        # in this codebase takes an advisory lock, so there's
+                        # no cross-purpose key collision to worry about.
+                        await conn.execute("SELECT pg_advisory_xact_lock($1)", user_id)
+
+                        block = await responsible_gaming.check_stake_allowed(
+                            conn, user_id, self._room.stake
+                        )
+                        if block.blocked:
+                            assert block.reason is not None
+                            return JoinResult(False, block.reason)
+
                         await conn.execute(
                             "INSERT INTO round_entries (round_id, card_no, user_id, auto_mark) "
                             "VALUES ($1, $2, $3, $4)",

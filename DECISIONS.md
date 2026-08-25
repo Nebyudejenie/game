@@ -5,6 +5,61 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Fixed the loss-cap TOCTOU race across concurrent joins in different rooms
+
+Seventh follow-up to the full-platform `/code-review` entry -- the first
+of these follow-ups that's a compliance/responsible-gaming control
+bypass rather than a resilience or fund-safety gap; the ledger itself was
+never at risk (every stake still individually debits correctly), but a
+player's own declared `daily_loss_cap` -- exactly the self-protection
+tool spec section 9 requires this platform to honor -- could be raced
+past.
+
+**The bug**: `RoundEngine.join()` called
+`responsible_gaming.check_stake_allowed()` (which reads
+`today_net_loss()`, a live aggregate over today's ledger entries) *before*
+opening the transaction that actually debits the stake, with nothing
+locking the gap between the two. `self._join_lock` only serializes joins
+within *one* `RoundEngine` instance -- one room. It does nothing for the
+same user joining two *different* rooms at the same moment, which is a
+completely ordinary thing for this platform to allow (nothing stops one
+player from having tabs open on two rooms at once). Two such concurrent
+joins could both read `today_net_loss() == 0` before either stake
+committed, and both pass a cap that either one alone would have
+correctly blocked. Confirmed this is real, not theoretical, with a
+regression test before writing the fix at all (see below).
+
+**Fixed**: `join()` now takes `pg_advisory_xact_lock($1)` keyed on
+`user_id`, immediately after opening the transaction and before calling
+`check_stake_allowed()`. A concurrent join for the same user (any room,
+any connection) now blocks on this lock until the first join's
+transaction commits or rolls back, so the second one's `today_net_loss()`
+read is guaranteed to see the first one's stake. Considered locking the
+user's `user_cash` `account_balances` row directly instead (what
+`ledger.post()` itself already does) -- rejected, because that row is
+created lazily on first use and doesn't reliably exist yet for a
+brand-new user, whereas an advisory lock needs no backing row. Confirmed
+no other code in this codebase takes a Postgres advisory lock, so there's
+no risk of the same integer key meaning two different things to two
+different call sites.
+
+**Regression test confirmed against the unfixed code before trusting
+it** (same discipline as every fix in this arc): two real, real-joined
+`RoundEngine` instances on two different rooms, same user, a loss cap
+that one 60 ETB stake satisfies but two together violate, joined via
+`asyncio.gather`. Against the pre-fix code this reliably reproduced the
+bypass itself, not just a flaky race: `(JoinResult(ok=True, reason=None),
+JoinResult(ok=True, reason=None))` -- both stakes succeeded, `count(True)
+== 2` where the assertion requires exactly 1. Reran the fixed code five
+times in a row to confirm the test isn't itself a coin-flip before
+trusting a single green run, then restored the fix
+(`git stash pop` after the revert-and-confirm step).
+
+Full clean-slate rebuild: `docker compose down -v` / `up -d`, migrations
+clean, mypy clean across 63 source files, `pytest tests/` 692 passed / 13
+deselected (up from 691), `-m load` 5 passed, `-m chaos_infra` 1 passed,
+`-m e2e` 7 passed.
+
 ## 2026-08-25 — Fixed `payout_worker.py`'s consumer-name-locked crash recovery via XAUTOCLAIM
 
 Sixth follow-up to the full-platform `/code-review` entry, and the second

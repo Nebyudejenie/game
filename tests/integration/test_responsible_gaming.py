@@ -234,6 +234,49 @@ async def test_loss_cap_blocks_a_stake_that_would_exceed_it(pool, redis, conn, c
         await asyncio.wait_for(task, timeout=10)
 
 
+async def test_loss_cap_holds_under_two_concurrent_joins_in_different_rooms(pool, redis, conn, card_pool):
+    """A code review pass caught that check_stake_allowed()'s loss-cap
+    check ran before RoundEngine.join()'s own transaction started, with no
+    lock covering the gap between the check and the stake actually
+    committing. join()'s per-room self._join_lock doesn't help here --
+    it's a plain asyncio.Lock scoped to one RoundEngine instance, so it
+    does nothing to serialize the SAME user joining two DIFFERENT rooms at
+    once. Without a fix, two concurrent joins can both read today's net
+    loss as 0 before either stake lands, and both pass a cap that either
+    one alone would have correctly blocked.
+    """
+    cap = Decimal("100.00")
+    stake = Decimal("60.00")  # one stake is under the cap; two together exceed it
+    room_a = await load_room_config(pool, await create_room(conn, stake=stake, min_players=2))
+    room_b = await load_room_config(pool, await create_room(conn, stake=stake, min_players=2))
+    user_id = await create_funded_user(conn, Decimal("1000.00"))
+    await responsible_gaming.set_loss_limit(conn, user_id, cap)
+
+    engine_a = RoundEngine(pool, redis, room_a, card_pool)
+    engine_b = RoundEngine(pool, redis, room_b, card_pool)
+    task_a = asyncio.create_task(engine_a.run_forever())
+    task_b = asyncio.create_task(engine_b.run_forever())
+    try:
+        result_a, result_b = await asyncio.gather(
+            engine_a.join(user_id, 1), engine_b.join(user_id, 1)
+        )
+
+        # Exactly one of the two concurrent stakes may succeed -- never
+        # both, since both together would put this player past their own
+        # declared daily loss cap.
+        outcomes = [result_a.ok, result_b.ok]
+        assert outcomes.count(True) == 1, (result_a, result_b)
+        failed = result_b if result_a.ok else result_a
+        assert failed.reason == "loss_limit_reached"
+
+        assert await responsible_gaming.today_net_loss(conn, user_id) <= cap
+    finally:
+        await engine_a.stop()
+        await engine_b.stop()
+        await asyncio.wait_for(task_a, timeout=10)
+        await asyncio.wait_for(task_b, timeout=10)
+
+
 async def test_today_net_loss_reflects_stakes_and_payouts(pool, conn):
     user_id = await create_funded_user(conn, Decimal("1000.00"))
     cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
