@@ -5,6 +5,99 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Fixed the single most severe open finding: a "processing" payout was wrongly treated as settled
+
+Sixteenth follow-up to the full-platform `/code-review` entry, and the
+most severe item that catalogue ever flagged: real, silent, permanent,
+unrecoverable player money loss, with no signal anywhere it had
+happened. Fixed the money-safety half now; the visibility half now
+exists too, but the *full* fix (learning what actually happened to a
+"processing" transfer) is still blocked on the same external unknown
+documented earlier in this arc.
+
+**The bug**: `payout_worker.py`'s `process_one()` treated
+`result.status in ("succeeded", "processing")` identically -- both
+triggered `_settle_success()`: locked funds moved to
+`provider_settlement`, the payment marked `'succeeded'`, the player told
+`notify.withdrawal_succeeded`. But "processing" only means Chapa
+*accepted* the transfer request, not that it actually completed. This
+codebase has no payout webhook route and no status-polling fallback for
+outbound transfers at all (unlike `deposits.py`'s own
+`poll_pending_deposits()` for inbound ones), so a transfer Chapa later
+actually rejected on their side (a bad account number, insufficient
+float, anything) was never, ever reconciled -- the payment already said
+`'succeeded'`, the money was already counted as paid out, and nothing in
+this codebase would ever revisit it. A player could lose real money with
+the platform's own books insisting they'd been paid.
+
+**Fixed, deliberately not by guessing**: `"succeeded"` and
+`"processing"` are now handled separately. `"processing"` no longer
+calls `_settle_success()` at all -- the payment stays at
+`status='processing'` (already set earlier in the same function, before
+the provider call), locked funds stay exactly where they already were,
+and neither a success nor a failure notification goes out, since both
+would be a real claim about an outcome this worker does not actually
+know. `provider_ref`/`raw_response` are still recorded, though -- an
+admin resolving this manually needs Chapa's own reference to look the
+transfer up with them at all. This converts an incorrect, invisible
+"succeeded" into a correct, visible "not resolved yet."
+
+**The other, necessary half -- visibility**: added
+`services.admin.queries.list_stuck_processing_payouts(pool, *,
+older_than_seconds=3600)`, a read-only query surfacing withdrawals stuck
+at `status='processing'` past a threshold, mirroring
+`list_pending_withdrawals()`'s existing shape. Deliberately read-only,
+not a sweep like `sweep_stuck_approved_payouts()`: there is no safe
+automated action to take on a "processing" transfer without knowing what
+it actually resolved to, so this hands an admin the reference to go
+check with Chapa directly rather than pretending an automated fix
+exists.
+
+**Why the *actual* remaining gap isn't closed, and isn't being
+guessed at**: fully resolving this needs querying Chapa's real
+transfer-status endpoint (`GET /v1/transfers/verify/<tx_ref>`, confirmed
+to be the real endpoint earlier in this session's history) and mapping
+its response to succeeded/failed/still-processing. That exact response
+vocabulary could not be confirmed then (Chapa's docs render the response
+examples in a JS-driven tabbed UI the fetch tooling available in this
+environment couldn't extract, after four separate real attempts), and
+remains unconfirmed now. Guessing a status mapping here is exactly the
+kind of money-safety risk this whole engineering discipline exists to
+avoid -- a wrong guess could misclassify a real failure as success just
+as badly as the bug just fixed did. This entry closes the "wrongly
+treated as settled" half unconditionally (it needed no external
+information at all, just not conflating "accepted" with "completed");
+the "learn the real outcome automatically" half stays open, now with a
+real admin-visible queue instead of nothing.
+
+**Regression tests, both confirmed against the unfixed code before
+trusting them**: `test_processing_status_is_not_treated_as_settled`
+(`test_payout_worker.py`) -- a real approved withdrawal, a fake provider
+returning `"processing"`, confirms locked/cash/provider_settlement all
+stay exactly where they were (a before/after delta on
+`provider_settlement`, not an absolute total, since that account is
+shared, real, and ever-growing across this whole session's tests) and
+`provider_ref` is still recorded. Failed as `'succeeded' ==
+'processing'` against the unfixed code -- the bug reproduced directly,
+not inferred.
+`test_list_stuck_processing_payouts_surfaces_an_unresolved_transfer`
+(`test_admin_withdrawals.py`) -- a real withdrawal driven to a genuine
+`"processing"` outcome through the real worker, confirms it's invisible
+before the threshold and found (with the right amount and
+`provider_ref`) after backdating `updated_at` past it. Failed the same
+way against the unfixed code (the payment was already `'succeeded'`
+before this query ever got a chance to matter).
+
+Full clean-slate rebuild: `docker compose down -v` / `up -d`, migrations
+clean, mypy clean across 63 source files, `pytest tests/` 712 passed / 13
+deselected (up from 710), `-m load` 5 passed, `-m chaos_infra` 1 passed,
+`-m e2e` 7 passed (one transient Playwright failure on
+`test_miniapp_full_gameplay_flow` -- `#your-card-section` visibility,
+the same test and assertion that already flaked once earlier in this
+session -- passed cleanly on an immediate rerun; the same UI-timing flake
+pattern, not a regression from a fix nowhere near the Mini App's own
+code).
+
 ## 2026-08-25 — Fixed `update_room_admin`'s double-encoded `win_patterns` audit entries
 
 Fifteenth follow-up to the full-platform `/code-review` entry. Audit

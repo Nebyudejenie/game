@@ -686,6 +686,40 @@ async def list_pending_withdrawals(pool: asyncpg.Pool) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+async def list_stuck_processing_payouts(
+    pool: asyncpg.Pool, *, older_than_seconds: int = 3600
+) -> list[dict[str, Any]]:
+    """Withdrawals still sitting at status='processing' longer than
+    expected -- Chapa accepted the transfer request but this codebase has
+    no payout webhook route or status-polling fallback to ever learn what
+    actually happened to it (see services/payments/payout_worker.py's own
+    module docstring). A code review pass caught the worker previously
+    treating "processing" as fully settled, a real silent-money-loss risk
+    if a transfer Chapa accepted was later actually rejected on their
+    side; the fix leaves it genuinely unresolved instead of guessing, but
+    "genuinely unresolved with no way to ever find out" is only an
+    improvement if something actually surfaces it. This is that surface
+    -- a real automated resolution remains blocked on confirming Chapa's
+    transfer-status response vocabulary (see DECISIONS.md), so for now
+    this is read-only: an admin who sees an entry here needs to check the
+    transfer's real status directly with Chapa and resolve it manually
+    (payments.status is not itself constrained to only 'succeeded'/
+    'failed' by anything that would block a direct correction).
+    """
+    rows = await pool.fetch(
+        """
+        SELECT p.id, p.user_id, u.display_name, p.our_ref, p.amount, p.provider_ref, p.updated_at
+        FROM payments p
+        JOIN users u ON u.id = p.user_id
+        WHERE p.direction = 'out' AND p.status = 'processing'
+          AND p.updated_at < now() - make_interval(secs => $1)
+        ORDER BY p.updated_at
+        """,
+        older_than_seconds,
+    )
+    return [dict(r) for r in rows]
+
+
 async def approve_withdrawal_admin(
     pool: asyncpg.Pool,
     redis: Redis,

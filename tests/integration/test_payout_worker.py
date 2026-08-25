@@ -96,6 +96,47 @@ async def test_successful_payout_moves_locked_to_provider_settlement(pool, redis
     assert provider.call_count[our_ref] == 1
 
 
+async def test_processing_status_is_not_treated_as_settled(pool, redis, conn):
+    # A code review pass caught the single most severe open finding in
+    # this codebase's payments pipeline: a provider result of "processing"
+    # (Chapa merely *accepted* the transfer, no confirmation it actually
+    # completed) used to be treated exactly like "succeeded" -- locked
+    # funds moved to provider_settlement, the payment marked succeeded,
+    # the player told they'd been paid. With no payout webhook route and
+    # no status-polling fallback for outbound transfers, a transfer Chapa
+    # later actually rejected was never reconciled: silent, permanent,
+    # unrecoverable player money loss. The fix leaves it genuinely
+    # unresolved -- this confirms nothing moves and nothing false gets
+    # claimed, not that the underlying gap (no way to ever learn the real
+    # outcome) is fully closed, which it isn't yet.
+    user_id = await create_funded_user(conn, Decimal("500.00"))
+    our_ref = await _approved_withdrawal(pool, redis, conn, user_id, Decimal("200.00"))
+    # provider_settlement is one global account this whole session's
+    # other tests have also posted real entries to -- a before/after
+    # delta, not an absolute total, is what's actually being asserted.
+    provider_settlement_before = await _provider_settlement(conn)
+
+    provider = FakePayoutProvider(outcomes={our_ref: "processing"})
+    outcome = await payout_worker.process_next(pool, redis, provider, consumer_name="w1")
+    assert outcome == "processing"
+
+    # Locked funds must stay exactly where they were -- neither released
+    # to the player's cash (a refund, as if it failed) nor moved to
+    # provider_settlement (as if it succeeded).
+    assert await _locked(conn, user_id) == Decimal("200.00")
+    assert await _cash(conn, user_id) == Decimal("300.00")
+    assert await _provider_settlement(conn) == provider_settlement_before
+
+    row = await conn.fetchrow(
+        "SELECT status, provider_ref FROM payments WHERE our_ref = $1", our_ref
+    )
+    assert row["status"] == "processing"
+    # provider_ref IS recorded even though nothing else is settled -- an
+    # admin resolving this manually needs Chapa's own reference to look
+    # the transfer up with them at all.
+    assert row["provider_ref"] == f"chapa-{our_ref}"
+
+
 async def test_successful_payout_pushes_a_live_balance_update(pool, redis, conn):
     # A code review pass caught that only services/payments/deposits.py
     # ever pushed a live balance_update -- a payout settling releases

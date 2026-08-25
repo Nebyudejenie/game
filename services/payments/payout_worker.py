@@ -16,10 +16,26 @@ after a crash-and-redeliver. What this module guarantees on its own side is
 that a payment already in a terminal state (succeeded/failed) is never
 touched twice, and that the ledger settlement itself is idempotent via
 ledger.post()'s idempotency_key.
+
+A provider result of "processing" (Chapa merely *accepted* the transfer
+request, with no confirmation it actually completed) is deliberately never
+treated as settled -- see process_one()'s own comment on that branch. This
+codebase has no payout webhook route and no status-polling fallback for
+outbound transfers (unlike services/payments/deposits.py's own
+poll_pending_deposits() for inbound ones), so there is currently no way to
+learn a "processing" transfer later actually failed; wrongly marking it
+succeeded here would be a silent, permanent, unrecoverable loss with no
+signal anywhere. A payment left at status='processing' is a real,
+currently-unresolved gap in this module's coverage, not a bug being
+papered over -- see withdrawals.list_stuck_processing_payouts() for the
+operator-visibility this converts it into, and DECISIONS.md for why a full
+automated fix remains blocked on Chapa's transfer-status response
+vocabulary rather than guessed at.
 """
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from typing import Any
 
@@ -61,10 +77,10 @@ async def ensure_group(redis: Redis) -> None:
 async def process_one(
     pool: asyncpg.Pool, redis: Redis, provider: PaymentProvider, *, msg_id: str, our_ref: str
 ) -> str:
-    """Returns 'succeeded' | 'failed' | 'skipped'. Always acks -- the only
-    way a job is left unacked (and therefore redelivered) is this process
-    dying mid-call, which is exactly the crash-recovery case the spec asks
-    to be tested.
+    """Returns 'succeeded' | 'failed' | 'processing' | 'skipped'. Always
+    acks -- the only way a job is left unacked (and therefore
+    redelivered) is this process dying mid-call, which is exactly the
+    crash-recovery case the spec asks to be tested.
     """
     with _tracer.start_as_current_span(
         "payout.dispatch", attributes={"our_ref": our_ref}
@@ -116,7 +132,7 @@ async def process_one(
             span.set_attribute("payout.outcome", "failed")
             return "failed"
 
-        if result.status in ("succeeded", "processing"):
+        if result.status == "succeeded":
             await _settle_success(
                 pool,
                 payment_id=payment_id,
@@ -130,6 +146,45 @@ async def process_one(
             await redis.xack(PAYOUT_STREAM, GROUP, msg_id)
             span.set_attribute("payout.outcome", "succeeded")
             return "succeeded"
+
+        if result.status == "processing":
+            # A code review pass caught this treating a merely-accepted
+            # transfer as fully settled -- moving locked funds to
+            # provider_settlement and telling the player they'd been
+            # paid, on nothing more than Chapa having *acknowledged* the
+            # request. There is no payout webhook route and no polling
+            # fallback for outbound transfers (unlike deposits.py's
+            # poll_pending_deposits()), so a transfer Chapa later actually
+            # rejects (a bad account number, say) was never reconciled:
+            # silent, permanent, unrecoverable player money loss with no
+            # signal anywhere it had happened. Left deliberately
+            # unresolved instead: the payment stays at status='processing'
+            # (already set above), locked funds stay exactly where they
+            # already were, and neither a success nor a failure
+            # notification goes out -- both would be a real claim about
+            # an outcome this worker does not actually know yet. Still
+            # records provider_ref, though -- an admin resolving this
+            # manually (see services.admin.queries
+            # .list_stuck_processing_payouts(), the operator-visibility
+            # half of this) needs Chapa's own reference to look the
+            # transfer up with them at all. A full fix (automated
+            # payout-status polling against Chapa's real transfer-
+            # verification response) remains blocked on the same
+            # Chapa status-vocabulary gap documented elsewhere in this
+            # codebase's history: the exact response shape for
+            # GET /v1/transfers/verify/<tx_ref> could not be confirmed
+            # from Chapa's docs, and guessing a status mapping here is
+            # exactly the kind of money-safety risk not worth taking.
+            await pool.execute(
+                "UPDATE payments SET provider_ref = $2, raw_response = $3, updated_at = now() "
+                "WHERE id = $1",
+                payment_id,
+                result.provider_ref,
+                json.dumps(result.raw_response, default=str),
+            )
+            await redis.xack(PAYOUT_STREAM, GROUP, msg_id)
+            span.set_attribute("payout.outcome", "processing")
+            return "processing"
 
         await _reverse(
             pool, payment_id=payment_id, user_id=user_id, amount=amount, our_ref=our_ref,

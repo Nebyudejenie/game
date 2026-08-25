@@ -71,6 +71,55 @@ async def test_list_pending_withdrawals_shows_review_items(pool, redis, conn):
     assert any(r["id"] == payment_id and r["our_ref"] == our_ref for r in rows)
 
 
+async def test_list_stuck_processing_payouts_surfaces_an_unresolved_transfer(pool, redis, conn):
+    # A code review pass caught payout_worker.py treating a provider
+    # "processing" result as fully settled -- fixed to leave it genuinely
+    # unresolved instead (see test_processing_status_is_not_treated_as_
+    # settled in test_payout_worker.py for that half). This is the
+    # operator-visibility half: with no automated way to ever learn what
+    # actually happened to a "processing" transfer, an admin needs at
+    # least a way to find these and go check with Chapa directly.
+    user_id = await create_funded_user(conn, Decimal("500.00"))
+    intent = await withdrawals.request_withdrawal(
+        pool,
+        redis,
+        _NullProvider(),
+        user_id=user_id,
+        amount=Decimal("100.00"),
+        method_kind="telebirr",
+        account_ref="0911223344",
+        holder_name="Test Holder",
+        min_withdraw=Decimal("10.00"),
+        auto_approve_limit=Decimal("100000.00"),
+        kyc_threshold=Decimal("1000000.00"),
+        chargeback_window_minutes=0,
+        min_account_age_hours=0,
+    )
+    assert intent.status == withdrawals.STATUS_APPROVED
+
+    provider = FakePayoutProvider(outcomes={intent.our_ref: "processing"})
+    outcome = await payout_worker.process_next(pool, redis, provider, consumer_name="stuck-processing-test")
+    assert outcome == "processing"
+
+    # Not yet old enough -- must not flag a transfer that's simply
+    # mid-flight through a normal, still-recent dispatch.
+    too_soon = await queries.list_stuck_processing_payouts(pool, older_than_seconds=3600)
+    assert not any(r["id"] == intent.payment_id for r in too_soon)
+
+    await conn.execute(
+        "UPDATE payments SET updated_at = now() - interval '2 hours' WHERE id = $1", intent.payment_id
+    )
+
+    stuck = await queries.list_stuck_processing_payouts(pool, older_than_seconds=3600)
+    match = next((r for r in stuck if r["id"] == intent.payment_id), None)
+    assert match is not None
+    assert match["our_ref"] == intent.our_ref
+    assert match["amount"] == Decimal("100.00")
+    # provider_ref must be there -- it's what an admin actually needs to
+    # look this transfer up with Chapa directly.
+    assert match["provider_ref"] == f"chapa-{intent.our_ref}"
+
+
 async def test_approve_withdrawal_admin_enqueues_a_payout_job(pool, redis, conn):
     admin_id, *_ = await create_test_admin(pool)
     user_id = await create_funded_user(conn, Decimal("500.00"))
