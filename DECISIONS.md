@@ -5,6 +5,66 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Fixed `waitForAuth()` hanging forever on a terminal auth failure
+
+Fourth fix from the same fresh `/code-review high` pass.
+
+**The bug**: `web/miniapp/js/ws.js`'s `waitForAuth()` resolves only via the
+"authed" message handler draining `authResolvers`. When the WebSocket
+closes with one of `_TERMINAL_CLOSE_CODES` (4000/4001/4003 -- a handshake
+that can only ever fail again, most commonly stale `initData` past
+Telegram's own validity window), the code correctly set
+`connection: "auth_failed"` but never touched `authResolvers` at all --
+"authed" is the only other place a resolver is ever drained, and that
+message is never coming for a connection that just failed terminally.
+`app.js`'s `boot()` does `const user = await ws.waitForAuth();` directly on
+first load, so this hung the entire Mini App forever instead of ever
+progressing past the loading state -- even though the connection-state
+`subscribe()` banner (added by an earlier fix) already shows "reload the
+app" correctly, entirely independent of this stuck promise. A second,
+related gap: calling `waitForAuth()` *after* the terminal failure already
+happened (state already `"auth_failed"`) would queue a new resolver that
+also could never fire, since nothing re-sends "authed" for a dead
+connection.
+
+**Fixed**: `authResolvers` now stores `{resolve, reject}` pairs. The
+terminal-close branch drains and rejects every pending one. `waitForAuth()`
+itself now also checks for `connection === "auth_failed"` up front and
+rejects immediately, matching its existing `"connected"` fast-path.
+`app.js`'s `boot()` wraps the `await` in try/catch and simply returns on
+rejection -- the reload banner is already live via the state subscriber,
+so there's nothing further for `boot()` itself to do.
+
+Added `tests/frontend/test_wait_for_auth_terminal_failure.mjs` (run via
+`tests/unit/test_miniapp_wait_for_auth_terminal_failure.py`, matching this
+repo's existing plain-node-script pattern for testing the framework-free
+Mini App JS -- no existing test touched `waitForAuth`/`auth_failed` at
+all). Stubs the minimum browser globals (`window.location`, `WebSocket`)
+`ws.js` needs, drives a fake socket's `close` event with a real terminal
+code (4003), and asserts the pending `waitForAuth()` promise rejects
+rather than hanging -- and that a second call made after the failure
+rejects immediately too. Added an internal 2-second deadline
+(`DeadlineExceeded`, explicitly distinguished from a real rejection in the
+`catch` blocks) so a future regression fails fast with a clear assertion
+instead of hanging the whole node subprocess until pytest's own 30s kill.
+
+Verified the regression test is real: `git stash push` on just `ws.js`
+reverted to the old, buggy code, reran -- failed exactly as expected,
+`DeadlineExceeded: waitForAuth() after a terminal close: did not settle
+within 2000ms`, in 2.09s rather than a slow 30s subprocess timeout -- then
+`git stash pop` to restore the fix.
+
+**Full clean-slate rebuild**: `mypy` clean (63 source files, unaffected by
+this frontend-only change) → `pytest tests/` (725 passed, up from 724) →
+`-m load` (5/5 passed in isolation; the full-batch run hit the same
+already-documented shared-host-contention flake in
+`test_gateway_fanout.py::test_stalled_reader_does_not_delay_other_sockets`,
+409ms/399ms against a 300ms budget, confirmed via `docker ps` showing three
+other unrelated projects' containers competing for this 4-core host --
+unrelated to this change, which touched no Python) → `-m chaos_infra` (1
+passed) → `-m e2e` (7 passed, including the real-browser `boot()` golden
+path). 738/738 real passes.
+
 ## 2026-08-25 — Fixed referral credit silently dropped for Mini-App-first users
 
 Third fix from the same fresh `/code-review high` pass, again independently

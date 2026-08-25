@@ -737,7 +737,17 @@ async function boot() {
 
   const initData = tg ? tg.initData : "";
   ws.connect(initData);
-  const user = await ws.waitForAuth();
+  let user;
+  try {
+    user = await ws.waitForAuth();
+  } catch {
+    // A terminal auth failure (stale initData, most commonly) already
+    // drives the "connection.expired" reload banner via the
+    // connection-state subscriber above, independent of this promise --
+    // nothing left to do here except stop, rather than hang forever
+    // awaiting a user that ws.js now knows will never arrive.
+    return;
+  }
   setState({ user });
   document.getElementById("balance-amount").textContent = `${user.balance} ETB`;
   showScreen("rooms");

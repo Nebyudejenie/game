@@ -97,7 +97,7 @@ function open() {
       // whole {t, user, server_time} envelope here silently broke every
       // caller's `user.balance` access (real bug, caught by an E2E test
       // actually reading the DOM instead of just checking the WS traffic).
-      for (const resolve of authResolvers.splice(0)) resolve(message.user);
+      for (const { resolve } of authResolvers.splice(0)) resolve(message.user);
       const { currentRoomId } = getState();
       if (currentRoomId !== null) send({ t: "join", room_id: currentRoomId });
     }
@@ -112,6 +112,16 @@ function open() {
       // gateway with a doomed reconnect loop forever; the player needs
       // to actually reload the Mini App (app.js's banner tells them so).
       setState({ connection: "auth_failed" });
+      // A code review pass caught that nothing ever settled a
+      // waitForAuth() promise still pending when a terminal failure hit --
+      // "authed" is the only other place authResolvers gets drained, and
+      // that message is never coming now. app.js's boot() awaits this
+      // directly, so it hung on a stale/expired initData forever instead
+      // of ever reaching the reload banner the connection-state
+      // subscriber above already shows independently of this promise.
+      for (const { reject } of authResolvers.splice(0)) {
+        reject(new Error(`auth failed: close code ${event.code}`));
+      }
       return;
     }
     setState({ connection: "offline" });
@@ -144,8 +154,17 @@ function send(payload) {
 }
 
 export function waitForAuth() {
-  if (getState().connection === "connected") return Promise.resolve(getState().user);
-  return new Promise((resolve) => authResolvers.push(resolve));
+  const state = getState();
+  if (state.connection === "connected") return Promise.resolve(state.user);
+  // A terminal failure that already happened before this call (e.g. a
+  // caller re-checking auth after the banner appeared) has no "authed"
+  // message coming either -- reject immediately rather than queuing a
+  // resolver that would wait forever, same reasoning as the close-handler
+  // rejection above.
+  if (state.connection === "auth_failed") {
+    return Promise.reject(new Error("auth failed"));
+  }
+  return new Promise((resolve, reject) => authResolvers.push({ resolve, reject }));
 }
 
 export function requestRooms() {
