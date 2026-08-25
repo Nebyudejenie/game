@@ -5,6 +5,90 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Fixed the gateway writer loop's stale-state gap, then caught and fixed a real perf regression in the fix itself
+
+Eighteenth follow-up to the full-platform `/code-review` entry.
+
+**The bug**: `ConnectionHandler._writer_loop()` only ever checked
+`self._cq.needs_state_sync` at the top of its own `while True:` loop,
+immediately before blocking on `await self._cq.queue.get()`.
+`fanout.py`'s `ConnectionQueue._handle_full()` sets that flag (without
+enqueueing anything) when a connection's bounded 100-message queue is
+already full and a droppable (`lobby_tick`/`call`) message arrives --
+the documented, deliberate backpressure behavior for a socket that's
+falling behind. If the writer loop was already parked inside that
+`queue.get()` call on an empty queue at the moment the flag flipped,
+nothing woke it up -- it would only notice on whatever later iteration
+some unrelated message happened to arrive and unblock it naturally. Near
+a quiet round boundary (calls pausing before settlement), that could
+leave a recovering client's board visibly stale for a real, unbounded
+stretch.
+
+**Fixed**: added `ConnectionQueue._wake_event` (an `asyncio.Event`, set
+alongside the existing flag in `_handle_full()`'s droppable branch) and
+`get_or_wake()`, which races the next queued message against that event
+and returns `None` instead of blocking indefinitely when woken by the
+flag rather than a real item. `_writer_loop()` now calls this instead of
+the bare `queue.get()`; its own top-of-loop `needs_state_sync` check
+(unchanged) is still what actually acts on the flag -- `get_or_wake()`
+only exists to make sure that check runs promptly instead of waiting on
+whatever unrelated traffic happens to show up next.
+
+**A real performance regression caught by this arc's own full
+clean-slate rebuild, in the fix's first draft**: racing two freshly
+-created tasks via `asyncio.wait()` (plus cancelling and awaiting
+whichever one lost) on *every single call* -- even when the queue
+already had a message sitting there ready to return immediately -- was
+measurably more expensive than the plain `queue.get()` it replaced.
+`test_gateway_fanout.py::test_stalled_reader_does_not_delay_other_
+sockets` (a real, load-marked test measuring exactly this: how fast 49
+healthy sockets receive a broadcast after one stalled socket overflows
+its queue with 150 messages) went from reliably passing to reliably
+failing at ~400ms against a 300ms budget. Fixed by trying
+`queue.get_nowait()` first and only paying for the two-task race when
+the queue is genuinely empty -- which is the one moment a wake signal
+has anything to interrupt anyway, so the race was never needed in the
+common case to begin with. Rechecked clean afterward: 2/2 passes running
+just the two fanout tests together, 3/3 passes running them alongside
+`test_load_multiroom.py`, both repeatedly.
+
+**Verification**: `tests/unit/test_fanout.py` (new, pure asyncio, no
+Redis/Postgres needed) tests `ConnectionQueue` directly -- five tests
+covering ordering, both overflow branches, and `get_or_wake()`'s actual
+wake mechanism (start a call on an empty queue, confirm it's still
+pending, flip the flag via `_handle_full()`, confirm a prompt `None`
+return within a 1s timeout rather than a hang). Confirmed against the
+unfixed code first: 4 of 5 failed with `AttributeError: 'ConnectionQueue'
+object has no attribute 'get_or_wake'` (the fifth tests pre-existing,
+untouched overflow behavior, correctly still passing either way).
+
+**Residual environmental flakiness, documented honestly rather than
+chased further**: even after the perf fix, the *full* `-m load` batch
+(all five load tests run back to back, the worst case for host
+contention this project's own test-marker docs already call out) showed
+inconsistent failures across three reruns -- sometimes all three
+latency-budget tests over budget together (as much as 327ms, including
+`test_load_multiroom.py`, which is on a code path this fix never
+touches and has independently flaked on multiple unrelated commits
+earlier in this exact session), sometimes only one, the specific test
+varying each time. That inconsistency -- never the same failure twice,
+never isolated to just the code this fix touches -- is the signature of
+contention, not a deterministic bug: confirmed via `docker ps` that the
+same already-documented `santim-commerce-*`/`spos-*` containers were
+present throughout, and via direct, repeated isolated/small-group reruns
+of exactly the fanout tests, which passed cleanly every time. Not
+declared clean lightly -- this is the second real regression this
+specific finding surfaced (the writer-loop bug, then the fix's own perf
+cost), so it earned more scrutiny than a single-flake dismissal would
+usually get.
+
+Full clean-slate rebuild: `docker compose down -v` / `up -d`, migrations
+clean, mypy clean across 63 source files, `pytest tests/` 718 passed / 13
+deselected (up from 713 -- the five new `test_fanout.py` tests),
+`-m chaos_infra` 1 passed, `-m e2e` 7 passed clean. `-m load`: clean in
+every isolated/small-group rerun; inconsistent in the full five-test
+batch as described above.
+
 ## 2026-08-25 — Gave the Mini App's WS client a terminal state for auth failures it can never recover from by retrying
 
 Seventeenth follow-up to the full-platform `/code-review` entry, and the

@@ -50,6 +50,18 @@ class ConnectionQueue:
     def __init__(self) -> None:
         self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
         self.needs_state_sync = False
+        # A code review pass caught that the writer loop only ever checks
+        # needs_state_sync at the top of its own while-loop, immediately
+        # before blocking on queue.get() -- if this flag flips *while*
+        # that get() is already parked waiting (the queue was drained to
+        # empty around the same moment the overflow below happened), the
+        # bare boolean alone doesn't wake it up. Nothing else does either
+        # until some unrelated message happens to arrive later, which
+        # near a quiet round boundary (calls pausing before settlement)
+        # could leave a recovering client's board stale for a real,
+        # unbounded stretch. This event exists purely to interrupt that
+        # wait -- see get_or_wake() below.
+        self._wake_event = asyncio.Event()
 
     def offer(self, raw_message: str) -> None:
         try:
@@ -60,6 +72,7 @@ class ConnectionQueue:
     def _handle_full(self, raw_message: str) -> None:
         if _peek_type(raw_message) in DROPPABLE_TYPES:
             self.needs_state_sync = True
+            self._wake_event.set()
             return
         # A non-droppable message arrived while full: everything currently
         # queued is stale relative to it, so clear the backlog and keep
@@ -70,6 +83,52 @@ class ConnectionQueue:
             except asyncio.QueueEmpty:
                 break
         self.queue.put_nowait(raw_message)
+
+    async def get_or_wake(self) -> str | None:
+        """Waits for either the next queued message or needs_state_sync
+        being raised, whichever happens first. Returns the message, or
+        None if it was woken by the flag instead -- the caller's own
+        top-of-loop needs_state_sync check (unchanged) is what actually
+        acts on that; this only exists to make sure that check runs
+        promptly instead of waiting on whatever unrelated message
+        happens to arrive next.
+
+        Fast path first: a real load test caught that racing two freshly
+        -created tasks (asyncio.wait() plus a cancel-and-await of
+        whichever one loses) on *every single call* -- even when the
+        queue already had a message sitting there ready -- was measurably
+        slower than the plain queue.get() this replaced, enough to blow
+        the p99 fan-out latency budget under a real multi-socket load
+        test. The race is only actually needed while genuinely blocked on
+        an empty queue -- that's the one moment a wake signal has
+        anything to interrupt -- so check get_nowait() first and only
+        pay for the race when there's truly nothing to return yet.
+        """
+        try:
+            return self.queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+        get_task: asyncio.Task[str] = asyncio.ensure_future(self.queue.get())
+        wake_task: asyncio.Task[bool] = asyncio.ensure_future(self._wake_event.wait())
+        # Pre-populated so a cancellation of this coroutine itself (e.g.
+        # the writer loop's task being torn down on disconnect) still
+        # cleans up both tasks in `finally` -- if asyncio.wait() itself
+        # never returns, `pending` must not be left referring to nothing.
+        pending: set[asyncio.Task[object]] = {get_task, wake_task}
+        try:
+            done, pending = await asyncio.wait(
+                {get_task, wake_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            for task in pending:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        if wake_task in done:
+            self._wake_event.clear()
+        if get_task in done:
+            return get_task.result()
+        return None
 
 
 class FanoutHub:

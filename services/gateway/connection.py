@@ -288,8 +288,20 @@ class ConnectionHandler:
                 for room_id in list(self._joined_rooms):
                     state = await queries.build_state_sync(self._pool, room_id, self._user_id)
                     await self._ws.send_text(json.dumps(state))
-            raw = await self._cq.queue.get()
-            await self._ws.send_text(raw)
+            # get_or_wake(), not a bare queue.get() -- a code review pass
+            # caught that this loop only ever notices needs_state_sync at
+            # the top of the loop, right before this line blocks. If the
+            # flag flips while already parked here waiting (the queue was
+            # empty at that exact moment), nothing woke it up until some
+            # unrelated message happened to arrive later, which near a
+            # quiet round boundary could leave a recovering client's
+            # board stale indefinitely. get_or_wake() returns None
+            # instead of a message when it was woken by the flag rather
+            # than a real item, so there's nothing to send this iteration
+            # -- the loop just goes straight back to the check above.
+            raw = await self._cq.get_or_wake()
+            if raw is not None:
+                await self._ws.send_text(raw)
 
     async def _cleanup(self) -> None:
         if self._writer_task is not None:
