@@ -595,6 +595,20 @@ class RoundEngine:
             }
         )
 
+        # Keep scanning every auto-mark-eligible entry for this call, even
+        # after the first winner flips self._status to "settling" -- a
+        # real bug a code review pass caught: returning early here meant
+        # any *later* entry in this same iteration who also completes a
+        # winning pattern on this exact same number (a genuine
+        # simultaneous auto-mark tie) was never even offered to claim(),
+        # silently losing that player's share of the derash to whichever
+        # entry happened to come first in dict order. claim() itself
+        # already handles this correctly on its own -- a call while
+        # status is "settling" and still within WINNER_TIE_WINDOW_SECONDS
+        # registers a genuine tie (the same path a second *manual* claim
+        # already relies on, per test_two_simultaneous_claims_split_
+        # derash_evenly); nothing here needs to short-circuit for that to
+        # work, it only needs to not give up early.
         for user_id, entry in list(self._entries.items()):
             if not entry.auto_mark:
                 continue
@@ -604,8 +618,6 @@ class RoundEngine:
             if bingo.winning_patterns(grid, self._called, self._room.win_patterns):
                 self._auto_claimed.add(user_id)
                 await self.claim(user_id, source="auto")
-                if self._status != "running":
-                    return
 
     async def _finalize_after_window(self, deadline: float) -> None:
         remaining = deadline - time.monotonic()

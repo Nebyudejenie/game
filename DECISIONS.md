@@ -5,6 +5,56 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Fixed the most severe remaining catalogued finding: simultaneous auto-mark winners silently losing their share
+
+Third follow-up to the full-platform `/code-review` entry. This was the
+highest-severity item still open -- real money misallocation between two
+players who both actually won, not a resilience/observability gap.
+
+**The bug**: `_call_next_number()`'s auto-mark scan
+(`for user_id, entry in list(self._entries.items()): ...`) `return`ed as
+soon as the *first* winning entry's `claim()` call flipped
+`self._status` away from `"running"`. Any *later* entry in that same
+scan who also completed a winning pattern on this exact same called
+number -- a genuine simultaneous auto-mark tie -- was never even offered
+to `claim()`, silently losing that player's share of the derash to
+whichever entry happened to come first in Python dict iteration order.
+The manual-claim tie path was already correctly tested
+(`test_two_simultaneous_claims_split_derash_evenly`); this auto-mark
+equivalent wasn't, and the two paths don't share the bug because manual
+claims never had this early-return short-circuit.
+
+**Why the fix is safe**: `claim()` already handles this correctly on its
+own -- a call while status is `"settling"` and still within
+`WINNER_TIE_WINDOW_SECONDS` registers a genuine tie (the exact mechanism
+the already-tested manual-claim path relies on). The scan loop didn't
+need to short-circuit for that to work; it only needed to not give up
+early. Fix: removed the `if self._status != "running": return`, so every
+auto-mark-eligible entry still gets evaluated for this call regardless of
+what an earlier entry in the same scan already triggered.
+
+**Verifying the test itself was real work**: the natural approach (reuse
+`test_two_simultaneous_claims_split_derash_evenly`'s technique -- cards 1
+and 2, `wait_until` polling for both to become winning, matching the
+existing manual-claim test) turned out not to exercise this specific bug:
+that test polls the *cumulative* `_called` set from outside the call
+loop, which can go true across two different calls a few numbers apart,
+not necessarily the exact same `_call_next_number()` invocation this fix
+is about. The first draft of the new test passed even against the
+*unfixed* code, which would have been a false negative -- caught before
+trusting it, not after. Redesigned to monkeypatch `bingo.winning_patterns`
+so it deterministically reports both real, real-joined players' cards as
+winning from the same call onward, while everything else (the real
+`_call_next_number()`/`claim()`/settlement path, the real ledger, the
+real database) stays genuine. Confirmed properly this time by reverting
+the fix and rerunning: the test fails exactly as the bug describes
+(1 winner taking the full derash instead of 2 splitting it), then passes
+again once the fix is restored.
+
+Full clean-slate rebuild: mypy clean across 63 source files, `pytest
+tests/` 688 passed / 13 deselected (up from 687), `-m load` 5 passed,
+`-m chaos_infra` 1 passed, `-m e2e` 7 passed.
+
 ## 2026-08-25 — Two more catalogued findings fixed: Redis connection timeouts, the `max_players` TOCTOU race
 
 Second follow-up to the full-platform `/code-review` entry two below.

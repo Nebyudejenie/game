@@ -9,6 +9,7 @@ from decimal import Decimal
 import pytest
 
 from packages.core import bingo, ledger
+from services.engine import round_engine
 from services.engine.round_engine import ClaimResult, RoundEngine, load_room_config
 from tests.integration.conftest import create_funded_user, create_room
 
@@ -117,6 +118,76 @@ async def test_two_simultaneous_claims_split_derash_evenly(pool, redis, card_poo
     finally:
         await engine.stop()
         await asyncio.wait_for(task, timeout=10)
+
+
+async def test_two_simultaneous_auto_mark_winners_both_split_derash(pool, redis, card_pool, conn, monkeypatch):
+    # Regression: a real code review pass caught that _call_next_number()'s
+    # own auto-mark scan returned as soon as the *first* winning entry
+    # flipped self._status away from "running" -- any *later* entry in
+    # that same call who also completed a winning pattern on this exact
+    # same number (a genuine simultaneous auto-mark tie) was never even
+    # offered to claim(), silently losing that player's share of the
+    # derash to whoever happened to come first in dict order.
+    #
+    # Unlike test_two_simultaneous_claims_split_derash_evenly (which polls
+    # for two *real* cards to naturally both become winning, close enough
+    # in time to land within the 50ms tie window via two manual claim()
+    # calls), this fix specifically needs both winning conditions true
+    # within the exact same _call_next_number() invocation -- the real
+    # card pool's natural draw order doesn't reliably put two specific
+    # cards' final winning numbers on the exact same call. bingo.
+    # winning_patterns() is monkeypatched instead, so this test controls
+    # precisely when each of the two real, real-joined players' cards
+    # "complete" -- deterministic, not relying on draw-order luck, and it
+    # still exercises the real _call_next_number()/claim()/settlement
+    # path end to end, only the pattern-matching decision itself is faked.
+    room_id = await create_room(
+        conn, stake=Decimal("20.00"), house_cut_bps=2000, min_players=2, call_interval_ms=15
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        user_a = await create_funded_user(conn)
+        user_b = await create_funded_user(conn)
+        card_a, card_b = 1, 2
+        grid_a = card_pool[card_a]
+        grid_b = card_pool[card_b]
+        winning_pattern = bingo.Pattern(name="row_0", kind="row", cells=((0, 0), (0, 1), (0, 2), (0, 3), (0, 4)))
+
+        def fake_winning_patterns(grid, called, enabled):
+            if grid is grid_a or grid is grid_b:
+                return [winning_pattern]
+            return []
+
+        assert (await engine.join(user_a, card_a, auto_mark=True)).ok
+        assert (await engine.join(user_b, card_b, auto_mark=True)).ok
+
+        await wait_until(lambda: engine.status == "running", timeout=5)
+        monkeypatch.setattr(round_engine.bingo, "winning_patterns", fake_winning_patterns)
+
+        await wait_until(lambda: engine.status == "idle", timeout=15)
+
+        round_row = await pool.fetchrow(
+            "SELECT id, pot, derash FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1",
+            room_id,
+        )
+        assert round_row["pot"] == Decimal("40.00")
+        assert round_row["derash"] == Decimal("32.00")
+
+        winners = await pool.fetch(
+            "SELECT user_id, amount FROM round_winners WHERE round_id = $1 ORDER BY user_id",
+            round_row["id"],
+        )
+        # The actual bug, made concrete: without the fix this is 1 winner
+        # (whichever of user_a/user_b came first in dict order) taking the
+        # full derash, not 2 splitting it evenly.
+        assert len(winners) == 2
+        assert winners[0]["amount"] == winners[1]["amount"] == Decimal("16.00")
+        assert winners[0]["amount"] + winners[1]["amount"] == round_row["derash"]
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
 
 
 async def test_same_user_double_claim_race_settles_exactly_once(pool, redis, card_pool, conn):
