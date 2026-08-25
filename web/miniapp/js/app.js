@@ -43,6 +43,15 @@ subscribe((state) => {
   const banner = el("connection-banner");
   if (state.connection === "connected") {
     banner.classList.remove("visible");
+  } else if (state.connection === "auth_failed") {
+    // A code review pass caught that a terminal auth failure (stale
+    // initData past Telegram's own validity window, most commonly) used
+    // to look identical to an ordinary transient drop -- ws.js retried
+    // forever against a handshake that could only ever fail again, and
+    // the player just saw an endless "Reconnecting..." with no way to
+    // know reloading the app would actually fix it.
+    banner.textContent = t("connection.expired");
+    banner.classList.add("visible");
   } else if (state.connection === "reconnecting" || state.connection === "offline") {
     banner.textContent = t("connection.reconnecting");
     banner.classList.add("visible");

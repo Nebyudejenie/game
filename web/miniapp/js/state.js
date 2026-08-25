@@ -3,7 +3,7 @@
 // layer... is plenty").
 
 const state = {
-  connection: "connecting", // connecting | connected | reconnecting | offline
+  connection: "connecting", // connecting | connected | reconnecting | offline | auth_failed
   user: null, // {id, name, balance}
   serverTimeOffsetMs: 0, // server_time - Date.now(), refreshed on every message that carries one
   screen: "rooms", // rooms | lobby | game | result | wallet

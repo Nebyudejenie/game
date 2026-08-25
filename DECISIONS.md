@@ -5,6 +5,69 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Gave the Mini App's WS client a terminal state for auth failures it can never recover from by retrying
+
+Seventeenth follow-up to the full-platform `/code-review` entry, and the
+second half of the reconnect-storm finding -- the first half (flat,
+unbacked-off retries) was fixed earlier in this arc; this closes the
+other half of that same finding: retries that can structurally never
+succeed weren't being distinguished from ones that just need to wait out
+a blip.
+
+**The bug**: `services/gateway/connection.py`'s `_handshake()` closes
+the socket with 4000 (malformed/unexpected first frame), 4001 (no auth
+frame within the timeout), or 4003 (rejected `initData`, most commonly
+past Telegram's own validity window) for failures retrying can never fix
+-- `ws.js` retried all three identically to an ordinary transient drop.
+`initData` is captured once, at `connect()` time, from whatever Telegram
+handed the page on load; this module has no way to obtain a fresh one
+without the page itself reloading (Telegram doesn't push an updated
+`initData` into an already-open WebView). So a client whose captured
+`initData` went stale retried forever (backed off, after the earlier fix
+in this arc, but still forever) against a handshake that could only ever
+fail again -- with nothing telling the player why the app just sat there.
+
+**Fixed**: added `_TERMINAL_CLOSE_CODES = new Set([4000, 4001, 4003])`,
+matching the gateway's own three codes exactly. The `close` handler now
+checks this first: on a terminal code, it sets `connection: "auth_
+failed"` and returns without scheduling a reconnect at all -- no more
+doomed retry loop. `app.js`'s existing connection banner (already
+handling `"reconnecting"`/`"offline"`) now shows a distinct message for
+this state, a new `connection.expired` i18n key (added to both `en.json`
+and `am.json`) telling the player to close and reopen the app -- the one
+thing that would actually get them a fresh `initData` and fix it.
+
+**Verification, matching this arc's established pattern for untestable
+-in-Python client logic**: this repo has no JS test framework, so
+`_TERMINAL_CLOSE_CODES` is exported and checked by a plain-node smoke
+test (`tests/frontend/test_terminal_close_codes.mjs`, node's built-in
+`assert` only) run via a pytest wrapper, confirming the set matches the
+gateway's three codes exactly and that ordinary codes (1000, 1006, 1012)
+are correctly excluded. Confirmed against the unfixed code first: import
+failed with `SyntaxError: ... does not provide an export named
+'_TERMINAL_CLOSE_CODES'`. Also ran the full real-browser Playwright E2E
+suite (exercising this exact connection lifecycle end to end, including
+a full gameplay round) to confirm the restructured `close` handler
+didn't change happy-path behavior.
+
+Full clean-slate rebuild: `docker compose down -v` / `up -d`, migrations
+clean, mypy clean across 63 source files, `pytest tests/` 713 passed / 13
+deselected (up from 712 -- the one new node-backed test), `-m load` 5
+passed, `-m chaos_infra` 1 passed. `-m e2e`: flaked twice in a row on
+`test_miniapp_full_gameplay_flow`, each time on a *different* specific
+assertion (a visibility check, then a balance mismatch, then a full
+25s page-load timeout) -- never the same failure twice, which a
+deterministic regression from this change would produce. Passed cleanly
+in isolation and on two further full-suite reruns (3 clean runs against
+2 flaky ones); `docker ps` confirmed the same already-documented
+shared-host contention (`santim-commerce-*`/`spos-*` containers) present
+throughout. Reviewed the actual diff for a plausible mechanism by which
+restructuring the `close` handler could affect a test that never
+triggers a close event at all during a normal, uninterrupted round --
+found none. Treated as the same environmental pattern documented
+repeatedly elsewhere in this arc, not a regression, but flagged here
+more explicitly than usual given two consecutive flakes rather than one.
+
 ## 2026-08-25 — Fixed the single most severe open finding: a "processing" payout was wrongly treated as settled
 
 Sixteenth follow-up to the full-platform `/code-review` entry, and the

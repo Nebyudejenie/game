@@ -12,6 +12,22 @@ const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30000;
 const PING_INTERVAL_MS = 20000;
 
+// services/gateway/connection.py's own _handshake() close codes for a
+// handshake that will *never* succeed on retry: 4000 (malformed/
+// unexpected first frame), 4001 (no auth frame within the timeout), 4003
+// (initData rejected -- most commonly past Telegram's own validity
+// window). A code review pass caught that every close code was retried
+// identically: a client whose captured initData had gone stale kept
+// retrying forever (backed off, after the fix above, but still forever)
+// against a handshake that can only ever fail again, with nothing telling
+// the player why nothing was happening. initData is captured once, at
+// connect() time, from whatever Telegram handed the page on load -- this
+// module has no way to obtain a fresh one without the page itself
+// reloading (Telegram doesn't push an updated initData into an
+// already-open WebView), so retrying is not just pointless here, it can
+// never work.
+export const _TERMINAL_CLOSE_CODES = new Set([4000, 4001, 4003]);
+
 let socket = null;
 let initData = null;
 let pingTimer = null;
@@ -89,8 +105,16 @@ function open() {
   });
 
   socket.addEventListener("close", (event) => {
-    setState({ connection: "offline" });
     clearInterval(pingTimer);
+    if (_TERMINAL_CLOSE_CODES.has(event.code)) {
+      // Retrying can only ever fail again -- see _TERMINAL_CLOSE_CODES'
+      // own comment above for why. Stop here instead of hammering the
+      // gateway with a doomed reconnect loop forever; the player needs
+      // to actually reload the Mini App (app.js's banner tells them so).
+      setState({ connection: "auth_failed" });
+      return;
+    }
+    setState({ connection: "offline" });
     // 1012 = "service restart" (our own gateway's graceful-shutdown code,
     // spec section 6): reconnect immediately, no backoff needed -- the
     // server just told us it's about to be available again right away.
