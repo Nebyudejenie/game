@@ -319,6 +319,7 @@ class RoundEngine:
             self._entries[user_id] = RoundEntryState(card_no=card_no, auto_mark=auto_mark)
             self._pot += self._room.stake
 
+        await ledger.publish_balance_update(self._pool, self._redis, user_id)
         await self._publish_room({"t": "card_taken", "card_no": card_no, "taken": True})
         return JoinResult(True, None)
 
@@ -356,6 +357,7 @@ class RoundEngine:
 
         del self._entries[user_id]
         self._pot -= self._room.stake
+        await ledger.publish_balance_update(self._pool, self._redis, user_id)
         await self._publish_room({"t": "card_taken", "card_no": entry.card_no, "taken": False})
         return JoinResult(True, None)
 
@@ -506,7 +508,10 @@ class RoundEngine:
         else:
             round_id = self._round_id
             assert round_id is not None
+            refunded_user_ids = list(self._entries)
             await refunds.refund_round(self._pool, round_id, reason="lobby_underfilled")
+            for refunded_user_id in refunded_user_ids:
+                await ledger.publish_balance_update(self._pool, self._redis, refunded_user_id)
             self._reset_to_idle()
 
     async def _transition_to_running(self) -> None:
@@ -573,7 +578,10 @@ class RoundEngine:
             round_id = self._round_id
             assert round_id is not None
             assert self._server_seed is not None
+            refunded_user_ids = list(self._entries)
             await refunds.refund_round(self._pool, round_id, reason="exhausted_no_winner")
+            for refunded_user_id in refunded_user_ids:
+                await ledger.publish_balance_update(self._pool, self._redis, refunded_user_id)
             await self._pool.execute(
                 "UPDATE rounds SET server_seed = $2 WHERE id = $1", round_id, self._server_seed
             )
@@ -707,6 +715,9 @@ class RoundEngine:
                     derash,
                     self._server_seed,
                 )
+
+        for w in winners:
+            await ledger.publish_balance_update(self._pool, self._redis, w.user_id)
 
         await self._publish_room(
             {

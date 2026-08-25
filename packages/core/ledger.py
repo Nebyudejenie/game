@@ -12,10 +12,12 @@ even a bug in this file.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from decimal import Decimal
 
 import asyncpg
 import asyncpg.pool
+from redis.asyncio import Redis
 
 from packages.core import metrics
 
@@ -316,3 +318,59 @@ async def reconcile(conn: AsyncpgConnection) -> list[tuple[int, Decimal, Decimal
         """
     )
     return [(r["account_id"], r["cached"], r["computed"]) for r in rows]
+
+
+async def user_balance_snapshot(pool: asyncpg.Pool, user_id: int) -> dict[str, str]:
+    """The three balance figures the Mini App and the bot both show a
+    player: cash, bonus, locked. Lives here (not services/gateway/queries
+    .py, where it started) because it's a pure ledger read with nothing
+    gateway-specific about it, and publish_balance_update() below --
+    used by every service that ever moves a player's money, not just the
+    gateway -- needs it too; packages/core never depends on services/*,
+    so the dependency can only run this direction.
+
+    One query, not three get_or_create_account() + three balance() calls
+    (up to nine round trips) -- publish_balance_update() puts this on
+    round_engine.py's join()/drop_card() hot path, called on every stake,
+    so this stayed a straight read (never lazily creating an accounts row
+    the way get_or_create_account() does) rather than reusing that
+    already-existing but much chattier helper. A kind with no accounts
+    row yet genuinely has zero of it, the same value get_or_create_account
+    + balance()'s combination would themselves have produced for it.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT a.kind, COALESCE(b.balance, 0) AS balance
+        FROM accounts a
+        LEFT JOIN account_balances b ON b.account_id = a.id
+        WHERE a.user_id = $1 AND a.kind IN ('user_cash', 'user_bonus', 'user_locked')
+        """,
+        user_id,
+    )
+    balances = {row["kind"]: str(row["balance"].quantize(_CENT)) for row in rows}
+    return {
+        "cash": balances.get("user_cash", "0.00"),
+        "bonus": balances.get("user_bonus", "0.00"),
+        "locked": balances.get("user_locked", "0.00"),
+    }
+
+
+async def publish_balance_update(pool: asyncpg.Pool, redis: Redis, user_id: int) -> dict[str, str]:
+    """Pushes this user's current balance over their Mini App WebSocket's
+    per-user fanout channel (services/gateway/connection.py subscribes
+    every connection to `user:{user_id}` at handshake).
+
+    A code review pass caught that only services/payments/deposits.py
+    ever called this: staking, dropping a card, winning or losing a
+    round, requesting a withdrawal, and a payout settling or reversing
+    all move real money too, but none of them told a connected player's
+    UI its balance had actually changed -- the on-screen number stayed
+    stale until the player happened to reopen the wallet screen (which
+    does its own fresh /api/me fetch) or reconnect. Every one of those
+    call sites already has both `pool` and `redis` in hand, so this is
+    meant to be called right after the money-moving transaction commits,
+    everywhere that happens.
+    """
+    snapshot = await user_balance_snapshot(pool, user_id)
+    await redis.publish(f"user:{user_id}", json.dumps({"t": "balance_update", **snapshot}))
+    return snapshot

@@ -11,7 +11,7 @@ import pytest
 from packages.core import bingo, ledger
 from services.engine import round_engine
 from services.engine.round_engine import ClaimResult, RoundEngine, load_room_config
-from tests.integration.conftest import create_funded_user, create_room
+from tests.integration.conftest import create_funded_user, create_room, recv_balance_update
 
 
 async def wait_until(predicate, timeout: float = 10.0, interval: float = 0.01) -> None:
@@ -249,6 +249,45 @@ async def test_same_user_double_claim_race_settles_exactly_once(pool, redis, car
         await asyncio.wait_for(task, timeout=10)
 
 
+async def test_claim_settlement_pushes_a_live_balance_update_to_the_winner(pool, redis, card_pool, conn):
+    # A code review pass caught that only services/payments/deposits.py
+    # ever pushed a live balance_update -- staking and winning moved real
+    # money but never told a connected player's UI its balance had
+    # changed. round_engine.py's _settle_with_winners() now does.
+    room_id = await create_room(conn, stake=Decimal("20.00"), min_players=2, call_interval_ms=15)
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        user_a = await create_funded_user(conn)
+        user_b = await create_funded_user(conn)
+        card_a = 1
+
+        assert (await engine.join(user_a, card_a, auto_mark=False)).ok
+        assert (await engine.join(user_b, 2, auto_mark=False)).ok
+
+        await wait_until(lambda: engine.status == "running", timeout=5)
+
+        grid_a = card_pool[card_a]
+
+        def a_ready() -> bool:
+            return bool(bingo.winning_patterns(grid_a, engine._called, room.win_patterns))  # noqa: SLF001
+
+        await wait_until(a_ready, timeout=10)
+
+        async def _claim() -> None:
+            result = await engine.claim(user_a)
+            assert result.ok, result.reason
+
+        push = await recv_balance_update(redis, user_a, _claim)
+        assert Decimal(push["cash"]) > Decimal("0.00")
+
+        await wait_until(lambda: engine.status == "idle", timeout=5)
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
 async def test_claim_from_user_not_in_round_rejected_and_logged(pool, redis, card_pool, conn):
     room_id = await create_room(conn, stake=Decimal("20.00"), min_players=2, call_interval_ms=15)
     engine = await make_engine(pool, redis, card_pool, room_id)
@@ -318,6 +357,27 @@ async def test_round_exhausted_no_winner_full_refund(pool, redis, card_pool, con
         await asyncio.wait_for(task, timeout=15)
 
 
+async def test_exhausted_no_winner_refund_pushes_a_live_balance_update(pool, redis, card_pool, conn):
+    room_id = await create_room(
+        conn, stake=Decimal("15.00"), min_players=2, call_interval_ms=2, win_patterns=[],
+    )
+    engine = await make_engine(pool, redis, card_pool, room_id)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        p1 = await create_funded_user(conn, Decimal("100.00"))
+        p2 = await create_funded_user(conn, Decimal("100.00"))
+        await engine.join(p1, 1)
+        await engine.join(p2, 2)
+
+        push = await recv_balance_update(
+            redis, p1, lambda: wait_until(lambda: engine.status == "idle", timeout=15)
+        )
+        assert push["cash"] == "100.00"
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
 async def test_lobby_underfilled_all_refunded_room_returns_to_idle(pool, redis, card_pool, conn):
     room_id = await create_room(conn, stake=Decimal("10.00"), min_players=5, lobby_seconds=1)
     engine = await make_engine(pool, redis, card_pool, room_id)
@@ -339,6 +399,48 @@ async def test_lobby_underfilled_all_refunded_room_returns_to_idle(pool, redis, 
         assert engine.status == "idle"
         assert engine.round_id is None
         assert engine.player_count() == 0
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
+async def test_lobby_underfilled_refund_pushes_a_live_balance_update(pool, redis, card_pool, conn):
+    room_id = await create_room(conn, stake=Decimal("10.00"), min_players=5, lobby_seconds=1)
+    engine = await make_engine(pool, redis, card_pool, room_id)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        p1 = await create_funded_user(conn, Decimal("50.00"))
+        assert (await engine.join(p1, 1)).ok
+
+        push = await recv_balance_update(
+            redis, p1, lambda: wait_until(lambda: engine.status == "idle", timeout=10)
+        )
+        assert push["cash"] == "50.00"
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
+async def test_join_and_drop_card_push_live_balance_updates(pool, redis, card_pool, conn):
+    room_id = await create_room(conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=2)
+    engine = await make_engine(pool, redis, card_pool, room_id)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        p1 = await create_funded_user(conn, Decimal("50.00"))
+
+        async def _join() -> None:
+            result = await engine.join(p1, 1)
+            assert result.ok, result.reason
+
+        join_push = await recv_balance_update(redis, p1, _join)
+        assert join_push["cash"] == "40.00"
+
+        async def _drop() -> None:
+            result = await engine.drop_card(p1)
+            assert result.ok, result.reason
+
+        drop_push = await recv_balance_update(redis, p1, _drop)
+        assert drop_push["cash"] == "50.00"
     finally:
         await engine.stop()
         await asyncio.wait_for(task, timeout=10)

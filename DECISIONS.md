@@ -5,6 +5,102 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Pushed live balance_update to every real money-moving action, not just deposits
+
+Eleventh follow-up to the full-platform `/code-review` entry. The
+largest of these follow-ups so far -- a genuine UX-correctness gap, not
+a money-safety one (the ledger itself was never wrong; only what a
+connected player's own screen showed them was).
+
+**The bug**: `services/gateway/connection.py` subscribes every WebSocket
+connection to a per-user `user:{user_id}` Redis pub/sub channel at
+handshake, and the Mini App's header balance
+(`web/miniapp/js/app.js`'s own `ws.on("balance_update", ...)` handler --
+its comment already said "a deposit (or any other out-of-round balance
+change) pushes this over the WS", stating the intent this code never
+actually delivered) updates only when a `balance_update` message arrives
+on it. Only `services/payments/deposits.py` ever published one. Staking
+a card, dropping a card, winning or losing a round, requesting a
+withdrawal, and a payout settling or reversing all move real money
+through the same ledger but never told a connected player's UI anything
+had changed -- the on-screen number stayed stale until the player
+happened to reopen the wallet screen (which does its own fresh `/api/me`
+fetch) or reconnect the socket. Not a money-safety bug -- every debit and
+credit was still correct and enforced server-side regardless of what the
+UI displayed -- but a real trust/confusion problem for a real-money app:
+a player could stake a card and watch their balance appear unchanged, or
+win a round and see nothing.
+
+**Fixed**: relocated `user_balance_snapshot()` from `services/gateway
+/queries.py` (which is explicitly documented as read-only Postgres
+access with nothing Redis-related in it) to `packages/core/ledger.py`,
+since it's a pure ledger read with nothing gateway-specific about it and
+`packages/core` never depends on `services/*` -- the dependency can only
+run this direction, and every service that moves money needed it, not
+just the gateway. Added `ledger.publish_balance_update(pool, redis,
+user_id)` alongside it (snapshot + `redis.publish` to the same
+`user:{user_id}` channel deposits.py already used) and called it from
+every other place a player's own balance actually changes:
+`round_engine.py`'s `join()`, `drop_card()`, `_settle_with_winners()`,
+and both refund-triggering paths (`_run_lobby`'s lobby-underfilled
+branch, `_run_running`'s exhausted-no-winner branch, both captured their
+entrant list before `_reset_to_idle()` clears it), `withdrawals.py`'s
+`request_withdrawal()`, and `payout_worker.py`'s three outcomes
+(succeeded, provider-exception-reversed, provider-rejected-reversed).
+Deliberately scoped to these -- the core, high-frequency gameplay and
+payment-request loop where a live update matters most -- and not to
+`recovery.py`'s crash-recovery refund or the admin console's void
+action: both are rare, out-of-band events where the affected player is
+unlikely to even be connected at that exact moment, so the marginal UX
+value doesn't currently justify threading `redis` through
+`refunds.refund_round_in_transaction()`'s three call sites for it;
+flagged here for a future pass if that judgment turns out wrong.
+
+**A real performance regression caught and fixed before it shipped**:
+`user_balance_snapshot()`'s original implementation (three
+`get_or_create_account()` calls, each up to two round trips since the
+lazy-create path is an `INSERT ... ON CONFLICT DO NOTHING` that returns
+no row for an already-existing account, forcing a fallback `SELECT`,
+plus three separate `balance()` calls) cost up to nine sequential
+DB round trips per call. Wiring `publish_balance_update()` into
+`round_engine.py`'s `join()` -- explicitly documented elsewhere in this
+codebase as a hot path, called on every stake -- made
+`test_full_round_35_players_ledger_balances` (35 sequential joins
+against a 1-second test-only lobby window) start failing with
+`not_joinable`: the added per-join latency pushed 35 sequential joins
+past the lobby deadline mid-loop. Rewrote `user_balance_snapshot()` as a
+single query (`accounts LEFT JOIN account_balances`, defaulting a
+kind with no accounts row at all to "0.00" -- the same value the
+lazy-create path would itself have produced for it, just without ever
+needing to write anything for a pure read) instead of adding
+lobby-timing slack to paper over it; confirmed this alone was sufficient
+by rerunning the previously-failing test five times in a row.
+
+**Regression tests**: ten new tests, all confirmed to fail against the
+unfixed code before being trusted (`git stash push` on every touched
+source file, rerun, confirm real failures -- seven "no balance_update
+seen" timeouts, two `AttributeError: module 'packages.core.ledger' has
+no attribute 'user_balance_snapshot'`, one for `publish_balance_update`
+-- then `git stash pop` to restore). Added a shared
+`recv_balance_update(redis, user_id, trigger)` test helper
+(`tests/integration/conftest.py`) that subscribes to the per-user
+channel, runs the triggering action, and returns the decoded payload --
+used across `test_ledger.py`, `test_round_engine.py`,
+`test_payments_withdrawals.py`, and `test_payout_worker.py`. Hit one
+real redis-py gotcha while writing it: `pubsub.get_message(ignore_
+subscribe_messages=True, timeout=...)` only polls *once* -- if that
+single poll happens to read the still-unread subscribe-acknowledgment
+message instead of the real payload, it discards it and returns `None`
+for that call rather than continuing to wait out the rest of `timeout`
+for a real message to show up. Confirmed this directly against a real
+Redis in an isolated script before believing it, and fixed the helper to
+loop against an overall deadline instead of trusting one call.
+
+Full clean-slate rebuild: `docker compose down -v` / `up -d`, migrations
+clean, mypy clean across 63 source files, `pytest tests/` 705 passed / 13
+deselected (up from 695 -- the ten new tests), `-m load` 5 passed,
+`-m chaos_infra` 1 passed, `-m e2e` 7 passed (no flake this run).
+
 ## 2026-08-25 — Fixed Chapa webhook's malformed-amount unhandled crash
 
 Tenth follow-up to the full-platform `/code-review` entry.

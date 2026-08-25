@@ -13,7 +13,7 @@ from decimal import Decimal
 from packages.core import ledger
 from services.payments import payout_worker, withdrawals
 from services.payments.provider import PayoutResult
-from tests.integration.conftest import create_funded_user
+from tests.integration.conftest import create_funded_user, recv_balance_update
 
 # clean_payout_stream (conftest.py, autouse) clears the shared 'payouts'
 # Redis Stream before every integration test, so process_next()'s "the
@@ -96,6 +96,25 @@ async def test_successful_payout_moves_locked_to_provider_settlement(pool, redis
     assert provider.call_count[our_ref] == 1
 
 
+async def test_successful_payout_pushes_a_live_balance_update(pool, redis, conn):
+    # A code review pass caught that only services/payments/deposits.py
+    # ever pushed a live balance_update -- a payout settling releases
+    # locked funds for real but never told a connected player's UI its
+    # balance had changed.
+    user_id = await create_funded_user(conn, Decimal("500.00"))
+    our_ref = await _approved_withdrawal(pool, redis, conn, user_id, Decimal("200.00"))
+
+    provider = FakePayoutProvider()
+
+    async def _process() -> None:
+        outcome = await payout_worker.process_next(pool, redis, provider, consumer_name="w1")
+        assert outcome == "succeeded"
+
+    push = await recv_balance_update(redis, user_id, _process)
+    assert push["cash"] == "300.00"
+    assert push["locked"] == "0.00"
+
+
 async def test_rejected_payout_returns_exact_amount_to_cash(pool, redis, conn):
     user_id = await create_funded_user(conn, Decimal("500.00"))
     our_ref = await _approved_withdrawal(pool, redis, conn, user_id, Decimal("150.00"))
@@ -109,6 +128,21 @@ async def test_rejected_payout_returns_exact_amount_to_cash(pool, redis, conn):
 
     status = await conn.fetchval("SELECT status FROM payments WHERE our_ref = $1", our_ref)
     assert status == "failed"
+
+
+async def test_rejected_payout_pushes_a_live_balance_update(pool, redis, conn):
+    user_id = await create_funded_user(conn, Decimal("500.00"))
+    our_ref = await _approved_withdrawal(pool, redis, conn, user_id, Decimal("150.00"))
+
+    provider = FakePayoutProvider(outcomes={our_ref: "failed"})
+
+    async def _process() -> None:
+        outcome = await payout_worker.process_next(pool, redis, provider, consumer_name="w1")
+        assert outcome == "failed"
+
+    push = await recv_balance_update(redis, user_id, _process)
+    assert push["cash"] == "500.00"
+    assert push["locked"] == "0.00"
 
 
 async def test_provider_exception_also_reverses_the_lock(pool, redis, conn):

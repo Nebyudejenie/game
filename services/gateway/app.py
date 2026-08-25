@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from packages.core import telegram_auth
 from packages.core.config import get_settings
+from packages.core.ledger import user_balance_snapshot
 from packages.core.redis_conn import get_redis
 from services.admin.queries import get_round_fairness
 from services.gateway import queries
@@ -112,7 +113,7 @@ async def _authenticated_user_id(authorization: str = Header(default="")) -> int
 @app.get("/api/me")
 async def api_me(authorization: str = Header(default="")) -> dict[str, str]:
     user_id = await _authenticated_user_id(authorization)
-    return await queries.user_balance_snapshot(app.state.pool, user_id)
+    return await user_balance_snapshot(app.state.pool, user_id)
 
 
 @app.get("/api/history")

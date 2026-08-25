@@ -208,6 +208,7 @@ async def request_withdrawal(
                 assert payment_row is not None
                 payment_id: int = payment_row["id"]
 
+        await ledger.publish_balance_update(pool, redis, user_id)
         if status == STATUS_APPROVED:
             await enqueue_payout(redis, our_ref=our_ref, payment_id=payment_id)
 

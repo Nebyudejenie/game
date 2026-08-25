@@ -283,6 +283,42 @@ async def create_funded_user(conn: asyncpg.Connection, amount: Decimal = Decimal
     return user_id
 
 
+async def recv_balance_update(redis, user_id: int, trigger) -> dict:
+    """Subscribes to this user's live balance channel (packages.core.ledger
+    .publish_balance_update()'s target, the same one services/gateway
+    /connection.py subscribes a real WebSocket connection to at handshake),
+    awaits `trigger()` -- the action expected to push an update -- and
+    returns the decoded payload. Talks to Redis pub/sub directly rather
+    than through a full WebSocket + gateway harness, for callers (round
+    engine, withdrawal, payout tests) that already have `redis` in hand
+    and don't otherwise need a live connection.
+    """
+    pubsub = redis.pubsub()
+    await pubsub.subscribe(f"user:{user_id}")
+    try:
+        await trigger()
+        # get_message(ignore_subscribe_messages=True) only polls *once* --
+        # if that single poll happens to read the subscribe-ack (a real
+        # race here, not hypothetical: it's still sitting unread on the
+        # socket from the subscribe() call above), it discards it and
+        # returns None for that call rather than continuing to wait out
+        # the rest of `timeout` for a real message. Loop against an
+        # overall deadline instead of trusting one call to find it.
+        deadline = asyncio.get_running_loop().time() + 5.0
+        message = None
+        while asyncio.get_running_loop().time() < deadline:
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.5)
+            if message is not None:
+                break
+        assert message is not None, f"no balance_update seen on user:{user_id}"
+        payload = json.loads(message["data"])
+        assert payload["t"] == "balance_update"
+        return payload
+    finally:
+        await pubsub.unsubscribe(f"user:{user_id}")
+        await pubsub.aclose()
+
+
 async def create_room(
     conn: asyncpg.Connection,
     *,

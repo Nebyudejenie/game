@@ -15,7 +15,7 @@ from packages.core import ledger
 from services.engine.round_engine import RoundEngine, load_room_config
 from services.payments import payout_worker, withdrawals
 from services.payments.provider import PayoutResult
-from tests.integration.conftest import create_funded_user, create_room, create_user
+from tests.integration.conftest import create_funded_user, create_room, create_user, recv_balance_update
 
 MIN_WITHDRAW = Decimal("50.00")
 AUTO_APPROVE_LIMIT = Decimal("2000.00")
@@ -133,6 +133,22 @@ async def test_small_amount_auto_approved_and_enqueued(pool, redis, conn):
     status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", intent.payment_id)
     assert status == "approved"
     assert await _cash(conn, user_id) == Decimal("900.00")
+
+
+async def test_request_withdrawal_pushes_a_live_balance_update(pool, redis, conn):
+    # A code review pass caught that only services/payments/deposits.py
+    # ever pushed a live balance_update -- requesting a withdrawal locks
+    # real funds out of user_cash but never told a connected player's UI
+    # its balance had changed.
+    user_id = await create_funded_user(conn, Decimal("1000.00"))
+
+    async def _do_request() -> None:
+        intent = await _request(pool, redis, conn, user_id, Decimal("100.00"))
+        assert intent.status == withdrawals.STATUS_APPROVED
+
+    push = await recv_balance_update(redis, user_id, _do_request)
+    assert push["cash"] == "900.00"
+    assert push["locked"] == "100.00"
 
 
 async def test_sweep_re_enqueues_an_approved_payout_that_never_got_queued(pool, redis, conn, monkeypatch):

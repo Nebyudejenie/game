@@ -14,7 +14,7 @@ import pytest
 
 from packages.core import ledger
 from packages.core.ledger import Entry, InsufficientFunds
-from tests.integration.conftest import create_user
+from tests.integration.conftest import create_user, recv_balance_update
 
 
 def key() -> str:
@@ -248,3 +248,47 @@ async def test_reconcile_matches_cache_after_varied_transactions(conn):
 
     mismatches = await ledger.reconcile(conn)
     assert mismatches == []
+
+
+async def test_user_balance_snapshot_defaults_missing_accounts_to_zero(pool, conn):
+    # A code review pass rewrote this as a single read query (no longer
+    # reusing get_or_create_account(), which lazily writes a new accounts
+    # row -- up to nine round trips across three accounts, too slow for
+    # round_engine.py's join()/publish_balance_update() hot path). A user
+    # who's never touched a given account kind at all -- no accounts row
+    # exists yet, not just an accounts row sitting at a zero balance --
+    # must still report "0.00" for it, not error or omit the key.
+    user_id = await create_user(conn)
+    snapshot = await ledger.user_balance_snapshot(pool, user_id)
+    assert snapshot == {"cash": "0.00", "bonus": "0.00", "locked": "0.00"}
+
+
+async def test_user_balance_snapshot_reflects_real_balances(pool, conn):
+    user_id = await create_user(conn)
+    cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
+    provider = await ledger.get_or_create_account(conn, None, "provider_settlement")
+    await ledger.post(
+        conn,
+        "deposit",
+        [Entry(provider.id, Decimal("-75.50")), Entry(cash.id, Decimal("75.50"))],
+        idempotency_key=key(),
+    )
+    snapshot = await ledger.user_balance_snapshot(pool, user_id)
+    assert snapshot == {"cash": "75.50", "bonus": "0.00", "locked": "0.00"}
+
+
+async def test_publish_balance_update_pushes_the_real_snapshot(pool, conn, redis):
+    user_id = await create_user(conn)
+    cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
+    provider = await ledger.get_or_create_account(conn, None, "provider_settlement")
+    await ledger.post(
+        conn,
+        "deposit",
+        [Entry(provider.id, Decimal("-40.00")), Entry(cash.id, Decimal("40.00"))],
+        idempotency_key=key(),
+    )
+
+    push = await recv_balance_update(
+        redis, user_id, lambda: ledger.publish_balance_update(pool, redis, user_id)
+    )
+    assert push == {"t": "balance_update", "cash": "40.00", "bonus": "0.00", "locked": "0.00"}

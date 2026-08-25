@@ -20,6 +20,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from redis.asyncio import Redis
 
 from packages.core import metrics, rate_limit, telegram_auth
+from packages.core.ledger import user_balance_snapshot
 from packages.core.telegram_auth import InvalidInitData
 from services.engine import commands
 from services.engine.commands import CommandTimeout
@@ -99,7 +100,7 @@ class ConnectionHandler:
         )
         self._user_id = user_id
         metrics.gateway_connections.inc()
-        balance = await queries.user_balance_snapshot(self._pool, user_id)
+        balance = await user_balance_snapshot(self._pool, user_id)
         self._hub.subscribe_user(user_id, self._cq)
 
         await self._ws.send_text(

@@ -18,7 +18,6 @@ from typing import Any
 
 import asyncpg
 
-from packages.core import ledger
 from packages.core.phone_crypto import decrypt_phone
 
 
@@ -59,18 +58,6 @@ async def get_or_create_user_by_telegram_id(
 async def user_phone(pool: asyncpg.Pool, user_id: int) -> str | None:
     blob = await pool.fetchval("SELECT phone_e164_encrypted FROM users WHERE id = $1", user_id)
     return decrypt_phone(bytes(blob)) if blob is not None else None
-
-
-async def user_balance_snapshot(pool: asyncpg.Pool, user_id: int) -> dict[str, str]:
-    async with pool.acquire() as conn:
-        cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
-        bonus = await ledger.get_or_create_account(conn, user_id, "user_bonus")
-        locked = await ledger.get_or_create_account(conn, user_id, "user_locked")
-        return {
-            "cash": str(await ledger.balance(conn, cash.id)),
-            "bonus": str(await ledger.balance(conn, bonus.id)),
-            "locked": str(await ledger.balance(conn, locked.id)),
-        }
 
 
 async def user_history(pool: asyncpg.Pool, user_id: int, limit: int = 10) -> list[dict[str, Any]]:
