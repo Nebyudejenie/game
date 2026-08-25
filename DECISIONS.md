@@ -5,6 +5,62 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Fixed `notification_relay.py`'s head-of-line blocking across users
+
+Second fix from the same fresh `/code-review high` pass, again independently
+caught by two separate finder agents.
+
+**The bug**: `run_forever()`'s batch loop was `for msg_id, fields in
+entries: await process_one(...)`, and `process_one()` awaits
+`notifier.send()`'s returned future all the way to a terminal outcome --
+which for a chat currently in a Telegram 429 backoff can mean several
+`Notifier._run()` retry/sleep cycles (`services/bot/notifier.py`, up to
+`MAX_BACKOFF_SLEEP_SECONDS` per cycle, repeated until the chat's own
+`retry_after` window clears). One backed-off chat_id anywhere in a
+10-entry batch stalled delivery to every other, unrelated user in that
+same batch for the whole backoff duration -- a regression introduced by
+this session's own earlier ack-after-delivery fix, which made `process_one`
+await `done` in the first place (previously it acked immediately after
+enqueueing, which had its own, already-fixed data-loss problem).
+
+**Fixed**: added `_process_batch()`, grouping a batch's entries by
+`telegram_id` and running each user's group concurrently via
+`asyncio.gather` (`_drain_one_user()` per group). A single user's own
+notifications still process in their original stream order (each group is
+still a sequential `for` loop internally) -- only cross-user ordering
+becomes concurrent, so a 429 on one of a user's own messages can't let
+their own later message jump ahead, but it also can't stall a different
+user's message anymore. `run_forever()` now calls `_process_batch()`
+instead of looping inline.
+
+Added two tests to `tests/integration/test_notification_relay.py`:
+`test_relay_does_not_head_of_line_block_across_users` and
+`test_relay_preserves_per_user_order_when_processing_concurrently`. The
+first needed a controllable stand-in (`_SlowThenFastNotifier`) rather than
+the real `Notifier` -- an earlier attempt using a real `Notifier` with a
+`TelegramRetryAfter`-raising fake Telegram session turned out to race
+against `Notifier._run()`'s own internal queue-requeue scheduling (already
+covered by `tests/unit/test_notifier.py`), producing a flaky, hard-to-reason
+-about test that failed even against the fix on one run. The stub isolates
+exactly what this fix changed -- notification_relay.py's own batch
+concurrency -- by giving one chat_id a controlled 1-second delivery delay
+and asserting the other chat_id's delivery timestamp lands almost
+immediately rather than after it.
+
+Verified the regression test is real without relying on `git stash`: the
+fix introduced `_process_batch` as a new symbol, so reverting the file
+would just make the test fail with `AttributeError` rather than actually
+exercising the old buggy code path. Instead, wrote a throwaway script
+(deleted after use) that ran the literal old-code pattern -- a plain
+sequential `for` loop calling the real, unchanged `process_one()` -- against
+the same `_SlowThenFastNotifier` stub. Confirmed it reproduces the bug
+exactly: `a_delay=1.01s b_delay=1.01s` (B stalls behind A). The new fixed
+code, by contrast, delivers B in well under 0.3s regardless of A's delay.
+
+**Full clean-slate rebuild**: `mypy` clean (63 source files) → `pytest
+tests/` (723 passed, up from 721) → `-m load` (5 passed) → `-m chaos_infra`
+(1 passed) → `-m e2e` (7 passed). 736/736 total.
+
 ## 2026-08-25 — Fixed `SOCKET_TIMEOUT_SECONDS` colliding with the two `block=5000` stream reads
 
 Fresh `/code-review high` pass over this session's own 22 commits, run by two

@@ -15,6 +15,7 @@ own handlers).
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -94,6 +95,35 @@ async def process_next(
     return True
 
 
+async def _drain_one_user(
+    pool: asyncpg.Pool, redis: Redis, notifier: Notifier, entries: list[tuple[str, dict[str, str]]]
+) -> None:
+    for msg_id, fields in entries:
+        await process_one(pool, redis, notifier, msg_id=msg_id, fields=fields)
+
+
+async def _process_batch(
+    pool: asyncpg.Pool, redis: Redis, notifier: Notifier, entries: list[tuple[str, dict[str, str]]]
+) -> None:
+    # A code review pass caught that awaiting process_one() for each entry
+    # in turn made this a head-of-line-blocking loop: process_one() awaits
+    # notifier.send()'s returned future all the way to a terminal outcome,
+    # which for a chat currently in a Telegram 429 backoff can mean several
+    # retry/sleep cycles (see Notifier._run()). One backed-off chat_id in
+    # the batch used to stall delivery to every other, unrelated user in
+    # it for the whole backoff duration. Grouping by telegram_id and
+    # running each user's entries concurrently fixes that while still
+    # keeping a single user's own notifications in their original stream
+    # order (so a 429 on their first message can't let their second one
+    # jump ahead and arrive out of sequence).
+    by_user: dict[int, list[tuple[str, dict[str, str]]]] = {}
+    for msg_id, fields in entries:
+        by_user.setdefault(int(fields["telegram_id"]), []).append((msg_id, fields))
+    await asyncio.gather(
+        *(_drain_one_user(pool, redis, notifier, user_entries) for user_entries in by_user.values())
+    )
+
+
 async def run_forever(
     pool: asyncpg.Pool, redis: Redis, notifier: Notifier, *, consumer_name: str = "relay-1"
 ) -> None:
@@ -106,5 +136,4 @@ async def run_forever(
                 GROUP, consumer_name, {NOTIFICATIONS_STREAM: ">"}, count=10, block=5000
             )
             entries = _flatten(fresh)
-        for msg_id, fields in entries:
-            await process_one(pool, redis, notifier, msg_id=msg_id, fields=fields)
+        await _process_batch(pool, redis, notifier, entries)

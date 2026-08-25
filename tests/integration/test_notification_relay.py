@@ -23,6 +23,35 @@ from tests.integration.test_payments_deposits import _webhook as build_deposit_w
 from tests.integration.test_payout_worker import FakePayoutProvider
 
 
+class _SlowThenFastNotifier:
+    """A minimal stand-in for Notifier with fully controlled per-chat
+    timing, so a test can isolate notification_relay.py's OWN batch
+    -concurrency behavior from Notifier's own internal queue-scheduling
+    behavior (already covered by tests/unit/test_notifier.py). Matches
+    the same contract process_one() actually uses: send() returns a
+    future that resolves only once this chat's delivery reaches a
+    terminal outcome.
+    """
+
+    def __init__(self, *, slow_chat_id: int, slow_delay: float) -> None:
+        self._slow_chat_id = slow_chat_id
+        self._slow_delay = slow_delay
+        self.sent_at: dict[int, float] = {}
+
+    async def send(self, chat_id: int, text: str, **kwargs: object) -> asyncio.Future[None]:
+        loop = asyncio.get_running_loop()
+        done: asyncio.Future[None] = loop.create_future()
+
+        async def _resolve() -> None:
+            if chat_id == self._slow_chat_id:
+                await asyncio.sleep(self._slow_delay)
+            self.sent_at[chat_id] = loop.time()
+            done.set_result(None)
+
+        asyncio.create_task(_resolve())
+        return done
+
+
 async def _make_notifier() -> tuple[Notifier, object]:
     bot, session = make_bot()
     notifier = Notifier(bot)
@@ -252,5 +281,79 @@ async def test_admin_rejected_withdrawal_notifies_with_the_reason(pool, redis, c
         assert len(session.sent) == 1
         assert "300.00" in session.sent[0].text
         assert "account under review" in session.sent[0].text
+    finally:
+        await notifier.stop()
+
+
+async def test_relay_does_not_head_of_line_block_across_users(pool, redis, conn):
+    """A code review pass caught that run_forever() awaited process_one()
+    for each stream entry in turn, and process_one() awaits notifier.send()
+    all the way to a terminal outcome -- which for a chat currently in a
+    Telegram 429 backoff can mean several retry/sleep cycles (see
+    Notifier._run()). One backed-off chat_id in a batch used to stall
+    delivery to every other, unrelated user in that same batch for the
+    whole backoff duration. Queues user A's notification first, then
+    user B's right behind it, gives A's delivery a deliberately slow
+    (1s) terminal outcome via a controllable stub notifier, and confirms
+    B's delivery timestamp lands almost immediately rather than after
+    A's -- which is exactly what the old sequential `for ... await
+    process_one()` loop would have produced instead.
+    """
+    telegram_id_a = next_telegram_id()
+    telegram_id_b = next_telegram_id()
+    user_a = await _register(conn, telegram_id_a)
+    user_b = await _register(conn, telegram_id_b)
+
+    await notify_user(pool, redis, user_id=user_a, key="notify.you_won", amount="1.00")
+    await notify_user(pool, redis, user_id=user_b, key="notify.you_won", amount="2.00")
+
+    await notification_relay.ensure_group(redis)
+    pending = await redis.xreadgroup(
+        notification_relay.GROUP, f"test-{telegram_id_a}", {NOTIFICATIONS_STREAM: ">"}, count=10
+    )
+    entries = notification_relay._flatten(pending)
+    assert len(entries) == 2
+
+    notifier = _SlowThenFastNotifier(slow_chat_id=telegram_id_a, slow_delay=1.0)
+    start = asyncio.get_running_loop().time()
+    await notification_relay._process_batch(pool, redis, notifier, entries)
+
+    b_delay = notifier.sent_at[telegram_id_b] - start
+    a_delay = notifier.sent_at[telegram_id_a] - start
+    assert b_delay < 0.3, f"B was delayed {b_delay:.2f}s -- stalled behind A's slow delivery"
+    assert a_delay >= 1.0
+
+
+async def test_relay_preserves_per_user_order_when_processing_concurrently(pool, redis, conn):
+    """The head-of-line-blocking fix groups batch entries by telegram_id
+    and runs each user's group concurrently with the others -- but a
+    single user's own notifications must still arrive in their original
+    stream order, not race each other, since naive full concurrency
+    (one task per entry instead of one task per user) could let a later
+    message's DB language lookup finish before an earlier one's.
+    """
+    telegram_id = next_telegram_id()
+    user_id = await _register(conn, telegram_id)
+
+    await notify_user(pool, redis, user_id=user_id, key="notify.you_won", amount="1.00")
+    await notify_user(pool, redis, user_id=user_id, key="notify.you_won", amount="2.00")
+    await notify_user(pool, redis, user_id=user_id, key="notify.you_won", amount="3.00")
+
+    notifier, session = await _make_notifier()
+    try:
+        await notification_relay.ensure_group(redis)
+        pending = await redis.xreadgroup(
+            notification_relay.GROUP, f"test-{telegram_id}", {NOTIFICATIONS_STREAM: ">"}, count=10
+        )
+        entries = notification_relay._flatten(pending)
+        assert len(entries) == 3
+
+        await notification_relay._process_batch(pool, redis, notifier, entries)
+        await asyncio.sleep(0.2)
+
+        assert len(session.sent) == 3
+        assert "1.00" in session.sent[0].text
+        assert "2.00" in session.sent[1].text
+        assert "3.00" in session.sent[2].text
     finally:
         await notifier.stop()
