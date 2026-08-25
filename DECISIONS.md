@@ -5,6 +5,49 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Fixed `rate_limit.allow()` to fail closed on a Redis error
+
+Eighth follow-up to the full-platform `/code-review` entry.
+
+**The bug**: `allow()` had no try/except of its own around its single
+`redis.eval()` call. Every caller in the codebase (`services/gateway
+/connection.py`'s per-message `WS_MESSAGES` check, `take_card`/`claim`'s
+per-action checks, `deposits.py`'s `DEPOSIT` cap, `admin/auth.py`'s
+`ADMIN_LOGIN` throttle) calls it with no try/except of its own either,
+trusting it to just return `True`/`False`. The worst-hit caller is
+`connection.py`'s `_message_loop()`: an unhandled exception there isn't
+caught anywhere before it reaches that method's own top-level
+`while True:`, so a single transient Redis hiccup on one WS message check
+-- not a real outage, just one flaky round-trip -- killed that player's
+*entire* connection, not just the one action that happened to hit it.
+
+**Fixed**: wrapped the `redis.eval()` call in `try/except Exception`,
+logging via `structlog` and returning `False` (fail closed) on any error.
+Every existing caller's ordinary "if not allowed: send a rate_limited
+error and keep going" path already does the right thing with that,
+so no caller needed to change. Considered failing open instead
+(treating a Redis error as "allowed") and rejected it: this bucket set
+includes `ADMIN_LOGIN`'s brute-force throttle and `DEPOSIT`'s
+financial-abuse cap, both real security controls, and this whole
+platform already has no path to function at all without Redis (room
+locking, session/command dispatch), so failing closed here doesn't
+meaningfully worsen a genuine outage -- it only changes the outcome for
+the transient-blip case this fix actually targets.
+
+**Regression test confirmed against the unfixed code before trusting
+it**: monkeypatched `redis.eval` to raise `ConnectionError`, matching the
+exact technique the `room_lock.py` fix earlier in this arc already used
+for the same class of bug. Against the pre-fix code the exception
+propagated straight out of `allow()` uncaught, exactly as described,
+before being fixed and reconfirmed.
+
+Full clean-slate rebuild: `docker compose down -v` / `up -d`, migrations
+clean, mypy clean across 63 source files, `pytest tests/` 693 passed / 13
+deselected (up from 692), `-m load` 5 passed, `-m chaos_infra` 1 passed
+(its own deliberately-simulated Redis-connection-reset chaos scenario
+prints an expected traceback to the log, not a failure), `-m e2e` 7
+passed.
+
 ## 2026-08-25 — Fixed the loss-cap TOCTOU race across concurrent joins in different rooms
 
 Seventh follow-up to the full-platform `/code-review` entry -- the first

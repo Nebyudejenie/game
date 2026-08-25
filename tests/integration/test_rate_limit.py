@@ -108,6 +108,25 @@ async def test_cost_can_consume_more_than_one_token(redis):
     assert await rate_limit.allow(redis, scope, key, cost=3.0, **bucket) is True
 
 
+async def test_a_redis_error_fails_closed_instead_of_raising(redis, monkeypatch):
+    # A code review pass caught that allow() had no try/except of its own,
+    # so a single transient Redis error didn't just deny that one request
+    # -- it propagated as an unhandled exception all the way up. In
+    # services/gateway/connection.py's per-message WS_MESSAGES check in
+    # particular, that exception isn't caught anywhere between there and
+    # _message_loop()'s top-level `while True:`, so one flaky Redis
+    # round-trip killed that player's *entire* connection, not just the
+    # one action that happened to hit the blip.
+    scope, key = _bucket()
+    bucket = {"capacity": 10, "refill_per_second": _NEGLIGIBLE_REFILL}
+
+    async def flaky_eval(*args, **kwargs):
+        raise ConnectionError("simulated Redis blip")
+
+    monkeypatch.setattr(redis, "eval", flaky_eval)
+    assert await rate_limit.allow(redis, scope, key, **bucket) is False
+
+
 def test_spec_bucket_constants_match_section_9_2():
     # A regression guard against a silent typo changing a real security
     # control -- spec 9.2: "claim 5/round, take_card 10/min, deposit

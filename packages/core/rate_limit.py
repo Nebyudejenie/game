@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import time
 
+import structlog
 from redis.asyncio import Redis
+
+logger = structlog.get_logger()
 
 _TOKEN_BUCKET_SCRIPT = """
 local capacity = tonumber(ARGV[1])
@@ -62,17 +65,38 @@ async def allow(
 ) -> bool:
     """True if a request against this bucket is allowed right now (and
     consumes `cost` tokens), False if the bucket doesn't have enough.
+
+    Fails closed (returns False) if Redis itself errors -- a code review
+    pass caught that every caller here (services/gateway/connection.py's
+    per-message WS_MESSAGES check in particular) had no try/except of its
+    own, so an unhandled exception from a single transient Redis hiccup
+    didn't just deny that one action, it killed that connection's whole
+    message loop, disconnecting the player outright over a blip that had
+    nothing to do with them. Failing closed here means every existing
+    caller's ordinary "if not allowed: send a rate_limited error and keep
+    going" path already handles a Redis error correctly, with no caller
+    changes needed. Rejected failing open (treating a Redis error as
+    "allowed"): this bucket set includes ADMIN_LOGIN's brute-force
+    throttle and DEPOSIT's financial-abuse cap, and this platform already
+    has no path to function at all without Redis (round locking, session
+    state), so failing closed here doesn't meaningfully worsen a real
+    outage -- it only changes behavior for the transient-blip case this
+    fix actually targets.
     """
     now = time.time()
-    result = await redis.eval(
-        _TOKEN_BUCKET_SCRIPT,
-        1,
-        f"rl:{scope}:{key}",
-        capacity,
-        refill_per_second,
-        now,
-        cost,
-    )
+    try:
+        result = await redis.eval(
+            _TOKEN_BUCKET_SCRIPT,
+            1,
+            f"rl:{scope}:{key}",
+            capacity,
+            refill_per_second,
+            now,
+            cost,
+        )
+    except Exception:
+        logger.warning("rate_limit_redis_error", scope=scope, key=key)
+        return False
     return bool(result)
 
 
