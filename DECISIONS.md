@@ -5,6 +5,48 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Restored a dropped assertion in `test_small_amount_auto_approved_and_enqueued`
+
+Eighth and last straightforward item from the same fresh `/code-review
+high` pass; the remaining catalogue is lower-priority/more speculative
+findings, left for a future pass rather than worked mechanically now.
+
+**The gap**: this test only checked that funds left `user_cash`
+(`_cash(conn, user_id) == Decimal("900.00")`) after a small, auto-approved
+withdrawal, never that they actually landed in `user_locked` -- the sibling
+test for the review path (`test_amount_above_auto_approve_limit_goes_to_
+review`) already checks exactly that (`_locked == 3000.00`, with its own
+comment: "funds are still locked immediately, review or not -- only the
+payout dispatch is deferred, never the fund lock"), but the auto-approved
+path's own test never carried the matching assertion. Without it, a bug
+that made funds vanish, double-deduct, or land somewhere other than
+`user_locked` on this specific path (small-amount, auto-approved) would
+have passed this test silently.
+
+**Fixed**: added `assert await _locked(conn, user_id) == Decimal("100.00")`,
+matching the sibling test's pattern exactly.
+
+Test-only change with no corresponding production bug to reproduce, so the
+usual "revert and confirm failure" step doesn't apply the same way here --
+confirmed instead that the new assertion passes against the real,
+already-correct `request_withdrawal()` behavior.
+
+**Full clean-slate rebuild**: `mypy` clean (63 source files) → `pytest
+tests/` (728 passed, same count -- an assertion added to an existing test,
+not a new one) → `-m load` (5/5 passed in isolation; the full-batch run hit
+the same already-documented shared-host-contention flake in
+`test_gateway_fanout.py::test_stalled_reader_does_not_delay_other_sockets`,
+unrelated to this change) → `-m chaos_infra` (1 passed) → `-m e2e`: the
+first full-batch run hit two failures
+(`test_miniapp_full_gameplay_flow`, `test_history_tab_shows_a_completed_
+round`), both the same `#screen-game.active` selector timeout -- traced to
+running the e2e batch immediately after chaos_infra's own deliberate Redis
+restart (confirmed via `docker ps` showing `jobingo-redis-1` "Up 2
+minutes"), compounding the already-known shared-host contention rather
+than a real regression from a test-only assertion addition unrelated to
+the miniapp. Reran the full `-m e2e` batch once more, further removed from
+that restart: 7/7 passed clean. 741/741 real passes.
+
 ## 2026-08-25 — `retention_cohorts` now buckets weeks using Ethiopia time, not UTC
 
 Seventh fix from the same fresh `/code-review high` pass.

@@ -133,6 +133,11 @@ async def test_small_amount_auto_approved_and_enqueued(pool, redis, conn):
     status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", intent.payment_id)
     assert status == "approved"
     assert await _cash(conn, user_id) == Decimal("900.00")
+    # Not just missing from cash -- genuinely locked, not lost or double
+    # -deducted. Same invariant test_amount_above_auto_approve_limit_goes_
+    # to_review checks for the review path: funds lock immediately either
+    # way, only the payout dispatch differs.
+    assert await _locked(conn, user_id) == Decimal("100.00")
 
 
 async def test_request_withdrawal_pushes_a_live_balance_update(pool, redis, conn):
