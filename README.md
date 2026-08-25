@@ -558,6 +558,15 @@ because of a wrong assumption about the shared test environment's Chapa
 credentials, caught by actually introspecting the failure rather than
 loosening the assertion.
 
+**`rate_limit.py` itself had zero test coverage** before
+`tests/integration/test_rate_limit.py` — no existing test anywhere sent
+enough rapid requests to trip any bucket, so the module's actual
+behavior was never directly verified. Covers capacity/rejection,
+time-based refill, independent buckets per key and per scope, and —
+the real point of the Lua script — 50 genuinely concurrent requests
+against a capacity-10 bucket letting through exactly 10, never more.
+See `DECISIONS.md`.
+
 **Phone numbers encrypted at rest (spec section 9.2):**
 `packages/core/phone_crypto.py` stores every phone number as two derived
 values instead of plaintext — AES-256-GCM ciphertext

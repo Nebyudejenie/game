@@ -5,6 +5,35 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-24 — Closed a real test-coverage gap: `packages/core/rate_limit.py` had zero tests
+
+Found while looking for the next genuinely buildable, non-business-parameter-blocked
+gap: not a single test file anywhere in the codebase referenced `rate_limit`
+at all -- confirmed by grep, not assumed. The token-bucket rate limiter is
+spec section 9.2's explicit security control ("claim 5/round, take_card
+10/min, deposit 5/hour, WS messages 30/s"), and no existing gateway or
+deposit test happens to send enough rapid requests to hit any of these
+limits, so the module's actual behavior -- including the one thing the Lua
+script exists to guarantee, that concurrent requests against the same
+bucket can never over-grant tokens -- had never been verified, only
+exercised incidentally as a side effect of other tests never happening to
+trip it.
+
+`tests/integration/test_rate_limit.py`: capacity/rejection, time-based
+refill, independent buckets per key and per scope, a cost > 1 token
+request, and the real concurrency test this module is actually built
+for -- 50 genuinely concurrent `asyncio.gather()`'d requests against a
+capacity-10 bucket let through exactly 10, never 11+, which would only be
+possible if the Lua script's read-refill-check-consume cycle weren't
+truly atomic. A final regression guard asserts the exact `WS_MESSAGES`/
+`TAKE_CARD`/`CLAIM`/`DEPOSIT` constant values match spec 9.2's numbers
+literally, since nothing else in the codebase would catch one of these
+security-relevant constants quietly drifting from a typo.
+
+Full clean-slate rebuild: mypy clean across 63 source files, `pytest
+tests/` 657 passed / 13 deselected (up from 650), `-m load` 5 passed,
+`-m chaos_infra` 1 passed, `-m e2e` 7 passed.
+
 ## 2026-08-24 — Admin reports: player LTV and retention cohorts (spec section 11)
 
 Spec section 11's Reports screen lists "Daily GGR, player LTV, retention
