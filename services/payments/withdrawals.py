@@ -216,3 +216,38 @@ async def request_withdrawal(
 
 async def enqueue_payout(redis: Redis, *, our_ref: str, payment_id: int) -> None:
     await redis.xadd(PAYOUT_STREAM, {"our_ref": our_ref, "payment_id": str(payment_id)})
+
+
+async def sweep_stuck_approved_payouts(
+    pool: asyncpg.Pool, redis: Redis, *, older_than_seconds: int = 60
+) -> list[int]:
+    """Re-enqueues any 'approved' withdrawal that's been sitting for a
+    while with no corresponding payout ever dispatched -- a real gap a
+    code review pass caught: enqueue_payout() (the Redis XADD) runs
+    *after* request_withdrawal()'s own DB transaction commits, not inside
+    it (Redis isn't part of that transaction). A crash or a Redis blip in
+    the narrow window between the commit and the XADD leaves a withdrawal
+    stuck at status='approved' forever -- funds already locked out of
+    user_cash, but nothing ever queued to actually pay them out, and
+    nothing else sweeps for this.
+
+    Safe to run on a timer regardless of whether the original enqueue
+    landed too, the same "poll as a fallback, not a replacement" design
+    services/payments/deposits.py's poll_pending_deposits() already uses:
+    a redundant re-enqueue for a withdrawal already sitting in the stream
+    is a structural no-op on the processing side --
+    payout_worker.process_one()'s own first check
+    (payment.status not in _PENDING_STATUSES) safely skips anything
+    already settled, and Chapa's own our_ref idempotency covers a
+    still-pending one being dispatched to create_payout() more than once.
+    Returns the payment ids this pass actually re-enqueued.
+    """
+    rows = await pool.fetch(
+        "SELECT id, our_ref FROM payments WHERE direction = 'out' AND status = $1 "
+        "AND updated_at < now() - make_interval(secs => $2)",
+        STATUS_APPROVED,
+        older_than_seconds,
+    )
+    for row in rows:
+        await enqueue_payout(redis, our_ref=row["our_ref"], payment_id=row["id"])
+    return [row["id"] for row in rows]

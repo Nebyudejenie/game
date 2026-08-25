@@ -13,7 +13,8 @@ import pytest
 
 from packages.core import ledger
 from services.engine.round_engine import RoundEngine, load_room_config
-from services.payments import withdrawals
+from services.payments import payout_worker, withdrawals
+from services.payments.provider import PayoutResult
 from tests.integration.conftest import create_funded_user, create_room, create_user
 
 MIN_WITHDRAW = Decimal("50.00")
@@ -36,6 +37,11 @@ class _NullProvider:
 
     async def create_payout(self, **kwargs):
         raise NotImplementedError
+
+
+class _AlwaysSucceedsProvider(_NullProvider):
+    async def create_payout(self, *, method, amount, our_ref):
+        return PayoutResult(provider_ref=f"chapa-{our_ref}", status="succeeded", raw_response={})
 
 
 async def _cash(conn, user_id: int) -> Decimal:
@@ -127,7 +133,61 @@ async def test_small_amount_auto_approved_and_enqueued(pool, redis, conn):
     status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", intent.payment_id)
     assert status == "approved"
     assert await _cash(conn, user_id) == Decimal("900.00")
-    assert await _locked(conn, user_id) == Decimal("100.00")
+
+
+async def test_sweep_re_enqueues_an_approved_payout_that_never_got_queued(pool, redis, conn, monkeypatch):
+    # Regression: a real code review pass caught that enqueue_payout()
+    # (the Redis XADD) runs *after* request_withdrawal()'s own DB
+    # transaction commits, not inside it -- a crash or a Redis blip in
+    # that narrow window leaves a withdrawal stuck at status='approved'
+    # forever: funds already locked out of user_cash, but nothing ever
+    # queued to actually pay them out. Simulates the crash directly by
+    # no-op'ing enqueue_payout for this one call, rather than trying to
+    # actually crash a process mid-request -- scoped to just this one
+    # call (monkeypatch.context()) since sweep_stuck_approved_payouts()
+    # itself calls the very same module-level enqueue_payout() to do its
+    # actual job, and a patch left in place would silently no-op that
+    # too, making the rest of this test check nothing real.
+    # This session's shared dev database accumulates real "approved"
+    # withdrawal rows across every prior test run, so assertions here
+    # check membership for *this* test's own payment_id, not exact
+    # counts -- an ambient old row from hours ago legitimately matching
+    # the same sweep query is a real cross-test-pollution risk this
+    # session has hit before (reconcile_job's idempotency keys, rate_
+    # limit TTLs, LTV leaderboard ranking), not a hypothetical one.
+    with monkeypatch.context() as m:
+        m.setattr(withdrawals, "enqueue_payout", lambda *a, **kw: asyncio.sleep(0))
+        user_id = await create_funded_user(conn, Decimal("1000.00"))
+        intent = await _request(pool, redis, conn, user_id, Decimal("100.00"))
+    assert intent.status == withdrawals.STATUS_APPROVED
+
+    # Not yet old enough -- the sweep must not touch a withdrawal that's
+    # simply mid-flight through the normal enqueue path.
+    swept_too_soon = await withdrawals.sweep_stuck_approved_payouts(pool, redis, older_than_seconds=3600)
+    assert intent.payment_id not in swept_too_soon
+
+    await conn.execute(
+        "UPDATE payments SET updated_at = now() - interval '2 hours' WHERE id = $1", intent.payment_id
+    )
+
+    swept = await withdrawals.sweep_stuck_approved_payouts(pool, redis, older_than_seconds=3600)
+    assert intent.payment_id in swept
+
+    # And it's a real, processable entry -- not just a stream write that
+    # looks right but doesn't actually let the payout worker do anything
+    # with it. Calling process_one() directly with this payment's own
+    # our_ref (rather than process_next(), which would read whatever
+    # stream entry happens to be next -- possibly an unrelated ambient
+    # one from the same shared stream) proves this specific re-enqueued
+    # payout is genuinely processable, unambiguously.
+    provider = _AlwaysSucceedsProvider()
+    outcome = await payout_worker.process_one(
+        pool, redis, provider, msg_id="0-0", our_ref=intent.our_ref
+    )
+    assert outcome == "succeeded"
+    status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", intent.payment_id)
+    assert status == "succeeded"
+    assert await _locked(conn, user_id) == Decimal("0.00")
 
 
 async def test_amount_above_auto_approve_limit_goes_to_review(pool, redis, conn):

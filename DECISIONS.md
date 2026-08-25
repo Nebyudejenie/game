@@ -5,6 +5,122 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Fixed `payout_worker.py`'s consumer-name-locked crash recovery via XAUTOCLAIM
+
+Sixth follow-up to the full-platform `/code-review` entry, and the second
+of two payout-pipeline gaps fixed in this pass (the other is the
+`sweep_stuck_approved_payouts` entry directly below).
+
+**The bug**: `process_next()`/`run_forever()`'s only crash-recovery step
+was `xreadgroup(GROUP, consumer_name, {PAYOUT_STREAM: "0"})` -- re-reading
+*this exact consumer's own* pending-entries list. That recovers a crashed
+worker's in-flight job only if its replacement happens to come back up
+under the identical consumer name. Real worker fleets don't guarantee
+that -- a hostname- or PID-derived consumer name is the normal case, and
+this codebase's own `consumer_name` parameter defaults to a literal
+`"worker-1"` with no uniqueness guarantee across replicas in the first
+place. Once a different consumer name picked up a job and then died
+before acking, that stream entry sat in the dead consumer's PEL forever,
+invisible to every other consumer's own-pending-only read, and invisible
+to a fresh read too (`xreadgroup ">"` only returns entries never before
+delivered to *any* consumer in the group) -- a withdrawal stuck mid-payout
+indefinitely, funds already out of `user_cash`, no automatic path back.
+Confirmed this behavior directly (not assumed): manually had a
+`"worker-a"` consumer claim a job and never ack it, then called the
+*pre-fix* `process_next(..., consumer_name="worker-b")` against the real
+dev Redis -- it returned `None`, not an error, silently reporting nothing
+to do.
+
+**Fixed**: added `_claim_stale_entries()`, using `XAUTOCLAIM` to reclaim
+entries idle longer than a threshold (`CLAIM_STALE_AFTER_MS = 60_000`,
+matching this codebase's other "how long before we call it crashed"
+thresholds) from *any* consumer in the group, not just `consumer_name`'s
+own. Wired into `process_next()`/`run_forever()` as a middle step: this
+consumer's own pending first, then a stale cross-consumer entry, then a
+genuinely new one. Both functions gained a `claim_stale_after_ms`
+parameter (default `CLAIM_STALE_AFTER_MS`) so tests can drive the claim
+deterministically instead of waiting out a real 60 seconds.
+
+**Verified XAUTOCLAIM's actual return shape against the real dev Redis**
+rather than assumed from documentation: `[next_cursor, [(id, fields),
+...], [deleted_ids]]` -- the middle element already matches `_flatten()`'s
+existing `(msg_id, fields)` tuple shape, so no reshaping was needed in
+`_claim_stale_entries()`.
+
+**Regression test, and why it's a real one**: had a `"worker-a"` consumer
+claim a job via a direct `xreadgroup(..., ">")` (simulating a crash right
+after pickup, never acking), then confirmed a *different* consumer,
+`"worker-b"`, via `process_next(..., claim_stale_after_ms=0)`, correctly
+claims and settles it. Deliberately reverted the fix
+(`git stash push -- services/payments/payout_worker.py`) and reran: the
+test failed as expected -- not just a superficial failure, either, since
+the reverted signature doesn't even accept `claim_stale_after_ms` at all
+(`TypeError: process_next() got an unexpected keyword argument`). To make
+sure that TypeError wasn't masking whether the *actual* underlying bug
+would otherwise have gone undetected, re-ran the same crash scenario
+manually against the real dev Redis using only the pre-fix function
+signature (no `claim_stale_after_ms` argument at all): `worker-b`'s
+`process_next()` returned `None` -- confirming the fix addresses a real,
+reproducible gap and not just a signature mismatch -- before restoring
+the fix (`git stash pop`).
+
+Full clean-slate rebuild: `docker compose down -v` / `up -d`, migrations
+clean, mypy clean across 63 source files, `pytest tests/` 691 passed / 13
+deselected (up from 689 -- this fix's test plus the sweep test below),
+`-m load` 5 passed, `-m chaos_infra` 1 passed, `-m e2e` 7 passed (one
+transient Playwright `Page.wait_for_selector` timeout on
+`test_history_tab_shows_a_completed_round` in the full-suite run, passed
+cleanly both alone and on a full-suite rerun -- a UI-timing flake in a
+Mini App wallet test entirely disjoint from this payout-worker change,
+not a regression from it).
+
+## 2026-08-25 — Fixed `withdrawals.py`'s post-commit `enqueue_payout` gap with a sweep
+
+Fifth follow-up to the full-platform `/code-review` entry, and the first
+of two payout-pipeline gaps fixed in this pass.
+
+**The bug**: `request_withdrawal()` commits the DB transaction that locks
+funds and sets a withdrawal to `status='approved'`, then calls
+`enqueue_payout()` (a Redis `XADD`) *afterward*, outside that transaction
+-- Redis isn't part of it. A crash or a Redis blip in the narrow window
+between the commit and the `XADD` leaves a withdrawal stuck at
+`'approved'` forever: funds already moved out of `user_cash` into
+`user_locked`, but nothing ever queued to actually dispatch the payout,
+and nothing else in the codebase swept for this.
+
+**Fixed**: added `sweep_stuck_approved_payouts(pool, redis, *,
+older_than_seconds=60)`, the same "poll as a fallback, not a replacement"
+design `deposits.py`'s `poll_pending_deposits()` already uses -- queries
+for `status='approved'` payments whose `updated_at` is older than the
+threshold and re-enqueues them. Safe to run redundantly against a
+withdrawal that *did* enqueue successfully: `payout_worker.process_one()`
+already skips anything no longer in a pending status, and Chapa's own
+`our_ref` idempotency covers a still-pending one being dispatched twice.
+Returns the list of payment ids actually swept (not a count), matching
+`recovery.py`'s `recover_orphaned_rounds()` convention -- deliberately,
+so tests (and any future caller) can assert membership rather than an
+exact total against this session's long-lived, ever-growing shared test
+database.
+
+**Two real testing pitfalls hit and fixed while writing the regression
+test** (both worth recording since they're specific to this codebase's
+shared dev database and module-level function design, not one-off
+mistakes): (1) `monkeypatch.setattr(withdrawals, "enqueue_payout", noop)`
+left in place for the whole test silently no-op'd the *sweep's own*
+internal call to the same module-level name too, since both
+`request_withdrawal()` and `sweep_stuck_approved_payouts()` resolve
+`enqueue_payout` the same way at call time -- fixed by scoping the patch
+with `monkeypatch.context()` around only the one call meant to simulate
+the crash. (2) an exact-count assertion (`swept_too_soon == 0`) failed
+against real ambient `'approved'` rows left over from hours earlier in
+this same long-running session's shared database that also matched the
+sweep's own filter -- fixed by switching `sweep_stuck_approved_payouts`'s
+return type to `list[int]` (see above) and asserting membership
+(`intent.payment_id in swept`) instead.
+
+Full clean-slate rebuild: covered by the same rebuild run recorded in the
+XAUTOCLAIM entry above -- both fixes landed in the same commit.
+
 ## 2026-08-25 — Fixed `recovery.py`'s room-vs-round orphan detection gap
 
 Fourth follow-up to the full-platform `/code-review` entry.

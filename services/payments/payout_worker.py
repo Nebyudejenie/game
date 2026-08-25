@@ -1,7 +1,12 @@
 """Payout worker (spec section 8.3 steps 5-8, Prompt 8): consumes the
 'payouts' Redis Stream with a real consumer group so more than one worker
 replica can safely share the queue, and so a crashed worker's in-flight job
-gets redelivered rather than lost.
+gets redelivered rather than lost -- to *any* live consumer, not only a
+replacement process that happens to reuse the exact same consumer name
+(XAUTOCLAIM in process_next()/run_forever() reclaims a stale entry from
+whichever consumer originally owned it once it's been idle too long; a
+real gap a code review pass caught, since the original crash-recovery
+check only ever looked at the *current* consumer's own pending list).
 
 Exactly-once semantics for the *provider* call are the provider's job, not
 ours: our_ref is passed as Chapa's own idempotency reference (spec:
@@ -33,6 +38,16 @@ _tracer = tracing.get_tracer(__name__)
 
 GROUP = "payout-workers"
 _PENDING_STATUSES = ("approved", "processing")
+# How long a stream entry can sit unacked in another consumer's PEL before
+# XAUTOCLAIM will steal it -- long enough that a normal in-flight job (a
+# real Chapa call, httpx timeout=15.0 elsewhere in this module) is never
+# prematurely reclaimed out from under a consumer that's still actually
+# working on it; matches this codebase's other "how long before we
+# consider something possibly crashed" thresholds (services/payments/
+# deposits.py's poll_pending_deposits(), withdrawals.py's
+# sweep_stuck_approved_payouts(), both default to a similar order of
+# magnitude).
+CLAIM_STALE_AFTER_MS = 60_000
 
 
 async def ensure_group(redis: Redis) -> None:
@@ -183,19 +198,54 @@ def _flatten(streams: Any) -> list[tuple[str, dict[str, str]]]:
     return entries
 
 
+async def _claim_stale_entries(
+    redis: Redis, consumer_name: str, *, count: int, min_idle_time: int
+) -> list[tuple[str, dict[str, str]]]:
+    """XAUTOCLAIMs entries idle longer than min_idle_time ms from *any*
+    consumer in the group, not just consumer_name's own pending list --
+    the cross-consumer half of crash recovery process_next()'s own "this
+    consumer's own pending entries first" step can't provide on its own.
+    Confirmed directly against this codebase's real Redis version, not
+    assumed from docs: XAUTOCLAIM returns
+    [next_cursor, [(id, fields), ...], [deleted_ids]] -- the middle
+    element is already in the exact (msg_id, fields) shape _flatten()
+    produces, so no reshaping is needed here.
+    """
+    _cursor, claimed, _deleted = await redis.xautoclaim(
+        PAYOUT_STREAM,
+        GROUP,
+        consumer_name,
+        min_idle_time=min_idle_time,
+        start_id="0-0",
+        count=count,
+    )
+    return list(claimed)
+
+
 async def process_next(
-    pool: asyncpg.Pool, redis: Redis, provider: PaymentProvider, *, consumer_name: str = "worker-1"
+    pool: asyncpg.Pool,
+    redis: Redis,
+    provider: PaymentProvider,
+    *,
+    consumer_name: str = "worker-1",
+    claim_stale_after_ms: int = CLAIM_STALE_AFTER_MS,
 ) -> str | None:
-    """Processes at most one job: this consumer's own still-pending entries
-    first (crash recovery under the same consumer name), then a genuinely
-    new one. Returns the outcome, or None if the stream was empty. Built as
-    a single-shot step so tests can drive it deterministically instead of
-    racing a background loop.
+    """Processes at most one job, in order: this consumer's own still-
+    pending entries (crash recovery under the same consumer name), then a
+    stale entry claimed from a *different*, possibly-dead consumer (cross
+    -consumer crash recovery), then a genuinely new one. Returns the
+    outcome, or None if the stream was empty. Built as a single-shot step
+    so tests can drive it deterministically instead of racing a
+    background loop.
     """
     await ensure_group(redis)
 
     pending = await redis.xreadgroup(GROUP, consumer_name, {PAYOUT_STREAM: "0"}, count=1)
     entries = _flatten(pending)
+    if not entries:
+        entries = await _claim_stale_entries(
+            redis, consumer_name, count=1, min_idle_time=claim_stale_after_ms
+        )
     if not entries:
         fresh = await redis.xreadgroup(GROUP, consumer_name, {PAYOUT_STREAM: ">"}, count=1)
         entries = _flatten(fresh)
@@ -207,12 +257,21 @@ async def process_next(
 
 
 async def run_forever(
-    pool: asyncpg.Pool, redis: Redis, provider: PaymentProvider, *, consumer_name: str = "worker-1"
+    pool: asyncpg.Pool,
+    redis: Redis,
+    provider: PaymentProvider,
+    *,
+    consumer_name: str = "worker-1",
+    claim_stale_after_ms: int = CLAIM_STALE_AFTER_MS,
 ) -> None:
     await ensure_group(redis)
     while True:
         pending = await redis.xreadgroup(GROUP, consumer_name, {PAYOUT_STREAM: "0"}, count=10)
         entries = _flatten(pending)
+        if not entries:
+            entries = await _claim_stale_entries(
+                redis, consumer_name, count=10, min_idle_time=claim_stale_after_ms
+            )
         if not entries:
             fresh = await redis.xreadgroup(
                 GROUP, consumer_name, {PAYOUT_STREAM: ">"}, count=10, block=5000

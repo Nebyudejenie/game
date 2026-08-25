@@ -153,6 +153,43 @@ async def test_crashed_worker_job_is_redelivered_and_settles_exactly_once(pool, 
     assert await _cash(conn, user_id) == Decimal("300.00")
 
 
+async def test_a_stale_job_left_by_a_dead_consumer_is_claimed_by_a_different_one(pool, redis, conn):
+    """The crash-redelivery test above covers a replacement process that
+    reuses the *same* consumer name -- process_next()'s own "this
+    consumer's own pending entries" xreadgroup(..., "0") step handles that
+    case on its own. This covers the other half a code review pass caught:
+    a replacement process that (as is normal for a fleet -- hostname- or
+    pid-derived consumer names) comes up under a *different* consumer name
+    has no way to see the crashed consumer's PEL through that same-name
+    read -- only XAUTOCLAIM, scanning the whole group, can hand it over.
+    """
+    user_id = await create_funded_user(conn, Decimal("500.00"))
+    our_ref = await _approved_withdrawal(pool, redis, conn, user_id, Decimal("200.00"))
+
+    # Simulate "worker-a" claiming the job and then dying before acking --
+    # ensure_group() first, matching what process_next() itself would do,
+    # since this reads directly rather than going through process_next().
+    await payout_worker.ensure_group(redis)
+    claimed_by_a = await redis.xreadgroup(
+        payout_worker.GROUP, "worker-a", {payout_worker.PAYOUT_STREAM: ">"}, count=1
+    )
+    assert payout_worker._flatten(claimed_by_a)  # worker-a really did pick it up
+
+    provider = FakePayoutProvider()
+    # A *different* consumer -- claim_stale_after_ms=0 so the test doesn't
+    # need to wait out the real 60s threshold to prove the mechanism works.
+    outcome = await payout_worker.process_next(
+        pool, redis, provider, consumer_name="worker-b", claim_stale_after_ms=0
+    )
+    assert outcome == "succeeded"
+    assert provider.call_count[our_ref] == 1
+
+    assert await _locked(conn, user_id) == Decimal("0.00")
+    assert await _cash(conn, user_id) == Decimal("300.00")
+    status = await conn.fetchval("SELECT status FROM payments WHERE our_ref = $1", our_ref)
+    assert status == "succeeded"
+
+
 async def test_a_second_job_for_an_already_settled_payment_is_a_safe_noop(pool, redis, conn):
     user_id = await create_funded_user(conn, Decimal("500.00"))
     our_ref = await _approved_withdrawal(pool, redis, conn, user_id, Decimal("200.00"))
