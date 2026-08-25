@@ -63,6 +63,7 @@ class RoomLock:
         self._refresh_interval_seconds = refresh_interval_seconds
         self._refresh_task: asyncio.Task[None] | None = None
         self._held = False
+        self._last_refreshed_at = 0.0
 
     @property
     def key(self) -> str:
@@ -86,6 +87,7 @@ class RoomLock:
         )
         self._held = bool(ok)
         if self._held:
+            self._last_refreshed_at = asyncio.get_running_loop().time()
             self._refresh_task = asyncio.create_task(self._refresh_loop())
         return self._held
 
@@ -104,18 +106,50 @@ class RoomLock:
                 # forever -- even after the real Redis TTL key expired on
                 # schedule and a second engine legitimately acquired the
                 # same room, both engines would then believe they alone
-                # owned it. Treated identically to "someone else already
-                # holds this lock": relinquish immediately. This module's
-                # own docstring already frames losing the lock as the
-                # *safe* outcome of a refresh failure -- a real Redis
-                # error is just one more reason refreshing can fail, not
-                # a special case that should leave ownership ambiguous.
+                # owned it.
+                #
+                # A second code review pass caught that the fix above then
+                # over-corrected: relinquishing on the *very first* failed
+                # eval treated one recoverable blip (a single bad
+                # round-trip, well within the TTL) identically to a real
+                # outage. A failed eval doesn't touch the Redis key itself
+                # (only a DEL removes it), so this worker still
+                # legitimately owns the room right up until the key's own
+                # TTL -- but relinquishing early made it voluntarily
+                # abandon a room it still owns, and because the key was
+                # never deleted, no *other* engine could take over either
+                # until that orphaned key expired on its own. Every player
+                # in the room would stall for up to ttl_seconds over a
+                # blip that would have cleared by the very next scheduled
+                # refresh.
+                #
+                # Retrying is only safe while we can still be certain the
+                # real Redis-side TTL hasn't lapsed: self._last_refreshed_at
+                # is the last point ownership was actually confirmed and
+                # that TTL reset, so elapsed time since then is an exact
+                # lower bound on how much of it is left. A margin of one
+                # full refresh interval below ttl_seconds keeps this
+                # conservative -- by the time this gives up, the real key
+                # (barring clock skew) still has that much time left,
+                # never claiming ownership past a point Redis itself might
+                # already disagree with.
+                elapsed = asyncio.get_running_loop().time() - self._last_refreshed_at
+                retry_margin = self._ttl_seconds - self._refresh_interval_seconds
+                if elapsed < retry_margin:
+                    logger.warning(
+                        "room_lock_refresh_failed_retrying",
+                        room_id=self._room_id,
+                        elapsed_seconds=elapsed,
+                        exc_info=True,
+                    )
+                    continue
                 logger.warning("room_lock_refresh_failed", room_id=self._room_id, exc_info=True)
                 self._held = False
                 return
             if not refreshed:
                 self._held = False
                 return
+            self._last_refreshed_at = asyncio.get_running_loop().time()
 
     async def release(self) -> None:
         if self._refresh_task is not None:

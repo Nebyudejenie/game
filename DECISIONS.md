@@ -5,6 +5,62 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — `room_lock.py` now tolerates one transient Redis error instead of relinquishing immediately
+
+Fifth fix from the same fresh `/code-review high` pass. High-stakes area
+(game-engine room ownership), so treated with extra care rather than
+applied mechanically.
+
+**The bug**: an earlier fix this session made `_refresh_loop()` relinquish
+ownership (`self._held = False`, stop looping) on *any* exception from the
+refresh `eval()` call, to close a genuine split-brain risk (an unhandled
+error used to kill the task before `self._held = False` ran, so `is_held()`
+reported `True` forever even after the real key expired and a second
+engine legitimately took over). That fix over-corrected: a single
+transient blip -- one bad round-trip, nowhere near the actual TTL --
+now made a perfectly healthy engine voluntarily abandon a room it still
+legitimately owns. Worse, a failed `eval()` never touches the Redis key
+itself (only `_DELETE_IF_OWNER` does that), so the key survives with its
+original owner and TTL -- meaning no *other* engine could take over either,
+since `SET NX` would still see it occupied. Every player in that room
+would stall for up to `ttl_seconds` over something that would have cleared
+by the very next scheduled refresh 5 seconds later.
+
+**Fixed**: track `self._last_refreshed_at` (the event loop's monotonic
+clock), set at `acquire()` and after every successful refresh. On a
+refresh exception, only relinquish once `elapsed >= ttl_seconds -
+refresh_interval_seconds` -- one full refresh interval of safety margin
+below the actual TTL, so by the time this gives up, the real Redis-side
+key (barring clock skew) still has that much time left. Below that margin,
+log and retry on the next scheduled interval instead. The `if not
+refreshed:` branch (a *successful* eval reporting someone else now owns
+the key) is untouched -- that's a definitive signal, not something to
+retry, and was never the problem.
+
+Rewrote `tests/integration/test_room_lock.py`'s existing
+`test_a_redis_error_during_refresh_relinquishes_ownership_rather_than_sticking`
+into `test_sustained_redis_errors_during_refresh_eventually_relinquish_
+ownership` (its single-failure premise no longer holds under the new
+behavior by design; sustained failure past the safety margin still
+relinquishes, preserving the original split-brain property it was written
+to protect) and added
+`test_a_single_transient_redis_error_during_refresh_does_not_relinquish_
+ownership` for the actual bug being fixed here. Verified the new test is
+real: `git stash push` on just `room_lock.py` reverted to the old,
+immediate-relinquish code, reran -- failed cleanly with `assert False is
+True` (old code relinquished on the first blip, exactly as expected) --
+then `git stash pop` to restore the fix.
+
+**Full clean-slate rebuild**: `mypy` clean (63 source files) → `pytest
+tests/` (726 passed, up from 725) → `-m load` (5/5 passed in isolation;
+the full-batch run hit the same already-documented shared-host-contention
+flake in `test_gateway_fanout.py::test_stalled_reader_does_not_delay_
+other_sockets`, ~397ms against a 300ms budget -- unrelated to this
+change, confirmed via the same `docker ps` contention pattern seen on the
+prior fix this session) → `-m chaos_infra` (1 passed -- this test
+restarts Redis mid-round and exercises `RoomLock`'s real refresh-failure
+path directly) → `-m e2e` (7 passed). 739/739 real passes.
+
 ## 2026-08-25 — Fixed `waitForAuth()` hanging forever on a terminal auth failure
 
 Fourth fix from the same fresh `/code-review high` pass.
