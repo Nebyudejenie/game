@@ -11,6 +11,7 @@ make reconnection depend on a live engine for no real benefit.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from decimal import Decimal
@@ -130,26 +131,33 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
     entirely from Postgres so it works even if the room's engine just
     crashed and hasn't been replaced yet.
     """
-    room_row = await pool.fetchrow(
-        "SELECT stake, win_patterns, max_players FROM rooms WHERE id = $1", room_id
+    # A code review pass caught these two queries running sequentially --
+    # neither depends on the other's result (both filter on the same
+    # room_id, nothing more), so this reconnect payload's latency was
+    # paying for two round trips end to end where one round trip's worth
+    # (the slower of the two) would do. Genuinely independent reads,
+    # unlike the get_or_create_account chains elsewhere in this codebase
+    # that lock rows in a specific order for a reason -- there's no
+    # ordering constraint to preserve here.
+    room_row, round_row = await asyncio.gather(
+        pool.fetchrow("SELECT stake, win_patterns, max_players FROM rooms WHERE id = $1", room_id),
+        pool.fetchrow(
+            """
+            SELECT id, status, call_index, draw_order, pot, derash, house_cut_bps,
+                   stake, player_count, lobby_deadline
+            FROM rounds
+            WHERE room_id = $1
+            ORDER BY seq DESC
+            LIMIT 1
+            """,
+            room_id,
+        ),
     )
     if room_row is None:
         raise ValueError(f"no such room: {room_id}")
     win_patterns = room_row["win_patterns"]
     if isinstance(win_patterns, str):
         win_patterns = json.loads(win_patterns)
-
-    round_row = await pool.fetchrow(
-        """
-        SELECT id, status, call_index, draw_order, pot, derash, house_cut_bps,
-               stake, player_count, lobby_deadline
-        FROM rounds
-        WHERE room_id = $1
-        ORDER BY seq DESC
-        LIMIT 1
-        """,
-        room_id,
-    )
 
     called: list[int] = []
     your_card: int | None = None

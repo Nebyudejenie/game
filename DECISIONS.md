@@ -5,6 +5,39 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Ran `build_state_sync`'s two independent queries concurrently
+
+Twenty-first follow-up to the full-platform `/code-review` entry, from
+the efficiency/reuse tail. Pure latency win, no behavior change.
+
+**The inefficiency**: `build_state_sync()` -- the one-message reconnect
+payload every join and every recovering socket waits on -- ran its room
+lookup and its latest-round lookup as two sequential `await
+pool.fetchrow(...)` calls, paying for two round trips end to end where
+one round trip's worth (the slower of the two) would do. Neither query
+depends on the other's result; both just filter on the same `room_id`.
+
+**Fixed**: `asyncio.gather()` over both. Safe specifically because both
+calls go through `pool.fetchrow(...)` (an `asyncpg.Pool`, not a single
+`asyncpg.Connection`) -- each concurrent call gets its own connection
+checked out from the pool, unlike sharing one bare connection across
+concurrent queries, which asyncpg does not support. Confirmed both of
+`build_state_sync()`'s real callers already pass `self._pool`. No new
+regression test: this changes latency, not behavior, and the existing
+`state_sync` content assertions (`test_gateway_gameplay.py` and others)
+already cover correctness and pass unchanged.
+
+Full clean-slate rebuild: `docker compose down -v` / `up -d`, migrations
+clean, mypy clean across 63 source files, `pytest tests/` 720 passed / 13
+deselected (unchanged), `-m chaos_infra` 1 passed. `-m load`: the same
+already-documented `test_gateway_fanout.py` stalled-reader flake in the
+full batch, clean alone immediately after. `-m e2e`: one transient
+Playwright timeout on `test_history_tab_shows_a_completed_round` --
+*this exact test already flaked once earlier in this session's history*
+on a wholly unrelated commit (the balance_update push entry, several
+fixes back) -- passed cleanly both in isolation and on an immediate
+full-suite rerun.
+
 ## 2026-08-25 — Stopped `notifier.py`'s `_backoff_until` dict growing forever
 
 Twentieth follow-up to the full-platform `/code-review` entry, another
