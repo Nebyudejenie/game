@@ -5,6 +5,68 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Fixed `SOCKET_TIMEOUT_SECONDS` colliding with the two `block=5000` stream reads
+
+Fresh `/code-review high` pass over this session's own 22 commits, run by two
+independent finder agents that separately converged on the same bug.
+
+**The bug**: an earlier fix this session added a Redis client-side
+`socket_timeout` (`packages/core/redis_conn.py`) after a prior review pass
+caught that `get_redis()` had no timeout configured at all -- an unreachable
+Redis would hang any caller forever instead of failing fast. That fix set
+`SOCKET_TIMEOUT_SECONDS = 5.0`, reasoning it matched
+`services/engine/commands.py`'s own `CommandTimeout` budget. It didn't
+account for `services/payments/payout_worker.py` and
+`services/bot/notification_relay.py`, both of which poll their own consumer
+group with `xreadgroup(..., block=5000)` inside a bare `while True:` loop
+with no surrounding `try`/`except`.
+
+Confirmed by reading redis-py's actual installed source
+(`redis.asyncio.connection.Connection.read_response()`), not assumed from
+documentation: the async client applies `socket_timeout` as the raw socket
+read deadline for every ordinary command and does not extend it for that
+command's own `BLOCK` argument. The only code path that opts out (passing
+`timeout=math.inf`) is PubSub's `listen()`/`get_message()` -- which is why
+`commands.py`'s `send_command()`, built on `pubsub.listen()` with its own
+`asyncio.wait_for()` timeout, was never at risk. The two Stream-based
+blocking reads were exposed: a client socket timeout of exactly 5000ms
+racing a `BLOCK` window of exactly 5000ms meant an ordinary idle stream --
+not a Redis outage, the ubiquitous "nothing to do yet" case -- could raise
+an unhandled `redis.exceptions.TimeoutError` and crash either worker.
+`services/engine/round_engine.py`'s own `xread(..., block=1000)` was never
+at risk at either value.
+
+Reproduced directly against the real dev Redis before fixing anything: with
+`socket_timeout=5.0`, `xreadgroup(..., block=5000)` against a genuinely
+empty stream raised `TimeoutError: Timeout reading from localhost:6380`
+after exactly 5.00s, on every poll of an idle stream, not as a rare edge
+case.
+
+**Fixed**: raised `SOCKET_TIMEOUT_SECONDS` from `5.0` to `10.0` -- a real 2x
+margin over the largest `block=` value anywhere in this codebase (5000ms),
+leaving room for `round_engine.py`'s smaller 1000ms window too. Re-ran the
+same ad-hoc reproduction against the fix: the identical call now completes
+in 5.02s with an empty result, no exception.
+
+Added `tests/integration/test_redis_conn.py`, asserting both the arithmetic
+margin and the empirical behavior (a real `xreadgroup(..., block=5000)`
+against a genuinely empty stream, through the real `get_redis()`-configured
+client, must return empty rather than raise). Verified the regression test
+actually regresses: stashed just `redis_conn.py` back to `5.0`, reran --
+failed with `AssertionError: SOCKET_TIMEOUT_SECONDS=5.0 leaves no real
+margin...` -- then popped the stash to restore the fix.
+
+**Full clean-slate rebuild**: `docker compose down -v` → `up -d` → Postgres
+ready in 1s → `alembic upgrade head` (7 migrations, clean) → `mypy` (63
+source files, no issues -- note: `mypy` with no path args, since
+`[tool.mypy]` scopes `files` to `packages`/`services`/`migrations` and a
+bare `mypy .` misleadingly reports 539 pre-existing untyped-test errors
+that aren't part of this project's actual gate) → `pytest tests/` (721
+passed) → `-m load` (5 passed, clean this run) → `-m chaos_infra` (1
+passed; the printed `ConnectionError` traceback is the deliberate mid-test
+Redis restart being logged, not a failure) → `-m e2e` (7 passed). 734/734
+total.
+
 ## 2026-08-25 — Consolidated `dashboard_summary`'s three queries into one; reviewed and declined the rest of the efficiency tail
 
 Twenty-second follow-up to the full-platform `/code-review` entry.
