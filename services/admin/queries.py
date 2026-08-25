@@ -12,6 +12,7 @@ import json
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import asyncpg
 from redis.asyncio import Redis
@@ -23,6 +24,21 @@ from services.admin import audit
 from services.bot.phone import normalize_ethiopian_phone
 from services.engine.refunds import refund_round_in_transaction
 from services.payments.withdrawals import enqueue_payout
+
+
+# A code review pass caught dashboard_summary()/daily_ggr() computing
+# "today" with Python's date.today() (whatever the admin process's own
+# host/container timezone happens to be) while the SQL cast `created_at
+# ::date` converts using the *Postgres session's* own timezone setting --
+# two independent, unconfigured ambient defaults that were never
+# guaranteed to agree, and even if they happened to (both defaulting to
+# UTC, say), neither would match the Ethiopian calendar day these reports
+# are actually meant to describe. A transaction between 21:00-24:00 UTC
+# (00:00-03:00 EAT) is a real, everyday occurrence, not an edge case, so
+# this isn't a theoretical risk -- it's routinely wrong by up to 3 hours
+# on both sides of midnight. Both sides now compute the boundary the same
+# explicit way instead of trusting ambient defaults.
+ETHIOPIA_TZ = ZoneInfo("Africa/Addis_Ababa")
 
 
 def _with_decrypted_phone(row: dict[str, Any]) -> dict[str, Any]:
@@ -581,26 +597,29 @@ async def dashboard_summary(pool: asyncpg.Pool) -> dict[str, Any]:
         "SELECT count(*) FROM rounds WHERE status IN ('lobby', 'running', 'settling')"
     )
     active_rooms = await pool.fetchval("SELECT count(*) FROM rooms WHERE is_active = true")
-    today = date.today()
+    today = datetime.now(ETHIOPIA_TZ).date()
     stakes_today = await pool.fetchval(
         "SELECT COALESCE(SUM(-e.amount), 0) FROM ledger_entries e "
         "JOIN accounts a ON a.id = e.account_id "
         "JOIN ledger_transactions t ON t.id = e.transaction_id "
-        "WHERE a.kind = 'user_cash' AND t.kind = 'stake' AND e.created_at::date = $1",
+        "WHERE a.kind = 'user_cash' AND t.kind = 'stake' "
+        "AND (e.created_at AT TIME ZONE 'Africa/Addis_Ababa')::date = $1",
         today,
     )
     payouts_today = await pool.fetchval(
         "SELECT COALESCE(SUM(e.amount), 0) FROM ledger_entries e "
         "JOIN accounts a ON a.id = e.account_id "
         "JOIN ledger_transactions t ON t.id = e.transaction_id "
-        "WHERE a.kind = 'user_cash' AND t.kind = 'payout' AND e.created_at::date = $1",
+        "WHERE a.kind = 'user_cash' AND t.kind = 'payout' "
+        "AND (e.created_at AT TIME ZONE 'Africa/Addis_Ababa')::date = $1",
         today,
     )
     house_revenue_today = await pool.fetchval(
         "SELECT COALESCE(SUM(e.amount), 0) FROM ledger_entries e "
         "JOIN accounts a ON a.id = e.account_id "
         "JOIN ledger_transactions t ON t.id = e.transaction_id "
-        "WHERE a.kind = 'house_revenue' AND e.created_at::date = $1",
+        "WHERE a.kind = 'house_revenue' "
+        "AND (e.created_at AT TIME ZONE 'Africa/Addis_Ababa')::date = $1",
         today,
     )
     return {
@@ -620,11 +639,13 @@ async def daily_ggr(pool: asyncpg.Pool, on_date: date) -> dict[str, Any]:
     revenue = await pool.fetchval(
         "SELECT COALESCE(SUM(e.amount), 0) FROM ledger_entries e "
         "JOIN accounts a ON a.id = e.account_id "
-        "WHERE a.kind = 'house_revenue' AND e.created_at::date = $1",
+        "WHERE a.kind = 'house_revenue' "
+        "AND (e.created_at AT TIME ZONE 'Africa/Addis_Ababa')::date = $1",
         on_date,
     )
     rounds_settled = await pool.fetchval(
-        "SELECT count(*) FROM rounds WHERE status = 'done' AND ended_at::date = $1",
+        "SELECT count(*) FROM rounds WHERE status = 'done' "
+        "AND (ended_at AT TIME ZONE 'Africa/Addis_Ababa')::date = $1",
         on_date,
     )
     return {"date": on_date.isoformat(), "ggr": str(revenue), "rounds_settled": rounds_settled}

@@ -5,6 +5,66 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Fixed the admin dashboard's day-boundary timezone mismatch
+
+Fourteenth follow-up to the full-platform `/code-review` entry.
+
+**The bug**: `dashboard_summary()` computed "today" with Python's
+`date.today()` -- whichever timezone the admin process's own host or
+container happens to be in, unconfigured and never verified -- while the
+SQL comparison (`e.created_at::date = $1`, and `daily_ggr()`'s identical
+pattern plus `ended_at::date = $1`) casts a `timestamptz` to `date`
+using the *Postgres session's own* ambient `timezone` setting, equally
+unconfigured. Two independent, unconfigured defaults were never
+guaranteed to agree with each other -- and even where they happened to
+(both defaulting to UTC, the common case for an unconfigured container
+and an unconfigured Postgres session alike, confirmed to be exactly
+this deployment's actual behavior), neither matches the Ethiopian
+calendar day these financial reports are actually meant to describe. A
+transaction between 21:00-24:00 UTC (00:00-03:00 EAT) is a real,
+everyday three-hour window, not a contrived edge case -- it happens
+every single night this platform runs.
+
+**Fixed**: both sides now compute the boundary the same explicit way.
+Python side: `datetime.now(ETHIOPIA_TZ).date()` (`ETHIOPIA_TZ =
+ZoneInfo("Africa/Addis_Ababa")`, UTC+3, no DST ever observed) instead of
+bare `date.today()`. SQL side: `(e.created_at AT TIME ZONE
+'Africa/Addis_Ababa')::date = $1` instead of the ambient-session
+-dependent `e.created_at::date = $1`, applied to every one of
+`dashboard_summary()`'s three queries and both of `daily_ggr()`'s.
+Added `tzdata` as an explicit dependency (`pyproject.toml`) rather than
+relying on the host's own `/usr/share/zoneinfo` being present -- this
+project has no Dockerfile yet, so the eventual production base image is
+unknown, and a minimal one may not ship system tzdata at all.
+
+**Regression tests, and why the first draft's assertion was
+wrong**: `daily_ggr(pool, on_date)` takes an explicit caller-supplied
+date, making it directly, deterministically testable without needing to
+mock "now" -- inserted a `house_revenue` ledger entry with `created_at`
+set to a fixed `2026-08-25 23:30:00 UTC` (02:30 EAT on Aug 26) and
+queried both candidate calendar days. First draft asserted the "wrong"
+UTC-naive day (`Aug 25`) showed zero GGR -- failed immediately, not
+against the fix but against this session's own shared test database:
+other tests' real, accumulated house_revenue activity already lands on
+both candidate days, since Aug 25 is this session's actual real-world
+date. Fixed by snapshotting each day's GGR before and after the insert
+and asserting on the *delta* (`+42.00` on the correct EAT day, `+0.00`
+on the wrong UTC-naive day) rather than an absolute total, the same
+ambient-noise discipline this session's other shared-database tests have
+already settled on. Also added a static sanity check
+(`ETHIOPIA_TZ.utcoffset(...) == +3:00:00`) as a guard against a future
+edit picking a DST-observing zone by mistake. Both confirmed to fail
+against the unfixed code first: the offset check with an `AttributeError`
+(the constant didn't exist yet), the boundary test with the entry
+landing on Aug 25 instead of Aug 26 -- confirming this deployment's
+actual, current Postgres session timezone really is UTC-ambient, not a
+hypothetical risk.
+
+Full clean-slate rebuild: `docker compose down -v` / `up -d`, migrations
+clean, mypy clean across 63 source files, `pytest tests/` 709 passed / 13
+deselected (up from 707), `-m load` 5 passed, `-m chaos_infra` 1 passed,
+`-m e2e` 7 passed (no flake this run).
+
 ## 2026-08-25 — Investigated `phone.py`'s Kenyan-number collision; no safe fix found, reverted the attempt
 
 The catalogued finding: `normalize_ethiopian_phone()` accepts a

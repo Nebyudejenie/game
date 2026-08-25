@@ -4,6 +4,7 @@ through the ledger (never a direct balance write) and leave an audit trail.
 
 import asyncio
 import json
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
@@ -517,6 +518,60 @@ async def test_dashboard_summary_reflects_real_state(pool, redis, card_pool, con
     finally:
         await engine.stop()
         await asyncio.wait_for(task, timeout=10)
+
+
+def test_ethiopia_tz_is_the_real_utc_plus_3_offset():
+    # A regression guard against a typo'd IANA zone name silently
+    # resolving to the wrong offset (or a future edit picking a DST
+    # -observing zone by mistake) -- Ethiopia has never observed DST, so
+    # this must hold for any real instant, not just the one this test
+    # happens to run at.
+    offset = queries.ETHIOPIA_TZ.utcoffset(datetime(2026, 1, 1))
+    assert offset is not None
+    assert offset.total_seconds() == 3 * 3600
+
+
+async def test_daily_ggr_attributes_a_near_midnight_utc_entry_to_the_correct_ethiopian_calendar_day(
+    pool, conn
+):
+    # A code review pass caught daily_ggr()/dashboard_summary() casting
+    # created_at::date under whatever the Postgres session's own ambient
+    # timezone setting happens to be, rather than the Ethiopian calendar
+    # day these reports actually describe. 23:30 UTC on Aug 25 is 02:30
+    # EAT on Aug 26 -- a real, everyday occurrence (this window exists
+    # every single night), not a contrived edge case. A UTC-anchored cast
+    # would attribute this to Aug 25; the fix must attribute it to Aug 26.
+    # This session's shared test database accumulates real house_revenue
+    # activity from every other test that's run against it -- both
+    # candidate calendar days can already show nonzero GGR before this
+    # test even starts. Snapshotting before/after and checking the delta
+    # (not an absolute total) is what makes this robust against that,
+    # the same discipline this session's other ambient-noise-prone tests
+    # already settled on.
+    before_correct_day = Decimal((await queries.daily_ggr(pool, date(2026, 8, 26)))["ggr"])
+    before_wrong_day = Decimal((await queries.daily_ggr(pool, date(2026, 8, 25)))["ggr"])
+
+    house = await ledger.get_or_create_account(conn, None, "house_revenue")
+    provider = await ledger.get_or_create_account(conn, None, "provider_settlement")
+    txn = await ledger.post(
+        conn,
+        "payout",
+        [ledger.Entry(provider.id, Decimal("-42.00")), ledger.Entry(house.id, Decimal("42.00"))],
+        idempotency_key=f"tz-boundary-test-{house.id}-{provider.id}-{datetime.now(UTC).timestamp()}",
+    )
+    boundary_utc = datetime(2026, 8, 25, 23, 30, 0, tzinfo=UTC)
+    await conn.execute(
+        "UPDATE ledger_entries SET created_at = $1 WHERE transaction_id = $2 AND account_id = $3",
+        boundary_utc,
+        txn.id,
+        house.id,
+    )
+
+    after_correct_day = Decimal((await queries.daily_ggr(pool, date(2026, 8, 26)))["ggr"])
+    after_wrong_day = Decimal((await queries.daily_ggr(pool, date(2026, 8, 25)))["ggr"])
+
+    assert after_correct_day - before_correct_day == Decimal("42.00")
+    assert after_wrong_day - before_wrong_day == Decimal("0.00")
 
 
 _suffix_counter = [0]
