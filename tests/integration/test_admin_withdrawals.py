@@ -199,6 +199,27 @@ async def test_reject_withdrawal_admin_rejects_empty_reason_over_http(admin_serv
     assert response.status_code == 422
 
 
+async def test_approve_withdrawal_admin_rejects_empty_reason_over_http(admin_server, pool, redis, conn):
+    # A code review pass caught that this route had a required
+    # `reason: str` field on its own request model but never actually
+    # enforced it -- every sibling route (reject, void, adjust,
+    # set-status) already required a non-blank reason for the exact same
+    # "no hidden god mode" accountability reason; approving a withdrawal
+    # (releasing real money) is not less consequential than rejecting one.
+    headers = await _auth_headers(admin_server, pool, role="finance")
+    user_id = await create_funded_user(conn, Decimal("500.00"))
+    payment_id, _ = await _review_withdrawal(pool, redis, conn, user_id, Decimal("100.00"))
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{admin_server}/withdrawals/{payment_id}/approve", headers=headers, json={"reason": "   "}
+        )
+    assert response.status_code == 422
+
+    status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", payment_id)
+    assert status == "review"  # unchanged -- the rejected request must not have approved it anyway
+
+
 async def test_support_cannot_approve_withdrawals_over_http(admin_server, pool, redis, conn):
     headers = await _auth_headers(admin_server, pool, role="support")
     user_id = await create_funded_user(conn, Decimal("500.00"))

@@ -55,6 +55,22 @@ def _check_ip_allowlist(request: Request) -> None:
         raise HTTPException(status_code=403, detail="source IP not permitted")
 
 
+def _require_reason(reason: str) -> None:
+    """Every financially-consequential admin action needs an accountable
+    reason on the record (spec: "no hidden god mode") -- a code review
+    pass caught this exact check copy-pasted across four routes, and,
+    more importantly, silently *missing* from a fifth (approve_
+    withdrawal): the one route that had a required `reason: str` field
+    on its own request model but never actually enforced it, letting an
+    empty string through to become a `None` reason on real-money-release
+    audit log entry. Every sibling route (reject, void, adjust, set
+    -status) already required one; nothing about approving a withdrawal
+    is less consequential than rejecting one.
+    """
+    if not reason.strip():
+        raise HTTPException(status_code=422, detail="reason is required")
+
+
 async def current_admin(
     request: Request, authorization: str = Header(default="")
 ) -> AdminSession:
@@ -162,8 +178,7 @@ async def adjust_balance(
     user_id: int,
     body: AdjustBalanceRequest,
 ) -> dict[str, Any]:
-    if not body.reason.strip():
-        raise HTTPException(status_code=422, detail="reason is required")
+    _require_reason(body.reason)
     try:
         amount = Decimal(body.amount)
     except InvalidOperation as exc:
@@ -195,8 +210,7 @@ async def set_user_status(
     user_id: int,
     body: SetStatusRequest,
 ) -> dict[str, str]:
-    if not body.reason.strip():
-        raise HTTPException(status_code=422, detail="reason is required")
+    _require_reason(body.reason)
     try:
         await queries.set_user_status(
             app.state.pool,
@@ -252,8 +266,7 @@ async def void_round(
     round_id: int,
     body: VoidRoundRequest,
 ) -> dict[str, Any]:
-    if not body.reason.strip():
-        raise HTTPException(status_code=422, detail="reason is required")
+    _require_reason(body.reason)
     refunded = await queries.void_round_admin(
         app.state.pool,
         admin_id=admin.admin_id,
@@ -285,12 +298,13 @@ async def approve_withdrawal(
     payment_id: int,
     body: WithdrawalDecisionRequest,
 ) -> dict[str, bool]:
+    _require_reason(body.reason)
     approved = await queries.approve_withdrawal_admin(
         app.state.pool,
         app.state.redis,
         admin_id=admin.admin_id,
         payment_id=payment_id,
-        reason=body.reason or None,
+        reason=body.reason,
         ip_address=_client_ip(request),
     )
     return {"approved": approved}
@@ -303,8 +317,7 @@ async def reject_withdrawal(
     payment_id: int,
     body: WithdrawalDecisionRequest,
 ) -> dict[str, bool]:
-    if not body.reason.strip():
-        raise HTTPException(status_code=422, detail="reason is required")
+    _require_reason(body.reason)
     rejected = await queries.reject_withdrawal_admin(
         app.state.pool,
         app.state.redis,

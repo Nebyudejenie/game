@@ -5,6 +5,58 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Two reuse/consistency fixes from the efficiency tail: consolidated `get_user_detail`'s balance lookup, closed `approve_withdrawal`'s missing reason check
+
+Nineteenth follow-up to the full-platform `/code-review` entry, working
+into the catalogue's own lowest-priority "efficiency/reuse" tail now
+that every higher-severity item is closed. The second of these two
+turned out to be a real correctness gap, not just duplication.
+
+**`get_user_detail()` reimplemented `user_balance_snapshot`**: three
+`get_or_create_account()` + `balance()` round trips, the exact shape
+`packages/core/ledger.py`'s own `user_balance_snapshot()` already
+replaced with a single query when it was consolidated out of
+`services/gateway/queries.py` earlier in this arc. Replaced with a call
+to the shared helper -- same three balance figures, one query instead of
+up to nine round trips, no behavior change (existing tests already cover
+the exact values returned and pass unchanged).
+
+**`approve_withdrawal`'s missing `reason` check -- the real find here**:
+the catalogue's own framing was right to flag this as more than style
+duplication. `AdjustBalanceRequest`/`SetStatusRequest`/`VoidRoundRequest`
+/`WithdrawalDecisionRequest` all declare `reason: str` and every route
+using them enforced it non-blank with an identical `if not
+body.reason.strip(): raise HTTPException(422, "reason is required")` --
+except `approve_withdrawal`, which had the same required field on its
+own request model but silently converted a blank reason to `None`
+(`reason=body.reason or None`) instead of rejecting it. Every sibling
+financial action (reject, void, adjust, set-status) requires an
+accountable reason on the audit record (spec: "no hidden god mode");
+nothing about releasing real money via approval is less consequential
+than rejecting it. Extracted the four duplicated checks into
+`_require_reason()` and added the missing fifth call to
+`approve_withdrawal` -- both the dedup and the actual fix landed
+together, since the duplication was directly what made the one missing
+copy easy to miss in the first place.
+
+**Regression test confirmed against the unfixed code before trusting
+it**: `test_approve_withdrawal_admin_rejects_empty_reason_over_http`,
+mirroring the existing `reject` equivalent -- a blank `"   "` reason over
+real HTTP. Against the unfixed code this returned `200`, not `422`; the
+withdrawal would have gone on to release funds with a `None` reason on
+the audit trail.
+
+Full clean-slate rebuild: `docker compose down -v` / `up -d`, migrations
+clean, mypy clean across 63 source files, `pytest tests/` 719 passed / 13
+deselected (up from 718), `-m load` 4/5 passed cleanly, `test_gateway_
+fanout.py::test_stalled_reader_does_not_delay_other_sockets` failed in
+the full batch (375ms vs. 300ms) but passed cleanly alone immediately
+after -- the same shared-host contention pattern this exact test was
+already extensively investigated and documented for in the previous
+entry, not a new concern from a change that touches neither
+`fanout.py` nor `connection.py`. `-m chaos_infra` 1 passed, `-m e2e` 7
+passed clean.
+
 ## 2026-08-25 — Fixed the gateway writer loop's stale-state gap, then caught and fixed a real perf regression in the fix itself
 
 Eighteenth follow-up to the full-platform `/code-review` entry.

@@ -85,15 +85,14 @@ async def get_user_detail(pool: asyncpg.Pool, user_id: int) -> dict[str, Any] | 
         return None
     user_dict = _with_decrypted_phone(dict(user_row))
 
-    async with pool.acquire() as conn:
-        cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
-        bonus = await ledger.get_or_create_account(conn, user_id, "user_bonus")
-        locked = await ledger.get_or_create_account(conn, user_id, "user_locked")
-        balances = {
-            "cash": str(await ledger.balance(conn, cash.id)),
-            "bonus": str(await ledger.balance(conn, bonus.id)),
-            "locked": str(await ledger.balance(conn, locked.id)),
-        }
+    # A code review pass caught this reimplementing user_balance_snapshot
+    # -- three get_or_create_account() + balance() round trips, the same
+    # shape ledger.py's own shared helper already replaced with a single
+    # query when it was consolidated out of services/gateway/queries.py
+    # (packages/core/ledger.py's own docstring covers why it lives there,
+    # not here or gateway/queries.py). Purely a reuse/efficiency fix --
+    # same three balance figures, just not reimplemented a third time.
+    balances = await ledger.user_balance_snapshot(pool, user_id)
 
     return {**user_dict, "balances": balances, "ltv": await player_ltv(pool, user_id)}
 
