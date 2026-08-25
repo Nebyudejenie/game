@@ -5,6 +5,49 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Fixed `recovery.py`'s room-vs-round orphan detection gap
+
+Fourth follow-up to the full-platform `/code-review` entry.
+
+**The bug**: `recover_orphaned_rounds()` treated "is the room's lock held
+by *anyone*?" as proof a specific stuck round was still owned. A room
+only ever runs one round at a time -- once a *newer* round exists for
+the same room (a different, genuinely live engine claimed the room after
+the stuck round's lock expired), that lock is legitimately held again,
+just for the new round, not the old stuck one. Since this function only
+runs once, at worker startup, the old round would be skipped forever:
+its entrants' stakes left in `pot_escrow` with no remaining path to a
+refund. A real risk specifically in the multi-worker fleet this whole
+locking scheme (`room_lock.py`) exists to support -- this single-worker
+dev/test environment can't naturally exercise the race, but the logic
+bug itself doesn't depend on true multi-process concurrency to be wrong.
+
+**Fixed**: a round now also counts as orphaned if it's no longer its
+room's *latest* round (by `seq`), regardless of the room's current lock
+state -- only when a round *is* the latest does the existing lock check
+still apply.
+
+**Caught a false-negative test before trusting it, again** (same
+discipline as the auto-mark tie fix two entries below): reverted the fix
+and reran the new regression test first, confirming it actually fails
+against the unfixed code (`assert 48 in []`) before trusting that it
+passing meant anything. The test spins up two real, real-joined
+`RoundEngine` instances against the same room in sequence -- the first
+crashed (lock deleted, matching the existing crash-recovery test's own
+technique), the second genuinely live and running a newer round -- and
+confirms the stuck round still gets refunded while the live one is left
+alone.
+
+Full clean-slate rebuild: mypy clean across 63 source files, `pytest
+tests/` 689 passed / 13 deselected (up from 688), `-m chaos_infra` 1
+passed, `-m e2e` 7 passed. `-m load`: 4/5 passed cleanly; `test_load_
+multiroom.py`'s p99 budget failed in the full batch (passed cleanly
+alone) -- the same already-documented shared-host contention this
+session has confirmed multiple times before (unrelated projects'
+containers still running on this same 4-core host), not a regression
+from this change, which touches only `recovery.py`, entirely disjoint
+from the WS call-broadcast path that test measures.
+
 ## 2026-08-25 — Fixed the most severe remaining catalogued finding: simultaneous auto-mark winners silently losing their share
 
 Third follow-up to the full-platform `/code-review` entry. This was the
