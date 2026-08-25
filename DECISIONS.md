@@ -5,6 +5,53 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Fixed referral credit silently dropped for Mini-App-first users
+
+Third fix from the same fresh `/code-review high` pass, again independently
+caught by two separate finder agents.
+
+**The bug**: `services/gateway/queries.py`'s
+`get_or_create_user_by_telegram_id()` lazily creates a phoneless `users` row
+for anyone who opens the Mini App before ever messaging the bot. When that
+person later shares their contact to actually register,
+`register_from_contact()` (`services/bot/registration.py`) routes them
+through `_attach_phone_to_existing_user()` instead of the `INSERT` path --
+and that function only ever wrote the two phone columns, never
+`referred_by`. Meanwhile `handlers.py`'s `on_contact()` unconditionally
+cleared the pending-referral Redis key on any non-exception return,
+with no check that `referred_by` was actually persisted. Net effect: a
+Mini-App-first user who clicked a referral link and then registered lost
+the referral permanently, silently, with no error anywhere -- the
+referrer's own dashboard would just never show that signup. `on_contact()`'s
+own comment already documented the intended invariant ("Only cleared once
+registration has actually recorded it in users.referred_by") from an
+earlier fix, but the invariant wasn't actually true for this path.
+
+**Fixed**: resolved `referred_by_id` once, up front in
+`register_from_contact()`, and reused it in all three places a referral can
+end up recorded -- the original `INSERT`, and both of
+`_attach_phone_to_existing_user()`'s call sites (the plain existing-phoneless
+-row branch, and the `UniqueViolationError`-retry branch for a concurrent
+`telegram_id` race). `_attach_phone_to_existing_user()` now takes
+`referred_by_id` and writes `referred_by = COALESCE(referred_by, $4)` --
+never overwriting an already-set value, though in practice this row's
+`referred_by` should always be `NULL` the first time it reaches this
+function. A referral only fails to record now if `referred_by_telegram_id`
+itself doesn't resolve to a real user (a dead/invalid referral code) --
+already-correct, pre-existing behavior (`test_unknown_referrer_is_ignored_
+not_an_error`), unrelated to this bug.
+
+Added `test_register_from_contact_records_referral_for_a_phoneless_row` to
+`tests/integration/test_registration.py`. Verified it's a real regression
+test the standard way: `git stash push` on just `registration.py` reverted
+to the old, buggy code, reran -- failed with `assert None == 6829` (the
+referrer's real DB id, expected but not found) -- then `git stash pop` to
+restore the fix.
+
+**Full clean-slate rebuild**: `mypy` clean (63 source files) → `pytest
+tests/` (724 passed, up from 723) → `-m load` (5 passed) → `-m chaos_infra`
+(1 passed) → `-m e2e` (7 passed). 737/737 total.
+
 ## 2026-08-25 — Fixed `notification_relay.py`'s head-of-line blocking across users
 
 Second fix from the same fresh `/code-review high` pass, again independently

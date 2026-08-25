@@ -181,6 +181,37 @@ async def test_register_from_contact_completes_registration_for_a_phoneless_row(
     assert fetched.phone_e164 == phone
 
 
+async def test_register_from_contact_records_referral_for_a_phoneless_row(pool):
+    # A code review pass caught that _attach_phone_to_existing_user() --
+    # the path a Mini-App-first user's contact-share goes through -- never
+    # touched referred_by at all, silently dropping referral credit for
+    # anyone whose users row predated their contact share, even though
+    # handlers.py's on_contact() still unconditionally cleared their
+    # pending referral once registration returned without raising.
+    referrer_id = next_telegram_id()
+    await register_from_contact(
+        pool, sender_telegram_id=referrer_id, contact_user_id=referrer_id,
+        contact_phone=unique_phone(), display_name="Referrer",
+    )
+
+    telegram_id = next_telegram_id()
+    user_id = await _create_phoneless_user(pool, telegram_id)
+
+    user = await register_from_contact(
+        pool,
+        sender_telegram_id=telegram_id,
+        contact_user_id=telegram_id,
+        contact_phone=unique_phone(),
+        display_name="Mini App User",
+        referred_by_telegram_id=referrer_id,
+    )
+    assert user.id == user_id
+
+    row = await pool.fetchrow("SELECT referred_by FROM users WHERE id = $1", user_id)
+    referrer_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", referrer_id)
+    assert row["referred_by"] == referrer_row["id"]
+
+
 async def test_register_from_contact_still_rejects_a_phone_already_used_elsewhere_for_a_phoneless_row(pool):
     existing_phone = unique_phone()
     other_id = next_telegram_id()
