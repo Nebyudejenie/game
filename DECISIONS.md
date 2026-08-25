@@ -5,6 +5,47 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Fixed Chapa webhook's malformed-amount unhandled crash
+
+Tenth follow-up to the full-platform `/code-review` entry.
+
+**The bug**: `ChapaProvider.verify_webhook()` already checked its
+required fields for *presence* (`our_ref`/`reference`/`status`/`amount`
+not missing or `None`) and already guarded `status` for well-formedness
+(`_map_status()` rejects anything outside the closed vocabulary,
+converting a `ValueError` into `InvalidSignature`). `amount` never got
+the same well-formedness treatment: a signed, structurally valid webhook
+with a present-but-garbage amount (`"amount": "not-a-number"`, or any
+other non-numeric string) made `Decimal(str(raw_amount))` raise
+`decimal.InvalidOperation`. `handle_webhook()`'s only caller
+(`services/payments/app.py`'s `chapa_webhook()` route) catches
+`InvalidSignature` alone, so this specific exception type propagated
+straight out as an unhandled 500 instead of the same deliberate,
+discard-and-401 response every other malformed-webhook case here
+already gets.
+
+**Fixed**: wrapped the `Decimal(str(raw_amount))` conversion in a
+`try/except InvalidOperation`, re-raising as `InvalidSignature` --
+exactly the same conversion pattern `_map_status()`'s own
+`ValueError -> InvalidSignature` handling a few lines above already
+uses for the identical class of problem (present field, wrong shape).
+No money-safety impact either way (nothing was ever credited off a
+malformed amount -- the ledger never saw it), but this closes the gap
+between "webhook is untrustworthy, we know why, discard it cleanly" and
+"unhandled exception, 500, full traceback in the payments-service log
+for something that isn't actually a bug in this service."
+
+**Regression test confirmed against the unfixed code before trusting
+it**: a validly-signed webhook body with `"amount": "not-a-number"`.
+Against the pre-fix code this raised `decimal.InvalidOperation`
+uncaught, exactly as described, not `InvalidSignature` -- confirmed
+directly, then the fix restored and reconfirmed.
+
+Full clean-slate rebuild: `docker compose down -v` / `up -d`, migrations
+clean, mypy clean across 63 source files, `pytest tests/` 695 passed / 13
+deselected (up from 694), `-m load` 5 passed, `-m chaos_infra` 1 passed,
+`-m e2e` 7 passed (no flake this run).
+
 ## 2026-08-25 — Fixed `notification_relay.py`'s ack-before-delivery gap
 
 Ninth follow-up to the full-platform `/code-review` entry.

@@ -23,7 +23,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import httpx
 
@@ -133,11 +133,28 @@ class ChapaProvider:
         except ValueError as exc:
             raise InvalidSignature(str(exc)) from exc
 
+        # A code review pass caught that this webhook's field-presence
+        # checks above (not missing/None) didn't also cover well-formed
+        # -ness: a signed but malformed "amount" (garbage text, a JSON
+        # object where a number was expected) made Decimal(str(...)) raise
+        # decimal.InvalidOperation, which handle_webhook()'s only caller
+        # (services/payments/app.py's chapa_webhook() route) doesn't
+        # catch -- propagating out as an unhandled 500 instead of the
+        # same clean, deliberate "untrustworthy payload, discard it"
+        # 401 response every other malformed-webhook case here already
+        # gets. Matches the exact same try/except-and-reraise pattern
+        # _map_status()'s own ValueError -> InvalidSignature conversion
+        # just above already uses for the same class of problem.
+        try:
+            amount = Decimal(str(raw_amount))
+        except InvalidOperation as exc:
+            raise InvalidSignature(f"malformed amount: {raw_amount!r}") from exc
+
         return VerifiedEvent(
             event_id=str(reference),
             our_ref=str(our_ref),
             status=status,  # type: ignore[arg-type]
-            amount=Decimal(str(raw_amount)),
+            amount=amount,
             provider_ref=str(reference),
             raw=data,
         )

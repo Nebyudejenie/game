@@ -101,3 +101,18 @@ def test_missing_required_field_is_rejected():
     headers = _sign(SECRET, raw_body)
     with pytest.raises(InvalidSignature):
         provider.verify_webhook(headers, raw_body)
+
+
+def test_malformed_amount_is_rejected_not_an_unhandled_crash():
+    # A code review pass caught that a present-but-garbage "amount" (unlike
+    # a *missing* one, already covered above) made Decimal(str(...)) raise
+    # decimal.InvalidOperation -- a class of exception the only caller of
+    # verify_webhook() (services/payments/app.py's chapa_webhook() route)
+    # doesn't catch, turning a signed-but-malformed payload into an
+    # unhandled 500 instead of the same deliberate, discard-and-401
+    # response every other malformed-webhook case here already gets.
+    provider = ChapaProvider(SECRET)
+    raw_body = _body(amount="not-a-number")
+    headers = _sign(SECRET, raw_body)
+    with pytest.raises(InvalidSignature):
+        provider.verify_webhook(headers, raw_body)
