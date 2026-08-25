@@ -5,6 +5,49 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Fixed `update_room_admin`'s double-encoded `win_patterns` audit entries
+
+Fifteenth follow-up to the full-platform `/code-review` entry. Audit
+-readability only -- the actual room update itself was always correct;
+only what the stored audit trail *showed* for this one field was wrong.
+
+**The bug**: `update_room_admin()` built its audit `before`/`after`
+dicts with a blanket `{k: str(row[k]) for k in changes}`. asyncpg
+returns a `jsonb` column as a raw JSON string with no type codec
+registered (the same reason `list_rooms()` a few lines above already
+does its own `isinstance(..., str)` + `json.loads()`), so for
+`win_patterns` specifically, `str(...)` was a no-op on an
+already-a-string value -- leaving a JSON string sitting as a plain dict
+value. `audit.record()`'s own `json.dumps(before)` then serialized the
+*whole* dict, double-encoding that string into an escaped value inside
+the stored `admin_audit_log` row: `"win_patterns": "[\"row\"]"` instead
+of a clean nested array, unreadable without decoding twice -- unlike
+every other field this same audit call records.
+
+**Fixed**: added `_room_audit_value(row, key)`, applying the exact same
+`isinstance(value, str)` + `json.loads()` normalization `list_rooms()`
+already uses, only for `win_patterns`; every other field keeps the
+existing `str(...)` treatment unchanged.
+
+**Regression test confirmed against the unfixed code before trusting
+it**: updated a real room's `win_patterns` through `update_room_admin()`,
+read the stored `admin_audit_log` row back, and asserted a *single*
+`json.loads()` of the whole row already produces a real Python list for
+`win_patterns` -- matching how every other test in this file already
+reads `before`/`after` back (one `json.loads()` call, not two). Against
+the unfixed code this failed exactly as described:
+`assert '["row"]' == ['row']`.
+
+Full clean-slate rebuild: `docker compose down -v` / `up -d`, migrations
+clean, mypy clean across 63 source files, `pytest tests/` 710 passed / 13
+deselected (up from 709), `-m load` 4/5 passed cleanly, `test_load_
+multiroom.py`'s p99 budget failed in the full batch (411ms vs. 300ms)
+but passed cleanly alone -- confirmed via `docker ps` the same
+already-documented shared-host contention, not a regression from a fix
+that touches only one admin audit-log field, nowhere near the WS
+call-broadcast path that test measures. `-m chaos_infra` 1 passed,
+`-m e2e` 7 passed (no flake this run).
+
 ## 2026-08-25 — Fixed the admin dashboard's day-boundary timezone mismatch
 
 Fourteenth follow-up to the full-platform `/code-review` entry.

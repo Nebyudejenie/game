@@ -503,6 +503,57 @@ async def test_room_config_edit_does_not_affect_an_in_flight_round(pool, redis, 
         await asyncio.wait_for(task, timeout=10)
 
 
+async def test_update_room_admin_audit_log_stores_win_patterns_as_a_real_array(pool, conn):
+    # A code review pass caught that update_room_admin()'s audit before/
+    # after values ran every changed field through a blanket str(...),
+    # including win_patterns -- asyncpg returns a jsonb column as a raw
+    # JSON string with no codec registered (same reason list_rooms() does
+    # its own isinstance(..., str) + json.loads()), so str()-ing it was a
+    # no-op that left a JSON string sitting as a dict value. audit.record
+    # ()'s own json.dumps(before) then double-encoded that into an
+    # escaped string inside the stored audit row -- readable only after
+    # decoding twice, unlike every other field the audit log records.
+    admin_id, *_ = await create_test_admin(pool)
+    room_id = await queries.create_room_admin(
+        pool,
+        admin_id=admin_id,
+        code=f"admin-test-{room_id_suffix()}",
+        stake=Decimal("50.00"),
+        house_cut_bps=1500,
+        min_players=2,
+        max_players=100,
+        lobby_seconds=30,
+        call_interval_ms=4000,
+        result_seconds=10,
+        win_patterns=["row"],
+        ip_address="127.0.0.1",
+    )
+
+    updated = await queries.update_room_admin(
+        pool,
+        admin_id=admin_id,
+        room_id=room_id,
+        changes={"win_patterns": ["row", "column", "diagonal"]},
+        reason="enabling more win patterns",
+        ip_address="127.0.0.1",
+    )
+    assert updated is True
+
+    audit_row = await conn.fetchrow(
+        "SELECT before, after FROM admin_audit_log "
+        "WHERE target_id = $1 AND action = 'rooms.update' ORDER BY id DESC LIMIT 1",
+        str(room_id),
+    )
+    before = json.loads(audit_row["before"])
+    after = json.loads(audit_row["after"])
+    # A single json.loads() of the whole audit row must already produce a
+    # real list for win_patterns -- if this were still a string (the
+    # double-encoded bug), an admin (or this assertion) would need to
+    # decode it a second time to get anything useful out of it.
+    assert before["win_patterns"] == ["row"]
+    assert after["win_patterns"] == ["row", "column", "diagonal"]
+
+
 async def test_dashboard_summary_reflects_real_state(pool, redis, card_pool, conn):
     room_id = await create_room(conn, stake=Decimal("10.00"), min_players=5, lobby_seconds=5)
     room = await load_room_config(pool, room_id)

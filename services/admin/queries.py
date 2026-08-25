@@ -538,6 +538,26 @@ _UPDATABLE_ROOM_FIELDS = {
 }
 
 
+def _room_audit_value(row: asyncpg.Record, key: str) -> Any:
+    """A code review pass caught that update_room_admin()'s audit
+    before/after values ran every changed field through a blanket
+    str(...), including win_patterns -- asyncpg returns a jsonb column as
+    a raw JSON string with no codec registered (the same reason
+    list_rooms() above does its own isinstance(..., str) + json.loads()),
+    so str()-ing it was a no-op that left a JSON string sitting as a
+    dict value, which audit.record()'s own json.dumps(before) then
+    double-encodes into an escaped string in the stored audit row --
+    readable as ``"win_patterns": "[\\"row_0\\"]"`` instead of a clean
+    nested array. Not a financial bug (the actual room update is
+    unaffected either way), just a real audit-readability gap for
+    anyone reviewing this specific field's change history.
+    """
+    value = row[key]
+    if key == "win_patterns" and isinstance(value, str):
+        return json.loads(value)
+    return str(value)
+
+
 async def update_room_admin(
     pool: asyncpg.Pool,
     *,
@@ -584,8 +604,8 @@ async def update_room_admin(
                 action="rooms.update",
                 target_type="room",
                 target_id=str(room_id),
-                before={k: str(before[k]) for k in changes},
-                after={k: str(after[k]) for k in changes} if after else None,
+                before={k: _room_audit_value(before, k) for k in changes},
+                after={k: _room_audit_value(after, k) for k in changes} if after else None,
                 reason=reason,
                 ip_address=ip_address,
             )
