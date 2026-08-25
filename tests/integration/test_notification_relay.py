@@ -8,6 +8,8 @@ through a real Notifier, not just a Redis Stream entry nobody reads.
 import asyncio
 from decimal import Decimal
 
+import pytest
+
 from packages.core.notifications import NOTIFICATIONS_STREAM, notify_user
 from services.admin import queries as admin_queries
 from services.bot import notification_relay
@@ -81,6 +83,51 @@ async def test_relay_returns_false_when_stream_is_empty(pool, redis):
         assert delivered is False
     finally:
         await notifier.stop()
+
+
+async def test_relay_does_not_ack_before_the_notifier_actually_delivers(pool, redis, conn):
+    """A code review pass caught that process_one() acked the stream entry
+    right after notifier.send() returned -- which only means the message
+    was enqueued into Notifier's own in-memory queue, not that it was
+    actually delivered. If this relay process crashed before Notifier's
+    background worker got around to sending it, the notification was
+    lost outright: already acked, no redelivery path, and the in-memory
+    queue itself is gone on crash too. Simulates that gap directly with a
+    Notifier that's deliberately never .start()ed, so nothing ever drains
+    its queue -- standing in for "the process died before reaching this
+    message" -- and confirms process_one() never completes (and
+    therefore never acks) within a short deadline.
+    """
+    telegram_id = next_telegram_id()
+    user_id = await _register(conn, telegram_id)
+    await notify_user(pool, redis, user_id=user_id, key="notify.you_won", amount="42.00")
+
+    bot, session = make_bot()
+    notifier = Notifier(bot)  # deliberately never started
+
+    consumer_name = f"test-{telegram_id}"
+    await notification_relay.ensure_group(redis)
+    pending = await redis.xreadgroup(
+        notification_relay.GROUP, consumer_name, {NOTIFICATIONS_STREAM: ">"}, count=1
+    )
+    entries = notification_relay._flatten(pending)
+    assert entries
+    msg_id, fields = entries[0]
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(
+            notification_relay.process_one(pool, redis, notifier, msg_id=msg_id, fields=fields),
+            timeout=0.3,
+        )
+
+    # Still unacked -- claimable by a fresh read of this consumer's own
+    # pending list, the exact crash-recovery path a live relay process
+    # would use on restart.
+    still_pending = await redis.xreadgroup(
+        notification_relay.GROUP, consumer_name, {NOTIFICATIONS_STREAM: "0"}, count=1
+    )
+    assert notification_relay._flatten(still_pending)
+    assert len(session.sent) == 0
 
 
 async def test_deposit_credit_notifies_the_depositor(pool, redis, conn):

@@ -46,7 +46,19 @@ async def process_one(pool: asyncpg.Pool, redis: Redis, notifier: Notifier, *, m
     key = fields["key"]
     kwargs: dict[str, Any] = json.loads(fields["kwargs"])
     language = await _language_for_telegram_id(pool, telegram_id)
-    await notifier.send(telegram_id, t(key, language, **kwargs))
+    # Notifier.send() only enqueues -- the actual Telegram API call happens
+    # later, in Notifier's own background worker, subject to its global
+    # rate pace and 429 backoff. A code review pass caught that acking
+    # right after send() returned meant this stream entry was marked done
+    # the instant the notification landed in Notifier's in-memory queue,
+    # not when it was actually delivered (or given up on) -- a crash of
+    # this process before Notifier's worker got to it lost the
+    # notification outright, with no redelivery path left, since the
+    # stream entry claiming it was already gone. Awaiting the future
+    # send() now returns makes this ack happen only once Notifier reaches
+    # a real terminal outcome for this message.
+    done = await notifier.send(telegram_id, t(key, language, **kwargs))
+    await done
     await redis.xack(NOTIFICATIONS_STREAM, GROUP, msg_id)
 
 

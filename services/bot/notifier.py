@@ -32,6 +32,21 @@ class OutboundMessage:
     text: str
     kwargs: dict[str, Any] = field(default_factory=dict)
     attempts: int = 0
+    # Resolved once this message's handling by _run() reaches a terminal
+    # state (delivered, permanently dropped, or retries exhausted) --
+    # *not* on every dequeue, since a 429 backoff or a not-yet-exhausted
+    # TelegramRetryAfter just requeues the same message for a later
+    # attempt. services/bot/notification_relay.py awaits this before
+    # acking the Redis Stream entry that produced this send() call, so a
+    # notification that's still only sitting in this in-memory queue --
+    # not actually delivered, and lost entirely if this process crashes
+    # before delivering it -- is never mistaken for "done" and acked away
+    # with no redelivery path. Every other caller (services/bot/handlers
+    # .py's ~60 direct replies) just awaits send() itself and ignores the
+    # returned future, so this stays fire-and-forget for them exactly as
+    # before -- nothing here makes an interactive command reply block on
+    # actual Telegram delivery or a 429 backoff sleep.
+    done: asyncio.Future[None] | None = None
 
 
 class Notifier:
@@ -42,8 +57,10 @@ class Notifier:
         self._backoff_until: dict[int, float] = {}
         self._worker_task: asyncio.Task[None] | None = None
 
-    async def send(self, chat_id: int, text: str, **kwargs: Any) -> None:
-        await self._queue.put(OutboundMessage(chat_id, text, kwargs))
+    async def send(self, chat_id: int, text: str, **kwargs: Any) -> asyncio.Future[None]:
+        done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        await self._queue.put(OutboundMessage(chat_id, text, kwargs, done=done))
+        return done
 
     def start(self) -> None:
         self._worker_task = asyncio.create_task(self._run())
@@ -78,6 +95,10 @@ class Notifier:
                 message.attempts += 1
                 if message.attempts < self._max_attempts:
                     await self._queue.put(message)
+                    continue  # still in flight -- don't resolve message.done yet
+                logger.warning(
+                    "notifier_send_gave_up", chat_id=message.chat_id, attempts=message.attempts
+                )
             except TelegramForbiddenError:
                 pass  # the user blocked the bot -- nothing to retry
             except Exception:
@@ -96,3 +117,8 @@ class Notifier:
                 logger.exception("notifier_send_failed", chat_id=message.chat_id)
             else:
                 await asyncio.sleep(MIN_INTERVAL_SECONDS)
+
+            # Reached only on a terminal outcome (delivered, permanently
+            # dropped, or retries exhausted) -- never on a requeue above.
+            if message.done is not None and not message.done.done():
+                message.done.set_result(None)

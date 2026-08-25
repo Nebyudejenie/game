@@ -5,6 +5,66 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Fixed `notification_relay.py`'s ack-before-delivery gap
+
+Ninth follow-up to the full-platform `/code-review` entry.
+
+**The bug**: `process_one()` called `await notifier.send(...)` and then
+immediately acked the Redis Stream entry. But `Notifier.send()` (services
+/bot/notifier.py) only ever enqueues onto its own in-memory
+`asyncio.Queue` and returns -- the actual `bot.send_message()` call
+happens later, asynchronously, in `Notifier`'s own background `_run()`
+worker, subject to its global rate pace and per-chat 429 backoff. So the
+stream entry -- the durable, redeliverable record that this notification
+still needs to go out -- was marked done the instant it landed in a
+plain in-memory queue with no persistence of its own. If this relay
+process crashed (or the notifier's worker task died) any time between
+that enqueue and the real Telegram call, the notification was lost
+outright: already acked, so no redelivery on restart, and the in-memory
+queue that held it is gone with the process. A user's withdrawal or
+deposit could genuinely succeed with the confirmation message that was
+supposed to tell them so silently vanishing.
+
+**Fixed**: `Notifier.send()` now returns an `asyncio.Future[None]` that
+`_run()` resolves once that specific message reaches a real terminal
+state -- delivered, permanently dropped (blocked-by-user, or an
+unretryable send error), or its retry budget exhausted (previously this
+last case had no explicit handling at all; added a log line for it too,
+since it's the same "when is this message actually finished" question
+`_run()` already has to answer for every other exit path). The future
+is *not* resolved on a requeue (an active 429 backoff, or a
+`TelegramRetryAfter` with attempts still remaining) -- exactly the "not
+done yet" case that must keep the stream entry unacked.
+`notification_relay.py`'s `process_one()` now awaits that future before
+acking. Every other caller (`services/bot/handlers.py`'s ~60 direct
+command replies) just discards the returned future the same way they
+already discarded the previous `None` return, so this stays fully
+fire-and-forget for them -- nothing about an interactive command reply
+now blocks on actual Telegram delivery or a 429 backoff sleep, only the
+relay's own ack does.
+
+**Regression test confirmed against the unfixed code before trusting
+it**: a `Notifier` deliberately never `.start()`ed (nothing ever drains
+its queue, standing in for "the process died before reaching this
+message"), then `process_one()` called directly against a real queued
+notification, wrapped in `asyncio.wait_for(..., timeout=0.3)`. Against
+the pre-fix code this returned immediately with the entry already acked
+(`DID NOT RAISE TimeoutError`) -- the exact bug, reproduced directly, not
+inferred. Against the fix, `process_one()` correctly never completes
+within the deadline, and the stream entry is confirmed still claimable
+via a fresh read of the same consumer's own pending list afterward
+(the same crash-recovery path a real restarted relay process would use).
+
+Full clean-slate rebuild: `docker compose down -v` / `up -d`, migrations
+clean, mypy clean across 63 source files, `pytest tests/` 694 passed / 13
+deselected (up from 693), `-m load` 5 passed, `-m chaos_infra` 1 passed,
+`-m e2e` 7 passed (one transient Playwright `Page.wait_for_selector`
+timeout on `test_verify_draw_button_shows_a_verified_seed` in the
+full-suite run, passed cleanly on an immediate full-suite rerun -- same
+Mini App UI-timing flake pattern already documented twice before in this
+arc, on two different e2e tests now, entirely disjoint from the bot
+notification code this fix touches).
+
 ## 2026-08-25 — Fixed `rate_limit.allow()` to fail closed on a Redis error
 
 Eighth follow-up to the full-platform `/code-review` entry.
