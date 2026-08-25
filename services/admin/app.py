@@ -103,7 +103,18 @@ class LoginRequest(BaseModel):
 
 
 @app.post("/auth/login")
-async def login(body: LoginRequest) -> dict[str, str]:
+async def login(request: Request, body: LoginRequest) -> dict[str, str]:
+    # A code review pass caught that every other route enforces the IP
+    # allowlist either via current_admin() (the session dependency almost
+    # every route uses) or, for the one unauthenticated exception besides
+    # this route (/metrics), by calling this directly -- but login() takes
+    # no bearer token yet (that's the whole point: it's how one is
+    # obtained), so it never went through either path. This is actually
+    # the single most exposed route to check it on: an attacker outside
+    # the allowlist could otherwise still throw password/TOTP guesses at
+    # it even though every other admin route was already unreachable to
+    # them.
+    _check_ip_allowlist(request)
     try:
         token = await auth.login(
             app.state.pool,

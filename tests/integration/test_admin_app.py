@@ -142,6 +142,30 @@ async def test_ip_allowlist_blocks_disallowed_source(admin_server, pool):
         admin_app.state.ip_allowlist = []
 
 
+async def test_login_endpoint_is_blocked_by_the_ip_allowlist(admin_server, pool):
+    # Regression: a real code review pass caught this endpoint bypassing
+    # the IP allowlist entirely. It's the one route that can never go
+    # through current_admin() -- there's no bearer token yet, that's the
+    # whole point of logging in -- so, unlike every other route, it needs
+    # its own direct _check_ip_allowlist() call the same way /metrics
+    # does. It's also the single most exposed route to check it on: an
+    # attacker outside the allowlist could otherwise still throw
+    # password/TOTP guesses at it even with every other admin route
+    # already unreachable to them.
+    admin_id, username, password, totp_secret = await create_test_admin(pool)
+    admin_app.state.ip_allowlist = ["10.0.0.1"]
+    try:
+        code = pyotp.TOTP(totp_secret).now()
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{admin_server}/auth/login",
+                json={"username": username, "password": password, "totp_code": code},
+            )
+        assert response.status_code == 403
+    finally:
+        admin_app.state.ip_allowlist = []
+
+
 async def test_metrics_endpoint_is_reachable_with_no_session_token(admin_server):
     # Unlike every other route, /metrics doesn't require a bearer session
     # (a Prometheus scraper can't practically present one) -- but it must

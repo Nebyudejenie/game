@@ -5,6 +5,40 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — `/auth/login` now enforces the IP allowlist
+
+Sixth fix from the same fresh `/code-review high` pass.
+
+**The bug**: `services/admin/app.py`'s `_check_ip_allowlist()` is enforced
+in exactly two places -- inside `current_admin()`, the session dependency
+almost every admin route goes through via `Depends(require(...))`, and
+directly inside `/metrics` (the one other route with no session, since a
+Prometheus scraper can't present a bearer token -- itself a fix from an
+earlier pass this session). `/auth/login` never went through either path:
+it takes no bearer token by definition (that's what it's issuing), so it
+never called `current_admin()`, and nobody had added a direct call the way
+`/metrics` got one. It's actually the single most exposed route to have
+missed this check on -- every other admin route was already unreachable to
+an IP outside the allowlist, but that same attacker could still throw
+password/TOTP guesses directly at `/auth/login`.
+
+**Fixed**: added `request: Request` to the handler's signature and a
+`_check_ip_allowlist(request)` call as the first line, matching the exact
+pattern already used by `/metrics`.
+
+Added `test_login_endpoint_is_blocked_by_the_ip_allowlist` to
+`tests/integration/test_admin_app.py`, mirroring the existing
+`test_metrics_endpoint_is_blocked_by_the_ip_allowlist` pattern (set
+`admin_app.state.ip_allowlist`, hit the route over real HTTP, assert
+`403`, restore in `finally`). Verified the regression test is real: `git
+stash push` on just `app.py` reverted to the old code, reran -- failed
+cleanly with `assert 200 == 403` (login succeeded despite the IP not being
+on the allowlist) -- then `git stash pop` to restore the fix.
+
+**Full clean-slate rebuild**: `mypy` clean (63 source files) → `pytest
+tests/` (727 passed, up from 726) → `-m load` (5/5 passed clean this run)
+→ `-m chaos_infra` (1 passed) → `-m e2e` (7 passed). 740/740.
+
 ## 2026-08-25 — `room_lock.py` now tolerates one transient Redis error instead of relinquishing immediately
 
 Fifth fix from the same fresh `/code-review high` pass. High-stakes area
