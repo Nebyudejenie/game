@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncpg
 
 from packages.core import ledger, metrics
-from packages.core.ledger import Entry
+from packages.core.ledger import AsyncpgConnection, Entry
 
 TERMINAL_STATUSES = frozenset({"done", "voided"})
 
@@ -27,35 +27,52 @@ async def refund_round(pool: asyncpg.Pool, round_id: int, *, reason: str) -> boo
     """
     async with pool.acquire() as conn:
         async with conn.transaction():
-            round_row = await conn.fetchrow(
-                "SELECT stake, status FROM rounds WHERE id = $1 FOR UPDATE",
-                round_id,
-            )
-            if round_row is None or round_row["status"] in TERMINAL_STATUSES:
-                return False
+            return await refund_round_in_transaction(conn, round_id, reason=reason)
 
-            stake = round_row["stake"]
-            entrants = await conn.fetch(
-                "SELECT user_id FROM round_entries WHERE round_id = $1", round_id
-            )
-            pot_account = await ledger.get_or_create_account(conn, None, "pot_escrow")
 
-            for entrant in entrants:
-                cash_account = await ledger.get_or_create_account(
-                    conn, entrant["user_id"], "user_cash"
-                )
-                await ledger.post(
-                    conn,
-                    "refund",
-                    [Entry(pot_account.id, -stake), Entry(cash_account.id, stake)],
-                    idempotency_key=f"refund-{round_id}-{entrant['user_id']}",
-                    round_id=round_id,
-                    memo=reason,
-                )
+async def refund_round_in_transaction(
+    conn: AsyncpgConnection, round_id: int, *, reason: str
+) -> bool:
+    """The same operation as refund_round(), for a caller that already
+    owns a transaction and needs the refund to commit or roll back
+    atomically together with something else it writes in the same
+    transaction -- the admin console's void action needs its audit-log
+    entry to be genuinely inseparable from the refund itself (a real bug
+    a code review pass caught: writing the audit entry in a *second*,
+    independent transaction after refund_round() already committed meant
+    a crash in between left real money refunded with no audit trail at
+    all, for exactly the kind of action this codebase's own "no hidden
+    god mode" discipline exists to prevent).
+    """
+    round_row = await conn.fetchrow(
+        "SELECT stake, status FROM rounds WHERE id = $1 FOR UPDATE",
+        round_id,
+    )
+    if round_row is None or round_row["status"] in TERMINAL_STATUSES:
+        return False
 
-            await conn.execute(
-                "UPDATE rounds SET status = 'voided', ended_at = now() WHERE id = $1",
-                round_id,
-            )
+    stake = round_row["stake"]
+    entrants = await conn.fetch(
+        "SELECT user_id FROM round_entries WHERE round_id = $1", round_id
+    )
+    pot_account = await ledger.get_or_create_account(conn, None, "pot_escrow")
+
+    for entrant in entrants:
+        cash_account = await ledger.get_or_create_account(
+            conn, entrant["user_id"], "user_cash"
+        )
+        await ledger.post(
+            conn,
+            "refund",
+            [Entry(pot_account.id, -stake), Entry(cash_account.id, stake)],
+            idempotency_key=f"refund-{round_id}-{entrant['user_id']}",
+            round_id=round_id,
+            memo=reason,
+        )
+
+    await conn.execute(
+        "UPDATE rounds SET status = 'voided', ended_at = now() WHERE id = $1",
+        round_id,
+    )
     metrics.engine_rounds_voided_total.inc()
     return True

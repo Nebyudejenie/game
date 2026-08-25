@@ -88,7 +88,14 @@ async def on_contact(
     chat_id = message.chat.id
     language = resolve_language(message.from_user.language_code)
 
-    referrer_id = await referral.pop_pending_referral(redis, telegram_id)
+    # Peeked, not popped, here -- a real bug a code review pass caught:
+    # popping (deleting) the pending referral before attempting
+    # registration meant a retryable failure (ContactMismatch,
+    # InvalidPhone -- both explicitly designed to let the user try again)
+    # silently lost the referral credit on the user's next, successful
+    # attempt, with no error surfaced to anyone. Only cleared once
+    # registration has actually recorded it in users.referred_by.
+    referrer_id = await referral.peek_pending_referral(redis, telegram_id)
 
     try:
         user = await register_from_contact(
@@ -112,6 +119,9 @@ async def on_contact(
     except PhoneAlreadyRegistered:
         await notifier.send(chat_id, t("error.generic", language))
         return
+
+    if referrer_id is not None:
+        await referral.clear_pending_referral(redis, telegram_id)
 
     await notifier.send(
         chat_id,

@@ -189,6 +189,51 @@ async def test_valid_contact_completes_registration(pool, bot_ctx):
     assert row["display_name"] == "Nebyu"
 
 
+async def test_referral_credit_survives_a_failed_registration_attempt(pool, bot_ctx):
+    # Regression: a real code review pass caught that the pending referral
+    # was popped (deleted from Redis) *before* attempting registration,
+    # so a retryable failure (contact mismatch, invalid phone -- both
+    # explicitly designed to let the user try again) silently lost the
+    # referral credit on the very next, successful attempt, with no error
+    # surfaced to anyone.
+    dp, bot, session = bot_ctx
+    referrer_telegram_id = await _register(dp, bot, session)
+    referrer_id = await pool.fetchval(
+        "SELECT id FROM users WHERE telegram_id = $1", referrer_telegram_id
+    )
+
+    new_telegram_id = next_telegram_id()
+    await dp.feed_update(bot, make_text_update(new_telegram_id, f"/start ref_{referrer_telegram_id}"))
+    await _settle()
+    session.sent.clear()
+
+    # A mismatched contact -- a retryable failure that must not consume
+    # the pending referral.
+    someone_elses_id = next_telegram_id()
+    await dp.feed_update(
+        bot, make_contact_update(new_telegram_id, contact_user_id=someone_elses_id, phone=unique_phone())
+    )
+    await _settle()
+    session.sent.clear()
+
+    row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", new_telegram_id)
+    assert row is None  # the failed attempt must not have registered anyone
+
+    # The real, valid contact -- this must still get credit to the
+    # original referrer, not register with no referrer at all.
+    await dp.feed_update(
+        bot,
+        make_contact_update(new_telegram_id, contact_user_id=new_telegram_id, phone=unique_phone()),
+    )
+    await _settle()
+
+    row = await pool.fetchrow(
+        "SELECT referred_by FROM users WHERE telegram_id = $1", new_telegram_id
+    )
+    assert row is not None
+    assert row["referred_by"] == referrer_id
+
+
 async def test_duplicate_update_id_processed_exactly_once(pool, bot_ctx):
     dp, bot, session = bot_ctx
     telegram_id = next_telegram_id()

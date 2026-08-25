@@ -20,6 +20,8 @@ import bcrypt
 import pyotp
 from redis.asyncio import Redis
 
+from packages.core import rate_limit
+
 SESSION_TTL_SECONDS = 8 * 60 * 60  # one working shift
 SESSION_KEY_PREFIX = "admin_session:"
 
@@ -27,6 +29,15 @@ SESSION_KEY_PREFIX = "admin_session:"
 class LoginFailed(Exception):
     """Deliberately generic -- never reveals whether the username, the
     password, or the TOTP code was the wrong part.
+    """
+
+
+class LoginRateLimited(Exception):
+    """Too many attempts against this username recently. Kept distinct
+    from LoginFailed (a 429, not a 401, at the HTTP layer) -- this
+    reveals nothing about whether the username is real, only that this
+    exact key has been tried too many times, which an attacker already
+    knows going in.
     """
 
 
@@ -43,6 +54,19 @@ def hash_password(password: str) -> str:
 
 def _verify_password(password: str, password_hash: str) -> bool:
     return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+
+
+# A fixed, real bcrypt hash of a value no real password will ever equal --
+# checked against an unknown username's login attempt so that path pays
+# the same ~100ms bcrypt cost a real user's password check would, rather
+# than returning instantly. A real code review pass caught the timing
+# side-channel this closes: this module's own docstring/LoginFailed
+# comment already promised "a caller can't use error text ... to
+# enumerate valid usernames," but an unknown username returned
+# immediately while a known one always paid the bcrypt cost first --
+# exactly the kind of signal error *text* alone doesn't reveal but
+# response *timing* does.
+_DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
 
 
 def generate_totp_secret() -> str:
@@ -89,14 +113,23 @@ async def login(
     otherwise -- every failure mode (unknown user, wrong password, wrong
     TOTP, deactivated account) raises the exact same exception with the
     same message, so a caller can't use error text to enumerate valid
-    usernames or probe which factor was wrong.
+    usernames or probe which factor was wrong. Raises LoginRateLimited
+    (checked first, before any credential is even looked at) if this
+    username has been attempted too many times recently -- a real gap a
+    code review pass caught: nothing anywhere in the admin console
+    throttled login attempts, so a known username's password could be
+    brute-forced online with no lockout.
     """
+    if not await rate_limit.allow(redis, "admin_login", username, **rate_limit.ADMIN_LOGIN):
+        raise LoginRateLimited("too many login attempts for this username")
+
     row = await pool.fetchrow(
         "SELECT id, password_hash, totp_secret, role, is_active FROM admin_users "
         "WHERE username = $1",
         username,
     )
     if row is None or not row["is_active"]:
+        _verify_password(password, _DUMMY_PASSWORD_HASH)  # pay the same bcrypt cost either way
         raise LoginFailed("invalid credentials")
     if not _verify_password(password, row["password_hash"]):
         raise LoginFailed("invalid credentials")

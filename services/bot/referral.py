@@ -33,10 +33,10 @@ async def store_pending_referral(redis: Redis, telegram_id: int, referrer_telegr
     )
 
 
-async def pop_pending_referral(redis: Redis, telegram_id: int) -> int | None:
-    key = f"pending_referral:{telegram_id}"
-    value = await redis.get(key)
-    if value is None:
-        return None
-    await redis.delete(key)
-    return int(value)
+async def peek_pending_referral(redis: Redis, telegram_id: int) -> int | None:
+    value = await redis.get(f"pending_referral:{telegram_id}")
+    return int(value) if value is not None else None
+
+
+async def clear_pending_referral(redis: Redis, telegram_id: int) -> None:
+    await redis.delete(f"pending_referral:{telegram_id}")

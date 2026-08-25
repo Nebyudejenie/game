@@ -5,6 +5,262 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — A full-platform `/code-review high` pass (Phase 3 through the pre-observability baseline): 5 fixed, ~20 more catalogued
+
+Ran `/code-review high 812eb65..4cc23c4` -- the entire core platform
+(realtime gateway, Mini App, deposits, withdrawals, admin console,
+responsible gaming, load/chaos testing, notification relay), none of
+which had ever had a structured review pass before today's earlier,
+narrower one. Eight finder agents (four correctness scans split by
+module area, a removed-behavior audit, a cross-file tracer, reuse, and
+efficiency). This surfaced significantly more, and more severe, findings
+than the earlier pass -- some touching the core game engine and payment
+pipeline, the highest-stakes code in the system. Given the volume, the
+five clearest, most severe, safest-to-fix-correctly findings were fixed
+with full rigor (verified independently, fixed, tested, full clean-slate
+rebuild); everything else is catalogued below in enough detail to act on
+in a dedicated follow-up, rather than rushed into the same pass under
+increasing time pressure against increasingly invasive changes.
+
+### Fixed
+
+1. **The most severe finding: self-exclusion was silently reversible by
+   any ops/finance admin, not just superadmin.**
+   `services/admin/app.py`'s generic `POST /users/{id}/status` accepted
+   any string for `status` with zero validation, gated only by
+   `users:suspend` (granted to `ops`/`finance`/`superadmin`, not just
+   `superadmin`). `packages/core/responsible_gaming.py`'s own docstring
+   states self-exclusion is irreversible specifically *because* "there is
+   deliberately no 'lift my own self-exclusion' function anywhere in this
+   codebase" -- this generic endpoint was exactly such a function in
+   disguise: `{"status": "active", "reason": "x"}` against a
+   self-excluded player instantly undid a legally-mandated exclusion,
+   leaving only an audit-log entry (not a block) as a trace. **Fixed**:
+   `set_user_status()` now rejects any target status outside
+   `{active, limited, banned}` (excluding `self_excluded` -- setting it
+   directly through this path would also be wrong, since it wouldn't run
+   `self_exclude()`'s own bookkeeping and would produce a broken
+   half-exclusion), and separately refuses to change status *at all* once
+   a user's current status is `self_excluded`, in either direction. Three
+   new tests confirm both guards and that the original bug's exact repro
+   (an `active` status write against a real self-excluded user) is now
+   blocked.
+2. **`void_round_admin`'s audit log was not in the same transaction as
+   the refund it recorded**, contradicting `services/admin/queries.py`'s
+   own stated invariant ("every mutation writes an audit_log entry in the
+   same transaction as the mutation itself -- never as an afterthought").
+   It called `refund_round(pool, ...)` (its own independent, already-
+   committed transaction) and then `audit.record(pool, ...)` afterward on
+   a separate connection -- a crash in between left real money refunded
+   with zero audit trail, unattributable to the admin who did it,
+   exactly the kind of "hidden god mode" gap this file's own discipline
+   exists to prevent. **Fixed**: `services/engine/refunds.py` gained
+   `refund_round_in_transaction(conn, ...)`, the same logic taking an
+   already-open connection instead of acquiring its own; `refund_round()`
+   itself is now a thin wrapper around it. `void_round_admin` opens one
+   transaction and calls both the refund and the audit write through the
+   same `conn`. The three other callers (`round_engine.py`'s lobby-
+   underfill and exhausted-draw paths, `recovery.py`'s crash sweep) were
+   untouched and re-verified against the full round-engine/recovery/
+   worker test suites.
+3. **Admin login leaked which usernames exist via response timing.**
+   `services/admin/auth.py`'s own docstring/`LoginFailed` promised "a
+   caller can't use error text to enumerate valid usernames," but an
+   unknown username returned `LoginFailed` immediately while a real one
+   always paid bcrypt's ~100ms verification cost first -- exactly the
+   signal error *text* alone doesn't leak but response *timing* does.
+   **Fixed** with a fixed dummy bcrypt hash checked against any unknown-
+   username attempt, paying the same cost either way. A timing assertion
+   would be fragile on this session's own documented shared-host
+   contention; the regression test instead spies on `_verify_password()`
+   to confirm it's genuinely called (not skipped) for the unknown-
+   username path.
+4. **Admin login had no rate limiting or lockout at all.**
+   `packages/core/rate_limit.py`'s `allow()` was never imported into
+   `services/admin/app.py` -- TOTP raises the bar, but a leaked or weak
+   admin password could be brute-forced online with no throttling,
+   unlike every player-facing gateway action. **Fixed** with a new
+   `ADMIN_LOGIN` bucket (5 attempts per 15 minutes per username --
+   not one of spec 9.2's own numbers, an engineering judgment call
+   closing a real gap; spec only specifies "IP allowlist" and "TOTP
+   required" for admin login), checked first in `auth.login()` before any
+   credential is examined, raising a distinct `LoginRateLimited` (429,
+   not `LoginFailed`'s 401 -- it reveals nothing about username validity,
+   only that this key has been tried too many times).
+5. **Referral credit was silently dropped if the first registration
+   attempt failed validation.** `services/bot/handlers.py`'s `on_contact`
+   popped (deleted) the pending Redis referral *before* attempting
+   registration; `ContactMismatch`/`InvalidPhone` are both explicitly
+   designed to let the user retry, but by the time they did, the
+   referral was already gone -- `referred_by` silently ended up `NULL`
+   with no error surfaced to anyone. **Fixed**: `referral.py`'s
+   `pop_pending_referral` split into `peek_pending_referral` (read-only)
+   and `clear_pending_referral` (explicit delete, called only after
+   registration actually records it in `users.referred_by`). New
+   regression test drives the exact failed-then-successful sequence.
+
+### Catalogued, not fixed -- for a dedicated follow-up, ranked by severity
+
+**Game engine (the highest-stakes code left untouched this pass,
+deliberately -- these need their own careful, focused sessions, not a
+rushed change to the most heavily-tested core of the system):**
+- `services/engine/room_lock.py`'s `_refresh_loop`/`release()` have no
+  try/except around their Redis `eval()` calls. A single transient Redis
+  error kills the refresh task *before* `self._held = False` runs, so
+  `is_held()` reports `True` forever even after the real Redis TTL key
+  expires and a second engine legitimately acquires the same room --
+  split-brain double-processing of one round, risking a double payout.
+  Directly contradicts the module's own docstring guarantee.
+- `round_engine.py`'s auto-mark tie detection (`_call_next_number`)
+  `return`s as soon as the *first* simultaneous auto-mark winner claims;
+  any other entrant who also completes a winning pattern on that exact
+  same called number is never evaluated in that call and has no other
+  path to register within the 50ms tie window -- a real, silent
+  misallocation of derash between two players who both actually won.
+  The manual-claim tie path is tested; this auto-mark equivalent isn't.
+- `recovery.py`'s orphan sweep treats "room lock held by *anyone*" as
+  proof the *specific* stuck round is still owned. If a crashed round's
+  lock expires and a *different* engine claims the room (starting a
+  fresh round) before the sweep runs, the old stuck round's stakes sit
+  in `pot_escrow` with no remaining path to refund -- a real risk in the
+  multi-worker fleet `room_lock.py` is explicitly designed for.
+- `round_engine.py`'s `max_players` capacity check
+  (`len(self._entries) >= max_players`) is TOCTOU-racy against
+  concurrent `join()` calls -- no lock covers the check-then-insert
+  window, so a burst of joins can overfill a room past its configured
+  max.
+- `_serve_commands`'s call into `_handle_command` has no per-command
+  exception isolation -- one malformed/edge-case command payload kills
+  the room's single long-lived command consumer permanently (no
+  restart), silently timing out every subsequent join/drop/claim for
+  that room while the round itself keeps running unattended.
+
+**Payments (real money-movement risk):**
+- `payout_worker.py` treats Chapa's mere "accepted, processing" response
+  as `_settle_success` immediately (locked funds moved to
+  `provider_settlement`, payment marked `succeeded`) -- there is no
+  payout webhook route and no polling fallback (unlike
+  `deposits.poll_pending_deposits`) for outbound transfers, so a transfer
+  that Chapa later actually fails (bad account number) is never
+  reconciled: silent, permanent, unrecoverable player money loss with no
+  signal anywhere.
+- `withdrawals.py`'s `enqueue_payout()` (the Redis `XADD`) runs *after*
+  the DB transaction that already locked the funds and inserted the
+  `payments` row commits. A crash or Redis blip in between leaves the
+  withdrawal stuck at `status='approved'` forever -- funds locked, no
+  message ever queued, and nothing sweeps stale `approved` rows.
+- `payout_worker.py` only recovers a crashed job via its *own* consumer
+  name's pending-entries list (`XREADGROUP ... id="0"`) -- no
+  `XCLAIM`/`XAUTOCLAIM` of another (dead) consumer's stale entries. The
+  module's own docstring claims crash-redelivery works generally; it
+  only holds if the replacement process reuses the exact same consumer
+  name, which a real fleet (hostname-derived names) likely won't.
+- `chapa.py`'s `verify_webhook` raises `InvalidSignature` (discarded, per
+  the docstring, not retried or alerted on) for a structurally valid,
+  correctly-signed webhook with an unrecognized status or a missing
+  field -- indistinguishable from an actual forgery attempt, silently
+  losing visibility into that payment's true state if Chapa ever adds a
+  status value or omits a field on an edge-case transaction type.
+- Lower severity: the deposit daily-cap query counts abandoned
+  `pending`/`processing` intents forever (self-DoS on a user with several
+  never-completed checkouts, not a security bug);
+  `payout_worker.py`'s `_flatten()` assumes a specific `xreadgroup`
+  return shape and would raise uncaught on an unexpected one, killing the
+  worker with no restart logic.
+
+**Responsible gaming / concurrency:**
+- `check_stake_allowed()`'s daily-loss-cap read and the stake-posting
+  transaction are two separate round trips with no lock spanning both --
+  a player one stake from their configured cap, opening two rooms
+  simultaneously, can get both stakes accepted before either read
+  reflects the other, narrowly exceeding their own self-set limit. The
+  ledger itself stays correct; the soft limit doesn't.
+
+**Live updates / notifications:**
+- Stakes, drop-card refunds, and settlement payouts in `round_engine.py`
+  never publish the `user:{id}` Redis pub/sub event the Mini App's
+  header/wallet balance listens for -- only deposits do
+  (`_publish_balance_update`). A player who wins and immediately opens
+  the wallet screen without a reload sees a stale balance until something
+  else (a reconnect, a deposit) happens to trigger a refresh. Ledger data
+  is never wrong; the live UI can be stale.
+- `notifier.py`'s worker loop only catches `TelegramRetryAfter`/
+  `TelegramForbiddenError`; any other exception (e.g. malformed HTML from
+  unescaped user text interpolated into an HTML-parse-mode message) kills
+  the single global notification worker task permanently, with nothing
+  supervising or restarting it -- every future deposit/win/withdrawal
+  notification for every user silently stops until the process restarts.
+- `notification_relay.py` ACKs a stream entry right after
+  `notifier.send()` returns, but `send()` only enqueues to an in-process
+  queue -- an actual `send_message` hasn't happened yet. A crash between
+  enqueue and real delivery loses the notification with no redelivery,
+  since the stream entry is already ACKed.
+
+**Gateway / Mini App:**
+- `web/miniapp/js/ws.js`'s reconnect loop doesn't distinguish terminal
+  auth failures (codes 4000/4001/4003) from transient disconnects --
+  stale `initData` (e.g. past the 24h replay window) causes an infinite,
+  unbacked-off, once-per-second reconnect storm against the gateway with
+  no user-visible terminal state.
+- `connection.py`'s `_writer_loop` only re-checks `needs_state_sync` at
+  the top of its loop, immediately before blocking on the next queue
+  item -- if a droppable-message overflow sets that flag but no further
+  pub/sub traffic arrives for a while (e.g. calls pausing near round
+  end), a recovering client's board stays stale until unrelated traffic
+  happens to arrive.
+- `services/bot/phone.py`'s Ethiopian-number validation only checks
+  digit count and a leading `7`/`9` after stripping a `251`/`0` prefix --
+  structurally-similar foreign numbers (e.g. a Kenyan `07XX XXX XXX`)
+  normalize and get silently accepted as if Ethiopian.
+
+**Admin console (lower severity / operational):**
+- `dashboard_summary()`/`daily_ggr()` compute "today" with Python's
+  `date.today()` (server-local time) while the SQL casts
+  `created_at::date` using the Postgres session's own timezone setting --
+  if these two clocks ever disagree, transactions near midnight get
+  silently attributed to the wrong calendar day in financial reports.
+- `packages/core/redis_conn.py`'s `get_redis()` sets no
+  `socket_connect_timeout`/`socket_timeout` -- a degraded/unreachable
+  Redis can hang admin API requests (and anything else using this client)
+  indefinitely instead of failing fast.
+- `update_room_admin`'s audit `before`/`after` values for the `win_patterns`
+  jsonb field aren't normalized (`json.loads`'d) before being written to
+  the audit log, unlike `list_rooms`'s own handling of the same column --
+  a minor audit-readability inconsistency, not a financial bug.
+- `packages/core/rate_limit.py`'s `allow()` has no try/except around its
+  Redis `eval()` call, and no caller wraps it either -- fails *closed*
+  (an unhandled exception kills the connection, not a rate-limit bypass),
+  but a Redis blip becomes a mass WebSocket disconnect rather than a
+  graceful degrade.
+- `ADMIN_IP_ALLOWLIST` defaulting to empty ("unrestricted") is a known,
+  already-documented dev-friendly tradeoff, not a newly-discovered gap --
+  re-flagged here only because a production deployment that forgets to
+  set it silently runs with no network-level restriction on the admin
+  API at all, relying entirely on credential security.
+
+**Efficiency/reuse (lowest priority, real but not correctness bugs):**
+`user_balance_snapshot`-shaped logic (3 accounts x get-or-create + balance)
+duplicated between `gateway/queries.py` and `admin/queries.py` instead of
+shared; the LTV formula duplicated across `player_ltv`/`top_players_by_ltv`/
+`withdrawals.py`'s `lifetime_in`/`lifetime_out`; `dashboard_summary`'s three
+near-identical ledger queries collapsible into one `FILTER`-based query;
+`list_rooms`'s two near-duplicate branches; the `"reason is required"`
+check copy-pasted 4x in `admin/app.py` (and inconsistently *not* required
+on `approve_withdrawal`, which reads like an accidental miss); settlement's
+sequential per-winner account lookups in `round_engine.py`'s critical path
+(could batch via `unnest()`); `fanout.py` hard-coding bingo-specific message
+type knowledge (`DROPPABLE_TYPES`) into an otherwise domain-agnostic
+transport; `notifier.py`'s `_backoff_until` dict growing unbounded for the
+life of the process; `services/gateway/queries.py`'s `build_state_sync`
+running two independent `fetchrow`s sequentially instead of via
+`asyncio.gather`; `services/engine/commands.py`'s `send_command()` opening
+a brand-new Redis pubsub subscription per single player action (join's
+own hot path) instead of one long-lived per-process demuxer.
+
+Full clean-slate rebuild after the five fixes: mypy clean across 63
+source files, `pytest tests/` 682 passed / 13 deselected (up from 677),
+`-m load` 5 passed, `-m chaos_infra` 1 passed, `-m e2e` 7 passed.
+
 ## 2026-08-25 — A broader `/code-review high` pass (backup/restore through today) caught six real bugs, including one crash
 
 Ran `/code-review high 4cc23c4..HEAD` -- everything since backup/restore

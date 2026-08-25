@@ -96,6 +96,8 @@ async def login(body: LoginRequest) -> dict[str, str]:
             password=body.password,
             totp_code=body.totp_code,
         )
+    except auth.LoginRateLimited as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except auth.LoginFailed as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     return {"token": token}
@@ -195,14 +197,17 @@ async def set_user_status(
 ) -> dict[str, str]:
     if not body.reason.strip():
         raise HTTPException(status_code=422, detail="reason is required")
-    await queries.set_user_status(
-        app.state.pool,
-        admin_id=admin.admin_id,
-        user_id=user_id,
-        status=body.status,
-        reason=body.reason,
-        ip_address=_client_ip(request),
-    )
+    try:
+        await queries.set_user_status(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            user_id=user_id,
+            status=body.status,
+            reason=body.reason,
+            ip_address=_client_ip(request),
+        )
+    except queries.InvalidStatusTransition as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"status": "ok"}
 
 

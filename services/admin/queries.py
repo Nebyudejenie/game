@@ -21,7 +21,7 @@ from packages.core.notifications import notify_user
 from packages.core.phone_crypto import decrypt_phone, phone_lookup_hash
 from services.admin import audit
 from services.bot.phone import normalize_ethiopian_phone
-from services.engine.refunds import refund_round
+from services.engine.refunds import refund_round_in_transaction
 from services.payments.withdrawals import enqueue_payout
 
 
@@ -296,6 +296,25 @@ async def adjust_balance(
     return txn.id
 
 
+# Self-exclusion (packages.core.responsible_gaming.self_exclude()) is
+# deliberately, permanently irreversible for its duration -- "there is
+# deliberately no 'lift my own self-exclusion' function anywhere in this
+# codebase" per that module's own docstring. This generic admin
+# status-change endpoint was exactly such a function in disguise (a real
+# bug a code review pass caught: any ops/finance admin holding
+# users:suspend could silently reverse a legally-mandated exclusion by
+# calling this with status="active"). self_excluded is excluded from both
+# ends of the transition: an admin can never set it directly (that would
+# also be incomplete -- it wouldn't set self_excluded_until, producing a
+# broken half-exclusion), and once a user is self_excluded, this endpoint
+# refuses to touch their status at all, in either direction.
+_ADMIN_SETTABLE_STATUSES = frozenset({"active", "limited", "banned"})
+
+
+class InvalidStatusTransition(Exception):
+    pass
+
+
 async def set_user_status(
     pool: asyncpg.Pool,
     *,
@@ -305,9 +324,19 @@ async def set_user_status(
     reason: str,
     ip_address: str | None,
 ) -> None:
+    if status not in _ADMIN_SETTABLE_STATUSES:
+        raise InvalidStatusTransition(f"admins cannot set user status to {status!r}")
+
     async with pool.acquire() as conn:
         async with conn.transaction():
-            before = await conn.fetchval("SELECT status FROM users WHERE id = $1", user_id)
+            before = await conn.fetchval(
+                "SELECT status FROM users WHERE id = $1 FOR UPDATE", user_id
+            )
+            if before == "self_excluded":
+                raise InvalidStatusTransition(
+                    "self-exclusion cannot be changed by an admin -- it is "
+                    "permanent for its duration by design"
+                )
             await conn.execute("UPDATE users SET status = $1 WHERE id = $2", status, user_id)
             await audit.record(
                 conn,
@@ -391,19 +420,29 @@ async def get_round_fairness(pool: asyncpg.Pool, round_id: int) -> dict[str, Any
 async def void_round_admin(
     pool: asyncpg.Pool, *, admin_id: int, round_id: int, reason: str, ip_address: str | None
 ) -> bool:
-    before = await pool.fetchrow("SELECT status FROM rounds WHERE id = $1", round_id)
-    refunded = await refund_round(pool, round_id, reason=f"admin_void: {reason}")
-    await audit.record(
-        pool,
-        admin_id=admin_id,
-        action="rounds.void",
-        target_type="round",
-        target_id=str(round_id),
-        before={"status": before["status"] if before else None},
-        after={"status": "voided" if refunded else "unchanged (already terminal)"},
-        reason=reason,
-        ip_address=ip_address,
-    )
+    # The refund and its audit-log entry commit or roll back together, in
+    # one transaction -- a real bug a code review pass caught: this used
+    # to call refund_round(pool, ...) (its own independent transaction,
+    # already committed) and then write the audit entry afterward on a
+    # separate connection, so a crash in between left real money refunded
+    # with no audit trail for it at all.
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            before = await conn.fetchrow("SELECT status FROM rounds WHERE id = $1", round_id)
+            refunded = await refund_round_in_transaction(
+                conn, round_id, reason=f"admin_void: {reason}"
+            )
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="rounds.void",
+                target_type="round",
+                target_id=str(round_id),
+                before={"status": before["status"] if before else None},
+                after={"status": "voided" if refunded else "unchanged (already terminal)"},
+                reason=reason,
+                ip_address=ip_address,
+            )
     return refunded
 
 

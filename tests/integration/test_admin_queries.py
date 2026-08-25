@@ -8,7 +8,7 @@ from decimal import Decimal
 
 import pytest
 
-from packages.core import ledger
+from packages.core import ledger, responsible_gaming
 from packages.core.phone_crypto import encrypt_phone, phone_lookup_hash
 from services.admin import queries
 from services.engine.round_engine import RoundEngine, load_room_config
@@ -251,13 +251,13 @@ async def test_set_user_status_writes_audit_log_with_before_and_after(pool, conn
         pool,
         admin_id=admin_id,
         user_id=user_id,
-        status="self_excluded",
-        reason="player requested self-exclusion",
+        status="banned",
+        reason="fraud investigation",
         ip_address="127.0.0.1",
     )
 
     status = await conn.fetchval("SELECT status FROM users WHERE id = $1", user_id)
-    assert status == "self_excluded"
+    assert status == "banned"
 
     audit_row = await conn.fetchrow(
         "SELECT before, after FROM admin_audit_log WHERE target_id = $1 ORDER BY id DESC LIMIT 1",
@@ -268,7 +268,58 @@ async def test_set_user_status_writes_audit_log_with_before_and_after(pool, conn
     before = json.loads(audit_row["before"])
     after = json.loads(audit_row["after"])
     assert before["status"] == "active"
-    assert after["status"] == "self_excluded"
+    assert after["status"] == "banned"
+
+
+async def test_set_user_status_refuses_to_directly_set_self_excluded(pool, conn):
+    # A real bug a code review pass caught: admins setting status =
+    # "self_excluded" directly through this generic endpoint would produce
+    # a broken half-exclusion (the users.status flag set, but none of
+    # responsible_gaming.self_exclude()'s own bookkeeping --
+    # self_excluded_until, the 180-day minimum -- ever applied). Real
+    # self-exclusion must only ever go through that function.
+    admin_id, *_ = await create_test_admin(pool)
+    user_id = await create_funded_user(conn)
+
+    with pytest.raises(queries.InvalidStatusTransition):
+        await queries.set_user_status(
+            pool,
+            admin_id=admin_id,
+            user_id=user_id,
+            status="self_excluded",
+            reason="attempting to self-exclude via the generic endpoint",
+            ip_address="127.0.0.1",
+        )
+    status = await conn.fetchval("SELECT status FROM users WHERE id = $1", user_id)
+    assert status == "active"
+
+
+async def test_set_user_status_refuses_to_reverse_a_real_self_exclusion(pool, conn):
+    # The actual bug: self-exclusion (packages.core.responsible_gaming
+    # .self_exclude()) is deliberately, permanently irreversible for its
+    # duration -- "there is deliberately no 'lift my own self-exclusion'
+    # function anywhere in this codebase" per that module's own docstring.
+    # This generic status endpoint was exactly such a function in
+    # disguise: any ops/finance admin holding users:suspend (not just
+    # superadmin) could previously call this with status="active" and
+    # silently undo a legally-mandated exclusion. Confirmed as a real,
+    # reachable path before this fix -- not a hypothetical.
+    admin_id, *_ = await create_test_admin(pool)
+    user_id = await create_funded_user(conn)
+    await responsible_gaming.self_exclude(pool, user_id)
+
+    for attempted_status in ("active", "limited", "banned"):
+        with pytest.raises(queries.InvalidStatusTransition):
+            await queries.set_user_status(
+                pool,
+                admin_id=admin_id,
+                user_id=user_id,
+                status=attempted_status,
+                reason="trying to reverse a self-exclusion",
+                ip_address="127.0.0.1",
+            )
+        status = await conn.fetchval("SELECT status FROM users WHERE id = $1", user_id)
+        assert status == "self_excluded"
 
 
 async def test_void_round_admin_refunds_and_is_idempotent(pool, redis, card_pool, conn):

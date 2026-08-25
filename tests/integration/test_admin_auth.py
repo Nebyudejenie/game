@@ -7,6 +7,7 @@ import uuid
 import pyotp
 import pytest
 
+from packages.core import rate_limit
 from services.admin import auth
 
 
@@ -59,7 +60,59 @@ async def test_wrong_totp_code_rejected(pool, redis):
 
 async def test_unknown_username_rejected(pool, redis):
     with pytest.raises(auth.LoginFailed):
-        await auth.login(pool, redis, username="no-such-admin", password="x", totp_code="000000")
+        await auth.login(
+            pool, redis, username=unique_username(), password="x", totp_code="000000"
+        )
+
+
+async def test_unknown_username_still_pays_the_real_bcrypt_cost(pool, redis, monkeypatch):
+    # Regression: a real code review pass caught a timing side-channel --
+    # an unknown username used to return LoginFailed immediately, while a
+    # real username always paid bcrypt's ~100ms cost checking the
+    # password first, letting an attacker time responses to enumerate
+    # valid admin usernames (the exact thing this module's own docstring
+    # already promised error *text* alone could never reveal). A strict
+    # wall-clock timing assertion would be fragile on a shared host this
+    # session has already documented real contention on -- what's
+    # deterministically verifiable instead is that _verify_password() is
+    # genuinely called (against the fixed dummy hash) for the unknown-
+    # username path, not skipped.
+    calls: list[tuple[str, str]] = []
+    real_verify = auth._verify_password
+
+    def spy(password: str, password_hash: str) -> bool:
+        calls.append((password, password_hash))
+        return real_verify(password, password_hash)
+
+    monkeypatch.setattr(auth, "_verify_password", spy)
+
+    with pytest.raises(auth.LoginFailed):
+        await auth.login(
+            pool, redis, username=unique_username(), password="x", totp_code="000000"
+        )
+
+    assert calls == [("x", auth._DUMMY_PASSWORD_HASH)]
+
+
+async def test_login_is_rate_limited_per_username(pool, redis):
+    # Regression: a real code review pass caught that nothing anywhere in
+    # the admin console throttled login attempts -- a known username's
+    # password could be brute-forced online with no lockout at all.
+    admin_id, username, password, totp_secret = await create_test_admin(pool)
+
+    for _ in range(rate_limit.ADMIN_LOGIN["capacity"]):
+        with pytest.raises(auth.LoginFailed):
+            await auth.login(pool, redis, username=username, password="wrong", totp_code="000000")
+
+    with pytest.raises(auth.LoginRateLimited):
+        await auth.login(pool, redis, username=username, password="wrong", totp_code="000000")
+
+    # The real password would have worked, were the account not rate
+    # limited -- proves this actually blocks the correct-credentials
+    # attempt too, not just further wrong guesses.
+    code = pyotp.TOTP(totp_secret).now()
+    with pytest.raises(auth.LoginRateLimited):
+        await auth.login(pool, redis, username=username, password=password, totp_code=code)
 
 
 async def test_deactivated_account_rejected_even_with_correct_credentials(pool, redis):
@@ -80,7 +133,7 @@ async def test_login_failure_messages_do_not_distinguish_failure_reason(pool, re
 
     messages = set()
     for kwargs in [
-        dict(username="no-such-user", password="x", totp_code="000000"),
+        dict(username=unique_username(), password="x", totp_code="000000"),
         dict(username=username, password="wrong", totp_code=code),
         dict(username=username, password=password, totp_code="000000"),
     ]:

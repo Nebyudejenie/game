@@ -187,7 +187,9 @@ directly, so `pytest` works with no `.env` at all).
   fallback — enforced mechanically, not just by convention, by an AST-based
   test that fails on any hardcoded string literal in `handlers.py`.
 - **`services/bot/handlers.py`** + **`app.py`** — the aiogram 3 webhook
-  app: full command set, referral deep links, and real reads/writes
+  app: full command set, referral deep links (credit survives a failed
+  first registration attempt, e.g. a mismatched contact — a real bug a
+  `/code-review` pass caught, see `DECISIONS.md`), and real reads/writes
   against the same ledger and round tables the engine and gateway use —
   `/balance` and `/history` show actual money and actual games, not
   placeholders. `/deposit`, `/withdraw`, and `/limits` honestly report
@@ -403,7 +405,12 @@ already flagged for withdrawal holder-name matching. See `DECISIONS.md`.
   tokens (server-side revocable on logout, unlike a JWT), and login failures
   that all raise the same generic error regardless of which check failed
   (unknown username, wrong password, wrong code) so the error text itself
-  can't be used to enumerate usernames or probe 2FA status.
+  can't be used to enumerate usernames or probe 2FA status — and, since a
+  `/code-review` pass caught the gap, the same is now true of response
+  *timing*: an unknown username pays the same bcrypt cost a real one does,
+  instead of returning instantly. Login attempts are also now rate
+  limited (5 per 15 minutes per username) — previously unthrottled
+  entirely. See `DECISIONS.md`.
 - **`services/admin/rbac.py`** — a single `PERMISSIONS` dict mapping each
   permission to the roles allowed to use it (`support` / `finance` / `ops` /
   `superadmin`), checked through one `has_permission()` function on every
@@ -412,13 +419,20 @@ already flagged for withdrawal holder-name matching. See `DECISIONS.md`.
   (`adjust_balance`, `void_round_admin`) goes through
   `packages/core/ledger.py` like any other transaction, never a direct
   balance write; every mutation writes an audit log row with before/after
-  state.
+  state, in the same transaction as the mutation itself — `void_round_admin`
+  didn't actually honor that for its own refund until a `/code-review`
+  pass caught it (the refund and its audit entry used to be two separate,
+  independently-committable transactions). `set_user_status` can suspend
+  or lift a suspension, but can never set *or* reverse self-exclusion —
+  a real bug the same review pass caught: any ops/finance admin could
+  previously undo a legally-mandated self-exclusion through this generic
+  endpoint. See `DECISIONS.md`.
 - **`services/admin/audit.py`** + a migration — `admin_audit_log` is
   append-only at the database level: a `BEFORE UPDATE OR DELETE` trigger
   raises rather than relying on convention.
 - **`services/admin/app.py`** — the FastAPI admin API: dashboard summary,
   user search/detail/ledger history, balance adjustment, user status
-  (suspend/self-exclude), round list/detail, the fairness-verification
+  (active/limited/banned — never self-exclusion, see above), round list/detail, the fairness-verification
   route (`GET /rounds/{id}/fairness` — reveals the committed `server_seed`
   once a round is terminal and independently re-verifies the draw), admin
   round voiding, room CRUD, reports (daily GGR, player LTV, weekly

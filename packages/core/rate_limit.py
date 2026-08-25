@@ -87,3 +87,14 @@ WS_MESSAGES = {"capacity": 30, "refill_per_second": 30.0}
 TAKE_CARD = {"capacity": 10, "refill_per_second": 10.0 / 60.0}
 CLAIM = {"capacity": 5, "refill_per_second": 5.0 / 60.0}
 DEPOSIT = {"capacity": 5, "refill_per_second": 5.0 / 3600.0}
+# Not one of spec 9.2's own numbers (only "IP allowlist" and "TOTP
+# required" are specified for admin login) -- an engineering judgment
+# call closing a real gap a code review pass caught: services/admin
+# /app.py never imported or called rate_limit.allow() anywhere, so
+# password-guessing against a known admin username was completely
+# unthrottled (TOTP raises the bar, but doesn't stop the password half
+# being brute-forced online). 5 attempts per 15 minutes per username --
+# generous enough that a legitimate admin fat-fingering their password a
+# couple of times never gets locked out, tight enough to make online
+# brute-forcing impractical.
+ADMIN_LOGIN = {"capacity": 5, "refill_per_second": 5.0 / 900.0}
