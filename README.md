@@ -567,6 +567,17 @@ the real point of the Lua script — 50 genuinely concurrent requests
 against a capacity-10 bucket letting through exactly 10, never more.
 See `DECISIONS.md`.
 
+**Two more zero-coverage modules found the same way** (grepping every
+source file against every test file): `packages/core/logging.py`'s
+redaction processor (spec section 9.2's "logs must never contain full
+[phone] numbers or `initData` strings" — `tests/unit/test_logging.py`
+captures real stdout and parses the real JSON a log call produces, not a
+mock) and `services/bot/keyboards.py` (pure keyboard builders —
+`registration_keyboard`'s share button actually requesting
+`request_contact`, and `main_menu_keyboard`'s Play button correctly
+omitting `web_app` when `MINIAPP_URL` is empty, per
+`tests/unit/test_keyboards.py`). See `DECISIONS.md`.
+
 **Phone numbers encrypted at rest (spec section 9.2):**
 `packages/core/phone_crypto.py` stores every phone number as two derived
 values instead of plaintext — AES-256-GCM ciphertext

@@ -5,6 +5,49 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-24 — Two more zero-coverage modules closed: `logging.py`'s redaction, `keyboards.py`
+
+Same method as the `rate_limit.py` entry directly below: grepped every
+source file against every test file to find which modules no test
+anywhere actually references. Two more turned up:
+
+- **`packages/core/logging.py`** — the redaction processor is spec
+  section 9.2's own requirement ("logs must never contain full [phone]
+  numbers or `initData` strings"), and it had never once been exercised:
+  `reconcile_job.py` is the only existing caller of `configure_logging()`,
+  and it's only ever run as a real subprocess
+  (`tests/integration/test_reconcile_job.py`), so nothing ever captured
+  and inspected the actual JSON a log call produces.
+  `tests/unit/test_logging.py` configures real `structlog`, captures real
+  stdout, and parses the real JSON line: `phone`/`phone_e164`/`init_data`/
+  `bot_token`/`webhook_secret` are all confirmed redacted (including
+  case-insensitively — a caller spelling a key `Phone` or `TOKEN` must
+  still trip it), unrelated fields (`user_id`, `amount`) are confirmed
+  left alone, and the output is confirmed real, parseable JSON with the
+  expected `event`/`level`/`timestamp` shape. `structlog.configure()`
+  reconfigures global state freely on every call (unlike OpenTelemetry's
+  `TracerProvider`, confirmed earlier this session to have a
+  first-call-wins guard) — verified this has no such guard before relying
+  on it, not assumed from the two libraries sharing a "global config"
+  shape.
+- **`services/bot/keyboards.py`** — pure keyboard builders, zero prior
+  coverage. Two behaviors worth pinning down beyond "it doesn't crash":
+  `registration_keyboard`'s share button actually has
+  `request_contact=True` (the entire contact-mismatch anti-spoofing check
+  in `services/bot/registration.py` depends on the contact having come
+  through Telegram's own share-contact UI, not user-typed text — a
+  regression here would silently defeat that check while looking
+  identical in the UI), and `main_menu_keyboard`'s Play button correctly
+  omits `web_app` entirely when `miniapp_url` is empty rather than
+  shipping a `WebAppInfo` pointing at an empty string (which Telegram's
+  own client would reject) — the exact fallback the module's own comment
+  already documented but nothing had verified. Also checked both locales
+  actually resolve real text, not a fallback or a raw i18n key.
+
+Full clean-slate rebuild: mypy clean across 63 source files, `pytest
+tests/` 671 passed / 13 deselected (up from 657), `-m load` 5 passed,
+`-m chaos_infra` 1 passed, `-m e2e` 7 passed.
+
 ## 2026-08-24 — Closed a real test-coverage gap: `packages/core/rate_limit.py` had zero tests
 
 Found while looking for the next genuinely buildable, non-business-parameter-blocked
