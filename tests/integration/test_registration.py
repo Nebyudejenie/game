@@ -129,3 +129,74 @@ async def test_unknown_referrer_is_ignored_not_an_error(pool):
 
 async def test_get_registered_user_returns_none_for_unknown(pool):
     assert await get_registered_user(pool, 999_999_999_998) is None
+
+
+async def _create_phoneless_user(pool, telegram_id: int) -> int:
+    # Mirrors services/gateway/queries.py's get_or_create_user_by_telegram_id()
+    # exactly -- the real path that creates a users row with no phone at
+    # all, for anyone who opens the Mini App before ever messaging the bot.
+    row = await pool.fetchrow(
+        "INSERT INTO users (telegram_id, display_name) VALUES ($1, $2) RETURNING id",
+        telegram_id,
+        "Mini App User",
+    )
+    assert row is not None
+    return int(row["id"])
+
+
+async def test_get_registered_user_returns_none_for_a_phoneless_row(pool):
+    # A real regression: this used to crash with TypeError
+    # ("cannot convert 'NoneType' object to bytes") instead of correctly
+    # reporting "not registered" for a Mini-App-first user who then
+    # messages the bot (e.g. /start, /balance, /deposit -- every handler
+    # that calls get_registered_user).
+    telegram_id = next_telegram_id()
+    await _create_phoneless_user(pool, telegram_id)
+    assert await get_registered_user(pool, telegram_id) is None
+
+
+async def test_register_from_contact_completes_registration_for_a_phoneless_row(pool):
+    # Same real regression, the other call site: a Mini-App-first user
+    # who then shares their contact with the bot to actually register
+    # must have their phone attached to the existing row, not crash.
+    telegram_id = next_telegram_id()
+    user_id = await _create_phoneless_user(pool, telegram_id)
+    phone = unique_phone()
+
+    user = await register_from_contact(
+        pool,
+        sender_telegram_id=telegram_id,
+        contact_user_id=telegram_id,
+        contact_phone=phone,
+        display_name="Mini App User",
+    )
+
+    assert user.id == user_id  # the same row, not a duplicate account
+    assert user.phone_e164 == phone
+    assert user.is_new is False
+
+    # And it's really persisted, readable back through the normal path.
+    fetched = await get_registered_user(pool, telegram_id)
+    assert fetched is not None
+    assert fetched.phone_e164 == phone
+
+
+async def test_register_from_contact_still_rejects_a_phone_already_used_elsewhere_for_a_phoneless_row(pool):
+    existing_phone = unique_phone()
+    other_id = next_telegram_id()
+    await register_from_contact(
+        pool, sender_telegram_id=other_id, contact_user_id=other_id,
+        contact_phone=existing_phone, display_name="Other",
+    )
+
+    telegram_id = next_telegram_id()
+    await _create_phoneless_user(pool, telegram_id)
+
+    with pytest.raises(PhoneAlreadyRegistered):
+        await register_from_contact(
+            pool,
+            sender_telegram_id=telegram_id,
+            contact_user_id=telegram_id,
+            contact_phone=existing_phone,
+            display_name="Mini App User",
+        )

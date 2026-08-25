@@ -12,8 +12,16 @@ UNIQUE constraint and exact-match lookups a random-nonce ciphertext can't
 support). Every read here decrypts; every write encrypts and hashes.
 `RegisteredUser.phone_e164` still carries the plain E.164 string, same as
 before -- callers elsewhere in the bot never need to know storage changed.
-Every row this module reads back always has a phone on file (registration
-never creates a user without one), so decryption here is never optional.
+
+Not every `users` row has a phone on file, though: services/gateway
+/queries.py's get_or_create_user_by_telegram_id() lazily creates a row
+with just a telegram_id for anyone who opens the Mini App before ever
+messaging the bot. This module treats that as "not actually registered
+yet" (spec section 7.2's registration is the contact-share flow, not
+mere row existence) -- get_registered_user() returns None for it, and
+register_from_contact() completes registration in place by attaching the
+just-validated contact's phone to that same row, rather than creating a
+duplicate account or crashing on the missing phone.
 """
 
 from __future__ import annotations
@@ -47,6 +55,24 @@ class RegisteredUser:
     is_new: bool
 
 
+async def _attach_phone_to_existing_user(pool: asyncpg.Pool, user_id: int, phone: str) -> None:
+    """Attaches a freshly-validated contact's phone to a user row that
+    already exists but has none on file -- see this module's own
+    docstring for why such a row can exist at all.
+    """
+    try:
+        await pool.execute(
+            "UPDATE users SET phone_e164_encrypted = $2, phone_lookup_hash = $3 WHERE id = $1",
+            user_id,
+            encrypt_phone(phone),
+            phone_lookup_hash(phone),
+        )
+    except asyncpg.exceptions.UniqueViolationError as exc:
+        if exc.constraint_name and "phone_lookup_hash" in exc.constraint_name:
+            raise PhoneAlreadyRegistered() from exc
+        raise
+
+
 async def register_from_contact(
     pool: asyncpg.Pool,
     *,
@@ -68,11 +94,22 @@ async def register_from_contact(
         sender_telegram_id,
     )
     if existing is not None:
+        existing_phone_blob = existing["phone_e164_encrypted"]
+        if existing_phone_blob is None:
+            # A row with no phone -- created by the gateway's own lazy
+            # get_or_create_user_by_telegram_id() for someone who opened
+            # the Mini App before ever messaging the bot. The contact
+            # just shared and validated above completes registration for
+            # real, in place, rather than crashing on the missing phone.
+            await _attach_phone_to_existing_user(pool, existing["id"], phone)
+            return RegisteredUser(
+                existing["id"], sender_telegram_id, existing["display_name"], phone, is_new=False
+            )
         return RegisteredUser(
             existing["id"],
             sender_telegram_id,
             existing["display_name"],
-            decrypt_phone(bytes(existing["phone_e164_encrypted"])),
+            decrypt_phone(bytes(existing_phone_blob)),
             is_new=False,
         )
 
@@ -100,18 +137,25 @@ async def register_from_contact(
     except asyncpg.exceptions.UniqueViolationError as exc:
         if exc.constraint_name and "phone_lookup_hash" in exc.constraint_name:
             raise PhoneAlreadyRegistered() from exc
-        # telegram_id conflict: a concurrent /start + contact-share race
-        # already created this user microseconds earlier -- read it back.
+        # telegram_id conflict: either a concurrent /start + contact-share
+        # race already created this user microseconds earlier (that row
+        # will have a phone -- its own INSERT set one), or we collided
+        # with a gateway-lazy-created phoneless row instead (same fix as
+        # the existing-user branch above).
         row = await pool.fetchrow(
             "SELECT id, display_name, phone_e164_encrypted FROM users WHERE telegram_id = $1",
             sender_telegram_id,
         )
         assert row is not None
+        row_phone_blob = row["phone_e164_encrypted"]
+        if row_phone_blob is None:
+            await _attach_phone_to_existing_user(pool, row["id"], phone)
+            return RegisteredUser(row["id"], sender_telegram_id, row["display_name"], phone, is_new=False)
         return RegisteredUser(
             row["id"],
             sender_telegram_id,
             row["display_name"],
-            decrypt_phone(bytes(row["phone_e164_encrypted"])),
+            decrypt_phone(bytes(row_phone_blob)),
             is_new=False,
         )
 
@@ -123,7 +167,12 @@ async def get_registered_user(pool: asyncpg.Pool, telegram_id: int) -> Registere
     row = await pool.fetchrow(
         "SELECT id, display_name, phone_e164_encrypted FROM users WHERE telegram_id = $1", telegram_id
     )
-    if row is None:
+    if row is None or row["phone_e164_encrypted"] is None:
+        # No phone on file means registration (spec section 7.2's
+        # contact-share flow) was never actually completed -- including a
+        # row the gateway lazily created for someone who opened the Mini
+        # App before ever messaging the bot. Treat it the same as "no
+        # row at all" rather than crashing on the missing phone.
         return None
     return RegisteredUser(
         row["id"], telegram_id, row["display_name"], decrypt_phone(bytes(row["phone_e164_encrypted"])), is_new=False

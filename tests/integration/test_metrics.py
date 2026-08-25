@@ -136,7 +136,7 @@ async def test_command_ack_histogram_records_a_real_take_card_action(
         http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
         async with httpx.AsyncClient() as client:
             before_text = (await client.get(f"{http_base}/metrics")).text
-        before = _metric_value(before_text, "gateway_command_ack_seconds_count", 'action="join"')
+        before = _metric_value(before_text, "gateway_command_ack_seconds_count", 'action="take_card"')
 
         telegram_id = next_telegram_id()
         async with websockets.connect(gateway_server) as ws:
@@ -158,7 +158,7 @@ async def test_command_ack_histogram_records_a_real_take_card_action(
 
         async with httpx.AsyncClient() as client:
             after_text = (await client.get(f"{http_base}/metrics")).text
-        after = _metric_value(after_text, "gateway_command_ack_seconds_count", 'action="join"')
+        after = _metric_value(after_text, "gateway_command_ack_seconds_count", 'action="take_card"')
         assert after == before + 1
     finally:
         await engine.stop()

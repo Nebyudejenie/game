@@ -195,14 +195,23 @@ async def _apply_confirmed_status(
     raw: dict[str, object],
 ) -> str:
     """Returns 'credited' | 'duplicate' | 'amount_mismatch' | 'not_found' |
-    'not_succeeded'. Never raises for a business-logic outcome -- only a
-    genuine bug (a broken query, a dead connection) escapes as an exception.
+    'not_succeeded' | 'pending'. Never raises for a business-logic outcome
+    -- only a genuine bug (a broken query, a dead connection) escapes as
+    an exception.
 
     metrics.deposit_outcomes_total only counts 'credited' /
     'not_succeeded' / 'amount_mismatch' -- the three real terminal outcomes
     "deposit success rate" (spec section 10.4) means. 'not_found' isn't a
-    real deposit attempt on our side, and 'duplicate' is a replay of an
-    outcome already counted once.
+    real deposit attempt on our side, 'duplicate' is a replay of an
+    outcome already counted once, and 'pending' (a status
+    poll_pending_deposits() can genuinely see mid-flight, e.g. Chapa's
+    ChapaProvider.fetch_status() 404 case) is not terminal either -- it
+    must never increment the metric or update the payment row, since the
+    same deposit can still go on to 'credited' later. Counting it as
+    'not_succeeded' would double-count one real deposit across two
+    outcome labels and understate the success rate the Grafana dashboard
+    shows (a real bug this docstring's own claim above used to
+    contradict, caught by a code review pass, not a test).
     """
     user_id: int | None = None
 
@@ -237,12 +246,18 @@ async def _apply_confirmed_status(
                     return "duplicate"
 
                 if status != "succeeded":
-                    if status in _TERMINAL_FAILURE_STATUSES:
-                        await conn.execute(
-                            "UPDATE payments SET status = $2, updated_at = now() WHERE id = $1",
-                            payment["id"],
-                            status,
-                        )
+                    if status not in _TERMINAL_FAILURE_STATUSES:
+                        # Genuinely still in flight (e.g. Chapa's own
+                        # "pending") -- not a real outcome yet, so it must
+                        # not touch the payment row or the metric. The
+                        # same deposit can still go on to 'credited'.
+                        span.set_attribute("deposit.outcome", "pending")
+                        return "pending"
+                    await conn.execute(
+                        "UPDATE payments SET status = $2, updated_at = now() WHERE id = $1",
+                        payment["id"],
+                        status,
+                    )
                     metrics.deposit_outcomes_total.labels(outcome="not_succeeded").inc()
                     span.set_attribute("deposit.outcome", "not_succeeded")
                     return "not_succeeded"

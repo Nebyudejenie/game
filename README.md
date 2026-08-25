@@ -171,7 +171,12 @@ directly, so `pytest` works with no `.env` at all).
   matches the sender (any mismatch is rejected outright — Telegram lets
   anyone forward anyone's contact card), phone numbers are normalized to
   E.164, typed numbers are never accepted as a substitute for the
-  Share-Phone-Number button.
+  Share-Phone-Number button. A user who opens the Mini App before ever
+  messaging the bot (a real path — `services/gateway/queries.py` lazily
+  creates a phoneless row for exactly that case) completes registration
+  in place by sharing their contact, rather than crashing — a real,
+  reachable crash a `/code-review` pass caught and fixed. See
+  `DECISIONS.md`.
 - **`services/bot/notifier.py`** — the only code path allowed to call
   `bot.send_message`; paces to ~25 msg/s and backs off per-chat on a 429
   without stalling every other chat's queue behind one rate-limited one.
@@ -424,7 +429,9 @@ already flagged for withdrawal holder-name matching. See `DECISIONS.md`.
   leaderboard) and weekly signup-cohort retention (one set-based SQL
   query, not a per-user loop, since this has to scale with real data
   volume) — the two report types from the spec's list that were
-  genuinely computable from data already in the system. Bonuses/referral
+  genuinely computable from data already in the system. Retention's own
+  `elapsed` flag (a `/code-review` fix) keeps a cohort's still-in-progress
+  weeks from reading as 0% churn — see `DECISIONS.md`. Bonuses/referral
   rewards and tax export were deliberately not attempted: the former
   needs real business parameters (bonus amounts, wagering multipliers)
   this session has no authority to invent, the same reasoning
@@ -489,7 +496,12 @@ whoever happened to be connected at the exact second the round ended. See
   `services/engine/round_engine.py` and `refunds.py`,
   `packages/core/ledger.py`, `services/payments/deposits.py`).
 - **`/metrics`** on every service with an HTTP surface (gateway, admin,
-  payments, bot), unauthenticated like the existing `/healthz` routes.
+  payments, bot), unauthenticated like the existing `/healthz` routes —
+  except admin's, which a `/code-review` pass caught bypassing the IP
+  allowlist every other admin route goes through (a real gap: it was
+  leaking live house revenue and deposit/payout figures to anyone on the
+  network). Now gated the same way as everything else in
+  `services/admin/app.py`. See `DECISIONS.md`.
 - **`deploy/prometheus/prometheus.yml`** (scrape config) +
   **`alerts.yml`** (the spec's own five alert conditions, verbatim) + a
   `prometheus` service in `deploy/docker-compose.yml`, gated behind a

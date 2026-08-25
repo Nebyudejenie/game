@@ -249,8 +249,7 @@ async def post(
                 last_entry_id,
             )
 
-        metrics.ledger_transactions_total.labels(kind=txn_row["kind"]).inc()
-        return LedgerTransaction(
+        result = LedgerTransaction(
             id=transaction_id,
             kind=txn_row["kind"],
             idempotency_key=txn_row["idempotency_key"],
@@ -259,6 +258,14 @@ async def post(
             created_by=txn_row["created_by"],
             memo=txn_row["memo"],
         )
+
+    # Only after the `async with` block above has actually committed --
+    # incrementing inside it (as an earlier draft did) would overcount if
+    # the commit itself failed (a dropped connection, a DB restart) right
+    # after this point: the metric would show a transaction that never
+    # actually persisted.
+    metrics.ledger_transactions_total.labels(kind=result.kind).inc()
+    return result
 
 
 _CENT = Decimal("0.01")

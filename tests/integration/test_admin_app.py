@@ -142,6 +142,31 @@ async def test_ip_allowlist_blocks_disallowed_source(admin_server, pool):
         admin_app.state.ip_allowlist = []
 
 
+async def test_metrics_endpoint_is_reachable_with_no_session_token(admin_server):
+    # Unlike every other route, /metrics doesn't require a bearer session
+    # (a Prometheus scraper can't practically present one) -- but it must
+    # still go through the IP allowlist, confirmed by the next test.
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{admin_server}/metrics")
+    assert response.status_code == 200
+    assert "house_revenue_total" in response.text
+
+
+async def test_metrics_endpoint_is_blocked_by_the_ip_allowlist(admin_server):
+    # Regression: a real code review pass caught this endpoint bypassing
+    # the IP allowlist entirely -- house_revenue_total (live revenue in
+    # ETB), deposit_outcomes_total, and payout_queue_depth were reachable
+    # by anyone on the network with no protection at all, unlike every
+    # other route in this file.
+    admin_app.state.ip_allowlist = ["10.0.0.1"]
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{admin_server}/metrics")
+        assert response.status_code == 403
+    finally:
+        admin_app.state.ip_allowlist = []
+
+
 async def test_audit_log_is_immutable_at_the_database_level(pool):
     admin_id, *_ = await create_test_admin(pool)
     row = await pool.fetchrow(

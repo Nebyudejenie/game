@@ -326,3 +326,56 @@ async def test_failed_status_marks_payment_failed_without_crediting(pool, redis,
     status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", intent.payment_id)
     assert status == "failed"
     assert await _cash_balance(conn, user_id) == Decimal("0.00")
+
+
+async def test_a_still_pending_poll_does_not_touch_the_payment_or_the_metric(pool, redis, conn):
+    # Regression: a real bug caught by a code review pass, not a test --
+    # this used to fall into the same branch as a genuine terminal
+    # failure, incrementing deposit_outcomes_total{outcome="not_succeeded"}
+    # for a deposit that was only still in flight (FakePaymentProvider's
+    # own fetch_status() default, mirroring ChapaProvider's real 404
+    # case) -- so a deposit that later actually succeeded got double-
+    # counted across two outcome labels, understating the real success
+    # rate the Grafana dashboard shows.
+    from packages.core import metrics
+
+    provider = FakePaymentProvider()
+    user_id = await create_user(conn)
+    intent = await deposits.create_deposit_intent(
+        pool,
+        redis,
+        provider,
+        user_id=user_id,
+        amount=Decimal("40.00"),
+        phone_e164="+251911000000",
+        return_url="https://app.test/return",
+        min_deposit=MIN_DEPOSIT,
+        daily_cap=DAILY_CAP,
+    )
+    # No entry in provider.statuses for this our_ref -- fetch_status()
+    # falls through to its "pending" default, the not-yet-resolved case.
+
+    not_succeeded_before = metrics.deposit_outcomes_total.labels(outcome="not_succeeded")._value.get()
+    credited_before = metrics.deposit_outcomes_total.labels(outcome="credited")._value.get()
+
+    credited_count = await deposits.poll_pending_deposits(pool, redis, provider, older_than_seconds=0)
+    assert credited_count == 0
+
+    status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", intent.payment_id)
+    assert status == "processing"  # untouched -- still genuinely in flight
+    assert await _cash_balance(conn, user_id) == Decimal("0.00")
+    assert metrics.deposit_outcomes_total.labels(outcome="not_succeeded")._value.get() == not_succeeded_before
+
+    # The same deposit now actually succeeds -- must be counted exactly
+    # once, as "credited", not a second time on top of an earlier
+    # "not_succeeded" the pending poll above must not have recorded.
+    provider.statuses[intent.our_ref] = StatusResult(
+        status="succeeded", amount=Decimal("40.00"), provider_ref=intent.our_ref, raw={}
+    )
+    credited_count = await deposits.poll_pending_deposits(pool, redis, provider, older_than_seconds=0)
+    assert credited_count == 1
+    assert await _cash_balance(conn, user_id) == Decimal("40.00")
+    assert (
+        metrics.deposit_outcomes_total.labels(outcome="credited")._value.get() == credited_before + 1
+    )
+    assert metrics.deposit_outcomes_total.labels(outcome="not_succeeded")._value.get() == not_succeeded_before

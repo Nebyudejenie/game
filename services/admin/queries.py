@@ -156,6 +156,17 @@ async def retention_cohorts(pool: asyncpg.Pool, weeks: int = 8) -> list[dict[str
     scans every user and every round entry ever recorded, so it has to
     scale with real data volume, not just look right against a handful of
     test rows.
+
+    Every (cohort, week_offset) pair is returned even at zero activity --
+    including offsets for a cohort that signed up recently, where that
+    week hasn't actually happened yet. Those are marked `elapsed: false`
+    and `retention_rate: null` rather than a bare 0.0: a code review pass
+    caught that an un-elapsed week is otherwise indistinguishable from a
+    cohort that genuinely churned to zero, in the same report row as
+    fully-elapsed older cohorts a reader would reasonably compare it
+    against. `active_users` itself is left as a real, honest count either
+    way -- someone already active partway through an in-progress week is
+    real information; only the *rate* implies a completed comparison.
     """
     rows = await pool.fetch(
         """
@@ -182,7 +193,12 @@ async def retention_cohorts(pool: asyncpg.Pool, weeks: int = 8) -> list[dict[str
           WHERE a.active_week < c.cohort_week + ($1::int * interval '1 week')
           GROUP BY c.cohort_week, week_offset
         )
-        SELECT cs.cohort_week, cs.cohort_size, gs.week_offset, COALESCE(r.active_users, 0) AS active_users
+        SELECT
+          cs.cohort_week,
+          cs.cohort_size,
+          gs.week_offset,
+          COALESCE(r.active_users, 0) AS active_users,
+          (cs.cohort_week + ((gs.week_offset + 1) * interval '1 week')) <= now() AS elapsed
         FROM cohort_sizes cs
         CROSS JOIN generate_series(0, $1::int - 1) AS gs(week_offset)
         LEFT JOIN retention r ON r.cohort_week = cs.cohort_week AND r.week_offset = gs.week_offset
@@ -198,11 +214,15 @@ async def retention_cohorts(pool: asyncpg.Pool, weeks: int = 8) -> list[dict[str
             {"cohort_week": row["cohort_week"].isoformat(), "cohort_size": row["cohort_size"], "weeks": []},
         )
         cohort_size = row["cohort_size"]
+        elapsed = row["elapsed"]
         cohort["weeks"].append(
             {
                 "week_offset": row["week_offset"],
                 "active_users": row["active_users"],
-                "retention_rate": round(row["active_users"] / cohort_size, 4) if cohort_size else 0.0,
+                "elapsed": elapsed,
+                "retention_rate": (
+                    round(row["active_users"] / cohort_size, 4) if elapsed and cohort_size else None
+                ),
             }
         )
     return list(cohorts.values())

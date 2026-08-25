@@ -138,7 +138,14 @@ async def test_retention_cohorts_counts_a_user_active_in_their_signup_week(pool,
     # which calendar date that lands on.
     matching = [c for c in cohorts if c["weeks"][0]["active_users"] >= 1]
     assert matching, f"no cohort showed any week-0 activity: {cohorts}"
-    assert matching[0]["weeks"][0]["retention_rate"] > 0
+    # This user's own signup week is still in progress (it only just
+    # started) -- week 0 is real, honest activity-so-far, but not yet a
+    # completed rate: more of this cohort could still become active
+    # before the week ends. elapsed=False / retention_rate=None is the
+    # fix for a real bug a code review pass caught (a still-in-progress
+    # week was previously indistinguishable from 0% churn).
+    assert matching[0]["weeks"][0]["elapsed"] is False
+    assert matching[0]["weeks"][0]["retention_rate"] is None
 
 
 async def test_retention_cohorts_places_a_backdated_signup_in_a_later_week_offset(pool, redis, card_pool, conn):
@@ -174,6 +181,12 @@ async def test_retention_cohorts_places_a_backdated_signup_in_a_later_week_offse
     cohort = next(c for c in cohorts if c["cohort_week"] == cohort_week.isoformat())
     assert cohort["weeks"][2]["active_users"] >= 1
     assert cohort["weeks"][0]["active_users"] == 0
+    # This cohort's own signup week (week_offset 0) is fully in the past
+    # by now (signed up 14 days ago) -- a real completed comparison, so
+    # the fix's elapsed flag must say so and give a real numeric rate,
+    # unlike the still-in-progress week 0 covered by the test above.
+    assert cohort["weeks"][0]["elapsed"] is True
+    assert cohort["weeks"][0]["retention_rate"] == 0.0
 
 
 async def test_adjust_balance_credits_via_ledger_and_writes_audit_log(pool, conn):

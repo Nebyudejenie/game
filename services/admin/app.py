@@ -430,5 +430,15 @@ async def healthz() -> dict[str, str]:
 
 
 @app.get("/metrics")
-async def metrics_endpoint() -> Response:
+async def metrics_endpoint(request: Request) -> Response:
+    # Every other route in this file goes through current_admin (session
+    # token + this same IP check) or, at minimum, this IP check alone --
+    # a real code review pass caught this endpoint bypassing both,
+    # exposing house_revenue_total (live revenue in ETB), deposit_outcomes
+    # _total, and payout_queue_depth to anyone on the network with no
+    # session token and no allowlist check. A full session isn't required
+    # here (a Prometheus scraper can't practically present one), but the
+    # IP allowlist -- the one baseline control spec section 9.2 asks the
+    # whole admin panel to have -- now applies here too.
+    _check_ip_allowlist(request)
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

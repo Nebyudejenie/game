@@ -5,6 +5,141 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — A broader `/code-review high` pass (backup/restore through today) caught six real bugs, including one crash
+
+Ran `/code-review high 4cc23c4..HEAD` -- everything since backup/restore
+tooling, none of which had a structured review pass yet (observability,
+deposit rate limiting, phone encryption, admin reports). Eight finder
+agents across three line-by-line scans, a removed-behavior audit, a
+cross-file tracer, reuse/simplification, efficiency/altitude, and
+conventions/test-coverage. Every genuine correctness finding was verified
+independently before fixing (reproducing the exact crash, reading the
+exact code paths) rather than trusted at face value. Six real bugs fixed:
+
+1. **`services/bot/registration.py` -- a real, reachable crash in the
+   registration flow, the single most significant finding.** Three call
+   sites (`register_from_contact()`'s existing-user branch, its
+   telegram_id-race recovery branch, and `get_registered_user()`) called
+   `decrypt_phone(bytes(row["phone_e164_encrypted"]))` with no `None`
+   guard, unlike the two sibling read sites
+   (`services/gateway/queries.py`, `services/admin/queries.py`) that
+   correctly have one. `services/gateway/queries.py`'s own
+   `get_or_create_user_by_telegram_id()` lazily creates a `users` row
+   with no phone at all for anyone who opens the Mini App before ever
+   messaging the bot -- confirmed directly: `bytes(None)` really does
+   raise `TypeError`, and that lazy-create path really does insert with
+   no `phone_e164_encrypted`. Any such user sending `/start`, `/balance`,
+   or any other bot command, or trying to actually complete registration
+   by sharing their contact, hit an unhandled crash instead. **Fixed
+   properly, not just guarded**: `register_from_contact()` now attaches
+   the just-validated contact's phone to that existing phoneless row,
+   actually completing registration in place (the real product-correct
+   behavior, not a defensive no-op), and `get_registered_user()` treats a
+   phoneless row the same as "not registered" (spec section 7.2's
+   contact-share flow was never actually completed for it). Three new
+   regression tests in `test_registration.py` reproduce the exact
+   scenario end to end, including that a phone already used elsewhere is
+   still correctly rejected for this path too.
+2. **`services/admin/app.py`'s `/metrics` endpoint had no auth or IP
+   allowlist at all**, unlike every other route in the file --
+   `house_revenue_total` (live revenue in ETB), `deposit_outcomes_total`,
+   and `payout_queue_depth` were reachable by anyone on the network with
+   no session token and no IP check, a direct violation of spec 9.2's own
+   "IP allowlist" requirement for the whole admin panel. Fixed by adding
+   the same `_check_ip_allowlist()` every other route goes through (a
+   full session isn't required, since a Prometheus scraper can't
+   practically present one) -- two new tests confirm it's reachable by
+   default and blocked once an allowlist is actually set, matching the
+   existing `test_ip_allowlist_blocks_disallowed_source` pattern this
+   endpoint had never been covered by.
+3. **`services/payments/deposits.py`: a non-terminal "pending" status was
+   double-counted as a real deposit failure.** `_apply_confirmed_status`
+   only skipped the payment-row UPDATE for a genuinely non-terminal
+   status (correct), but incremented `deposit_outcomes_total{outcome=
+   "not_succeeded"}` for *any* non-succeeded status regardless (wrong) --
+   so a deposit `poll_pending_deposits()` saw as "pending" (Chapa's real
+   404/still-processing case) got counted as a failure, and if it later
+   actually succeeded, got counted a second time as `credited` too. One
+   real deposit, two outcome labels, understating the real success rate
+   the Grafana dashboard shows. Fixed by returning a genuine `"pending"`
+   outcome for a non-terminal status, touching neither the payment row
+   nor the metric. A new regression test drives the exact pending-then-
+   succeeded sequence and asserts the metric only ever moves once.
+4. **`services/admin/queries.py`'s `retention_cohorts()` made an
+   in-progress week indistinguishable from real churn.** A cohort that
+   signed up this week showed `active_users: 0, retention_rate: 0.0` for
+   every week-offset that hasn't happened yet, in the same report row as
+   fully-elapsed older cohorts a reader would reasonably compare it
+   against -- looking like 100% churn when the truth is "we don't know
+   yet." Fixed by adding a real `elapsed` boolean per (cohort, offset)
+   pair computed in the same SQL query (`cohort_week + (offset+1) weeks
+   <= now()`); `retention_rate` is `null` when not elapsed, while
+   `active_users` stays a real, honest count either way (activity so far
+   in an in-progress week is real information; only the *rate* implies a
+   completed comparison the un-elapsed case hasn't earned yet). Both
+   existing tests strengthened to assert `elapsed`/`retention_rate` in
+   both directions (a genuinely in-progress week and a genuinely elapsed
+   one), not just `active_users`.
+5. **`services/gateway/connection.py`: `take_card` acks were recorded
+   under the wrong Prometheus label, and a test locked the bug in instead
+   of catching it.** `_run_action()`'s `action` parameter does double
+   duty -- it's both the real command name dispatched to the engine over
+   Redis (`round_engine.py`'s `_handle_command` dispatches on it
+   literally; `take_card` is sent as `action="join"`, matching
+   `RoundEngine.join()`'s own method name) and, since this session's
+   metrics work, the Prometheus label for `gateway_command_ack_seconds`.
+   Every `take_card` ack was recorded under the `"join"` label, and the
+   real `"join"` WS message type (handled entirely separately by
+   `_handle_join()`, which never reaches this method) recorded nothing at
+   all -- `tests/integration/test_metrics.py`'s own
+   `test_command_ack_histogram_records_a_real_take_card_action` checked
+   the `"join"` label and passed for the wrong reason, so it would have
+   started failing (not catching anything) the moment this got fixed
+   naively. **Fixed correctly**: the metric now labels on `ack_name`
+   (already the correct, human-readable action name for every case:
+   `take_card`/`drop_card`/`set_auto`/`claim`) instead of `action`,
+   leaving the actual engine-command dispatch and the rate-limit scope
+   (both correctly still keyed on `action="join"`) completely untouched
+   -- confirmed first, before touching anything, that renaming `action`
+   itself would have silently broken real take_card functionality, not
+   just a metric label.
+6. **`packages/core/ledger.py`: `ledger_transactions_total` was
+   incremented before the transaction actually committed.** The counter
+   sat inside the still-open `async with conn.transaction():` block; if
+   the commit itself failed right after that point (a dropped connection,
+   a DB restart), the metric would have already counted a transaction
+   that never actually persisted. Low severity (observability only, not
+   money-moving), but a real inconsistency with this codebase's own
+   pattern elsewhere (`services/engine/refunds.py`'s
+   `engine_rounds_voided_total` correctly increments only after its own
+   `async with` block closes). Fixed by moving the increment to after the
+   block exits.
+
+**Not fixed, documented instead** -- real, legitimate efficiency/reuse
+findings, lower severity than the six above, deliberately deferred rather
+than rushed in the same pass: `phone_crypto.py`'s `_derive_key()`
+re-derives the HKDF key from scratch on every call instead of caching it
+(hot path: every phone read/write, and the whole migration backfill);
+`player_ltv`'s "deposited minus withdrawn" formula is now independently
+maintained in three places (`player_ltv`, `top_players_by_ltv`,
+`withdrawals.py`'s `lifetime_in`/`lifetime_out`); the `/metrics` FastAPI
+route handler is copy-pasted verbatim across `gateway/app.py`,
+`payments/app.py`, and `admin/app.py`; `payout_worker.py`'s
+`_settle_success`/`_reverse` share ~20 lines of near-identical
+lock-accounts/post/update-payment plumbing; the deposit rate limit
+consumes a token before basic validation (amount, self-exclusion,
+cool-off), a deliberate ordering choice matching
+`services/gateway/connection.py`'s own established rate-limit-first
+pattern, confirmed intentional rather than changed; the phone-encryption
+migration backfill uses a per-row Python loop rather than a set-based
+UPDATE, an operational (not correctness) concern for a users table at
+real production scale, which this dev environment can't meaningfully
+exercise anyway.
+
+Full clean-slate rebuild after all six fixes: mypy clean across 63
+source files, `pytest tests/` 677 passed / 13 deselected (up from 671),
+`-m load` 5 passed, `-m chaos_infra` 1 passed, `-m e2e` 7 passed.
+
 ## 2026-08-25 — A real `/code-review` pass caught two genuine bugs in yesterday's new test files
 
 Ran a structured code review (`/code-review high`) against the last two

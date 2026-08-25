@@ -236,7 +236,17 @@ class ConnectionHandler:
                 )
                 return
 
-        with metrics.gateway_command_ack_seconds.labels(action=action).time():
+        # ack_name, not action, labels the metric -- action is the actual
+        # command name dispatched to the engine over Redis (round_engine
+        # .py's _handle_command dispatches on it literally: take_card is
+        # sent as action="join", matching RoundEngine.join()'s own method
+        # name, an internal detail that has nothing to do with what a
+        # Prometheus consumer should see). A code review pass caught the
+        # metric using `action` directly: every take_card ack was
+        # recorded under the "join" label, and the real "join" WS message
+        # type (handled entirely separately by _handle_join(), which
+        # never reaches this method at all) never recorded anything.
+        with metrics.gateway_command_ack_seconds.labels(action=ack_name).time():
             try:
                 result = await commands.send_command(
                     self._redis, room_id, action, self._user_id, payload
