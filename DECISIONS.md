@@ -5,6 +5,53 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Two more catalogued findings fixed: Redis connection timeouts, the `max_players` TOCTOU race
+
+Second follow-up to the full-platform `/code-review` entry two below.
+
+1. **`packages/core/redis_conn.py`'s `get_redis()` set no
+   `socket_connect_timeout`/`socket_timeout` at all.** A degraded or
+   unreachable Redis could hang any caller indefinitely instead of
+   failing fast -- directly contradicting this module's own docstring
+   ("if Redis is wiped, the platform must recover fully from Postgres"):
+   a hang isn't a "loss" this client already knows how to survive, it's
+   an outage this client itself would manufacture. **Fixed** with a 5s
+   timeout (matching the real-time budget `services/engine/commands.py`'s
+   own `CommandTimeout` already establishes elsewhere in this codebase).
+   Verified empirically before trusting it, not assumed: confirmed
+   directly against a real Redis connection that an idle
+   `pubsub.listen()` (the exact blocking pattern `send_command()` and
+   `FanoutHub` both depend on for potentially long idle stretches between
+   messages) does *not* spuriously time out under this socket-level
+   setting, including at the precise 5-second boundary where
+   `send_command()`'s own Python-level `asyncio.wait_for(..., timeout=
+   5.0)` could otherwise race it. The real chaos-Redis-restart test and
+   the full load suite (heavy, sustained pub/sub and stream usage) both
+   still pass clean.
+2. **`round_engine.py`'s `join()` had no lock around its `max_players`
+   capacity check.** `len(self._entries) >= self._room.max_players` was
+   read, then `self._entries[user_id] = ...` written, several awaited DB
+   round-trips later, with nothing serializing that window -- two
+   different users joining with two different card numbers (so the
+   `round_entries` UNIQUE constraint on card_no can't catch it) could
+   both pass the capacity check before either updated the count,
+   overfilling a room past its configured cap. In real production this
+   is already effectively serialized (`_serve_commands()` consumes its
+   room's command stream one entry at a time), but this codebase's own
+   load/chaos tests -- and any future code path -- call `join()`
+   concurrently the same way a parallelized command consumer someday
+   might. **Fixed** with a new `self._join_lock` (alongside the existing
+   `_round_start_lock`, which already establishes this exact pattern for
+   the idle-to-lobby race) covering the capacity check through the
+   `self._entries` update. New regression test fires 10 genuinely
+   concurrent joins (`asyncio.gather`, not sequential) at a
+   `max_players=3` room and confirms exactly 3 succeed, matching the
+   in-memory count against the DB row.
+
+Full clean-slate rebuild: mypy clean across 63 source files, `pytest
+tests/` 687 passed / 13 deselected (up from 686), `-m load` 5 passed,
+`-m chaos_infra` 1 passed, `-m e2e` 7 passed.
+
 ## 2026-08-25 — Three more of the previous entry's catalogued findings fixed: command isolation, room-lock split-brain, notifier resilience
 
 Follow-up to the entry directly below. Picked off the next three safest-

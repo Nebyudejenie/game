@@ -133,6 +133,17 @@ class RoundEngine:
         self._round_active_event = asyncio.Event()
         self._winner_lock = asyncio.Lock()
         self._round_start_lock = asyncio.Lock()
+        # Serializes join()'s capacity check through its self._entries
+        # update -- in real production this is already effectively
+        # single-threaded (one engine's _serve_commands() consumes its
+        # room's command stream one entry at a time), but a code review
+        # pass correctly noted the check itself has no lock of its own,
+        # so a caller invoking join() concurrently (this codebase's own
+        # load/chaos tests do exactly that) could let a room's
+        # max_players cap be raced past: two different users, two
+        # different card numbers, both reading the same under-capacity
+        # count before either updates self._entries.
+        self._join_lock = asyncio.Lock()
         self._settlement_task: asyncio.Task[None] | None = None
 
         self._round_id: int | None = None
@@ -228,59 +239,67 @@ class RoundEngine:
             return JoinResult(False, "not_joinable")
         if not (1 <= card_no <= 100):
             return JoinResult(False, "invalid_card")
-        if len(self._entries) >= self._room.max_players:
-            return JoinResult(False, "room_full")
 
-        round_id = self._round_id
-        assert round_id is not None
-        idem = f"stake-{round_id}-{user_id}"
+        # Covers the capacity check through the self._entries update below
+        # -- see this lock's own definition in __init__ for why a room's
+        # max_players cap needs an explicit lock here, not just the
+        # single-consumer command-stream loop production already
+        # naturally serializes joins through.
+        async with self._join_lock:
+            if len(self._entries) >= self._room.max_players:
+                return JoinResult(False, "room_full")
 
-        async with self._pool.acquire() as conn:
-            block = await responsible_gaming.check_stake_allowed(conn, user_id, self._room.stake)
-            if block.blocked:
-                assert block.reason is not None
-                return JoinResult(False, block.reason)
+            round_id = self._round_id
+            assert round_id is not None
+            idem = f"stake-{round_id}-{user_id}"
 
-            try:
-                async with conn.transaction():
-                    await conn.execute(
-                        "INSERT INTO round_entries (round_id, card_no, user_id, auto_mark) "
-                        "VALUES ($1, $2, $3, $4)",
-                        round_id,
-                        card_no,
-                        user_id,
-                        auto_mark,
-                    )
-                    cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
-                    pot_account = await ledger.get_or_create_account(conn, None, "pot_escrow")
-                    txn = await ledger.post(
-                        conn,
-                        "stake",
-                        [Entry(cash.id, -self._room.stake), Entry(pot_account.id, self._room.stake)],
-                        idempotency_key=idem,
-                        round_id=round_id,
-                    )
-                    await conn.execute(
-                        "UPDATE round_entries SET stake_txn_id = $1 "
-                        "WHERE round_id = $2 AND card_no = $3",
-                        txn.id,
-                        round_id,
-                        card_no,
-                    )
-                    await conn.execute(
-                        "UPDATE rounds SET pot = pot + $1, player_count = player_count + 1 "
-                        "WHERE id = $2",
-                        self._room.stake,
-                        round_id,
-                    )
-            except asyncpg.exceptions.UniqueViolationError as exc:
-                reason = "already_joined" if "user_id" in (exc.constraint_name or "") else "card_taken"
-                return JoinResult(False, reason)
-            except InsufficientFunds:
-                return JoinResult(False, "insufficient_funds")
+            async with self._pool.acquire() as conn:
+                block = await responsible_gaming.check_stake_allowed(conn, user_id, self._room.stake)
+                if block.blocked:
+                    assert block.reason is not None
+                    return JoinResult(False, block.reason)
 
-        self._entries[user_id] = RoundEntryState(card_no=card_no, auto_mark=auto_mark)
-        self._pot += self._room.stake
+                try:
+                    async with conn.transaction():
+                        await conn.execute(
+                            "INSERT INTO round_entries (round_id, card_no, user_id, auto_mark) "
+                            "VALUES ($1, $2, $3, $4)",
+                            round_id,
+                            card_no,
+                            user_id,
+                            auto_mark,
+                        )
+                        cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
+                        pot_account = await ledger.get_or_create_account(conn, None, "pot_escrow")
+                        txn = await ledger.post(
+                            conn,
+                            "stake",
+                            [Entry(cash.id, -self._room.stake), Entry(pot_account.id, self._room.stake)],
+                            idempotency_key=idem,
+                            round_id=round_id,
+                        )
+                        await conn.execute(
+                            "UPDATE round_entries SET stake_txn_id = $1 "
+                            "WHERE round_id = $2 AND card_no = $3",
+                            txn.id,
+                            round_id,
+                            card_no,
+                        )
+                        await conn.execute(
+                            "UPDATE rounds SET pot = pot + $1, player_count = player_count + 1 "
+                            "WHERE id = $2",
+                            self._room.stake,
+                            round_id,
+                        )
+                except asyncpg.exceptions.UniqueViolationError as exc:
+                    reason = "already_joined" if "user_id" in (exc.constraint_name or "") else "card_taken"
+                    return JoinResult(False, reason)
+                except InsufficientFunds:
+                    return JoinResult(False, "insufficient_funds")
+
+            self._entries[user_id] = RoundEntryState(card_no=card_no, auto_mark=auto_mark)
+            self._pot += self._room.stake
+
         await self._publish_room({"t": "card_taken", "card_no": card_no, "taken": True})
         return JoinResult(True, None)
 

@@ -319,6 +319,50 @@ async def test_duplicate_card_and_double_join_rejected(pool, redis, card_pool, c
         await asyncio.wait_for(task, timeout=10)
 
 
+async def test_max_players_cap_holds_under_real_concurrent_joins(pool, redis, card_pool, conn):
+    # Regression: a real code review pass caught that the capacity check
+    # (len(self._entries) >= max_players) had no lock of its own -- two
+    # different users with two different card numbers (so the round_
+    # entries UNIQUE constraint on card_no can't catch it) could both
+    # read the same under-capacity count before either updated
+    # self._entries, overfilling the room past its configured cap. A
+    # small max_players and more concurrent joins than that cap, fired
+    # genuinely simultaneously via asyncio.gather (not sequentially),
+    # proves the fix holds under real concurrency, not just sequential
+    # calls -- exactly the load/chaos style of test this codebase already
+    # uses for its other real concurrency guarantees.
+    # min_players=2 is met partway through this batch, but _run_lobby()
+    # doesn't poll engine.stop() -- it only re-checks between its own
+    # 1-second ticks -- so lobby_seconds has to stay short (matching
+    # every other test in this file) or this test's own cleanup
+    # (engine.stop() + wait_for(task, timeout=10)) would itself time out
+    # waiting for a long lobby to naturally elapse. 3 seconds is still
+    # comfortably longer than 10 concurrent, now-serialized local joins
+    # should ever take, even under contention.
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, max_players=3, lobby_seconds=3
+    )
+    engine = await make_engine(pool, redis, card_pool, room_id)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        players = [await create_funded_user(conn) for _ in range(10)]
+        results = await asyncio.gather(
+            *(engine.join(user_id, card_no) for card_no, user_id in enumerate(players, start=1))
+        )
+        successes = [r for r in results if r.ok]
+        failures = [r for r in results if not r.ok]
+        assert len(successes) == 3
+        assert len(failures) == 7
+        assert all(r.reason == "room_full" for r in failures)
+        assert engine.player_count() == 3
+
+        row = await pool.fetchrow("SELECT player_count FROM rounds WHERE id = $1", engine.round_id)
+        assert row["player_count"] == 3  # in-memory count and the DB row agree
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
 async def test_insufficient_balance_join_rejected_no_partial_state(pool, redis, card_pool, conn):
     room_id = await create_room(conn, stake=Decimal("500.00"), min_players=2)
     engine = await make_engine(pool, redis, card_pool, room_id)
