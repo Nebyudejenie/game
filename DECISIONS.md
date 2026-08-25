@@ -5,6 +5,66 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Investigated `phone.py`'s Kenyan-number collision; no safe fix found, reverted the attempt
+
+The catalogued finding: `normalize_ethiopian_phone()` accepts a
+structurally-identical foreign number (its own example: a Kenyan
+`07XX XXX XXX`) as if it were Ethiopian, since both countries' mobile
+numbering plans happen to produce the exact same shape once normalized
+(a leading `0` stripped, 9 digits, starting with `7` or `9`).
+
+**First attempt, and why it was reverted**: removed the function's
+fourth, undocumented fallback path (`else: national = digits`, accepting
+a *bare* digit string with no country code and no national `0` prefix at
+all -- a form the function's own docstring never claimed to support).
+Looked like a clean, safe tightening with zero existing test coverage
+exercising it. The routine full clean-slate rebuild caught the real
+problem immediately: `services/admin/queries.py`'s `search_users()`
+reuses this exact same function to normalize an *admin's free-typed
+search query* before hashing it for an exact-match lookup --
+specifically so an admin can search by typing just the bare 9 digits,
+with no need to remember which prefix format the stored number used.
+`test_search_users_finds_by_exact_phone_in_national_format` failed
+immediately, for real: the "undocumented, unused" path the module's own
+docstring describes (calls restricted to "a number that arrived via
+Telegram's own contact-share mechanism... never free-typed text") turned
+out to have a second, legitimate caller the docstring doesn't mention,
+in a genuinely different context (admin search convenience, not
+registration validation) with the opposite preference (accept the loose
+form). Reverted immediately rather than reconciling the two callers'
+conflicting needs under time pressure -- this is exactly the kind of
+"looked isolated, wasn't" surprise the full clean-slate rebuild exists
+to catch before it ships.
+
+**Why the deeper, originally-cited case (the `0`-prefixed form) isn't
+fixed either, and isn't a quick follow-up**: Ethiopian and Kenyan mobile
+numbers in local dialing format are *genuinely structurally identical*
+-- `0712345678` normalizes to a 9-digit string starting with `7` in both
+countries' numbering plans. No digit-pattern check can distinguish them,
+and switching to a real phone-number library (e.g. `phonenumbers`,
+Google's libphonenumber port) wouldn't resolve it either: validating
+against Ethiopia's own metadata answers "is this digit pattern plausible
+for Ethiopia," not "is this number actually registered there" -- a
+structurally-Ethiopian-shaped Kenyan number still passes either way.
+Resolving this for real would need either requiring an explicit country
+code on every input (which would reject legitimate Ethiopian users whose
+Telegram client happens to hand over a bare national-format number, a
+real if less common case -- trading one false-accept risk for a
+false-reject risk on the platform's actual target users) or an external
+signal this function doesn't have access to (a carrier lookup, an
+IP-derived locale, an explicit user-declared country). Left as-is,
+documented here rather than attempted again without one of those.
+Consequence is bounded regardless: this function is only ever called on
+a Telegram-verified contact-share number for registration (per its own
+docstring) or an admin's own deliberate search input, and a wrongly
+-accepted foreign number fails cleanly downstream at any telebirr-linked
+payment step rather than causing a money-safety issue at registration
+time.
+
+No source change shipped from this entry -- `services/bot/phone.py` and
+its tests are back to their pre-investigation state; `git status`
+confirmed clean before moving on.
+
 ## 2026-08-25 — Logged Chapa webhook content rejections, and fixed a state-dependent test assertion found along the way
 
 Thirteenth follow-up to the full-platform `/code-review` entry.
