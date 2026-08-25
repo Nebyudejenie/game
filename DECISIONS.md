@@ -5,6 +5,79 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Logged Chapa webhook content rejections, and fixed a state-dependent test assertion found along the way
+
+Thirteenth follow-up to the full-platform `/code-review` entry.
+
+**The bug**: `chapa.py`'s `verify_webhook()` raises the exact same
+`InvalidSignature` for a genuine forgery attempt (missing/wrong
+signature headers) as it does for a *correctly signed* webhook rejected
+for bad content (invalid JSON, a missing field, an unrecognized status,
+a malformed amount). `handle_webhook()`'s only caller
+(`services/payments/app.py`'s `chapa_webhook()` route) catches
+`InvalidSignature` and returns a bare 401 with no logging at all,
+deliberately for the forgery case (Chapa's own docs: don't leak which
+part of a forgery attempt was wrong). But that same silence also
+swallows the content-rejection case, where the request genuinely came
+from Chapa (only Chapa holds the secret key that produced a valid
+signature) and something about the payload itself is a real,
+worth-investigating problem -- Chapa changing their status vocabulary,
+or a payload shape this adapter doesn't yet handle. Both cases looked
+identical in the payments service's own logs: nothing at all.
+
+**Fixed**: added `structlog` logging (`chapa_webhook_content_rejected`,
+with the reason and whatever of `tx_ref`/`reference`/`raw_status`/
+`raw_amount` is available at that point) to the four rejection points
+that only run *after* both signature checks already passed -- bad JSON,
+missing fields, unrecognized status, malformed amount. The two
+signature-check rejections above them are deliberately untouched: those
+really are indistinguishable from routine forgery/scanning traffic, and
+logging them the same way would misrepresent an actual attack attempt as
+"huh, weird payload."
+
+**Regression tests**: extended the three existing content-rejection
+tests (`test_unrecognized_status_is_rejected_not_silently_accepted`,
+`test_missing_required_field_is_rejected`,
+`test_malformed_amount_is_rejected_not_an_unhandled_crash`) to assert
+the expected log line using `structlog.testing.capture_logs()`, and
+added `test_a_forged_signature_is_not_logged_as_content_rejected` to
+confirm a genuine signature failure does *not* get logged as a content
+rejection -- the fix would be actively misleading if it did. All three
+extended assertions confirmed to fail against the unfixed code first
+(empty `logs` list in every case) before restoring the fix.
+
+**A real, pre-existing, state-dependent test bug found and fixed along
+the way, unrelated to this fix**: the routine full clean-slate rebuild
+turned up `test_full_round_35_players_ledger_balances` failing with
+`Decimal('559.98') == Decimal('560.00')` -- a genuine, real 3-way tie
+among the 35 real players (560.00 / 3 = 186.66 per share after rounding
+down, 0.02 left over to the house, exactly matching
+`settlement.split_derash()`'s own documented and independently-tested
+behavior), which the test's own assertion (`sum(winners) ==
+round_row["derash"]`) has apparently always been wrong for -- it just
+never happened to draw a real tie in this specific test's own fixed
+35-card set until this session's many added tests shifted the `rounds`
+table's sequence-derived `round_id` (part of this round's deterministic
+`client_seed`) far enough to land on a draw order that finally produced
+one. Confirmed by rerunning in isolation (passes -- a different, earlier
+`round_id`) versus in the full suite (fails -- reproducibly, not a
+timing flake). Fixed by computing the actually-expected per-winner split
+via `settlement.split_derash(derash, len(winners))` and comparing sorted
+share lists, the same real math `test_two_simultaneous_claims_split_
+derash_evenly` already exercises for exactly two winners, generalized to
+however many winners a given draw actually produces.
+
+Full clean-slate rebuild: `docker compose down -v` / `up -d`, migrations
+clean, mypy clean across 63 source files, `pytest tests/` 707 passed / 13
+deselected (up from 706), `-m load` 4/5 passed cleanly, `test_load_
+multiroom.py`'s p99 budget failed in the full batch (412ms vs. 300ms)
+but passed cleanly alone -- confirmed via `docker ps` the same already
+-documented shared-host contention (unrelated `santim-commerce-*`/`spos-
+*` containers still running on this 4-core host), not a regression from
+a fix that touches only `chapa.py` and one test's assertion, nowhere
+near the WS call-broadcast path that test measures. `-m chaos_infra` 1
+passed, `-m e2e` 7 passed (no flake this run).
+
 ## 2026-08-25 — Fixed the Mini App's WS reconnect storm risk with exponential backoff + jitter
 
 Twelfth follow-up to the full-platform `/code-review` entry. Client-side

@@ -26,6 +26,7 @@ import json
 from decimal import Decimal, InvalidOperation
 
 import httpx
+import structlog
 
 from services.payments.provider import (
     CheckoutResult,
@@ -34,6 +35,8 @@ from services.payments.provider import (
     StatusResult,
     VerifiedEvent,
 )
+
+logger = structlog.get_logger()
 
 BASE_URL = "https://api.chapa.co/v1"
 
@@ -116,9 +119,23 @@ class ChapaProvider:
         if not hmac.compare_digest(expected_key_signature, key_signature):
             raise InvalidSignature("key signature mismatch")
 
+        # Everything from here on is a *correctly signed* request -- only
+        # someone holding our_secret_key (Chapa itself, in practice) could
+        # have produced this signature. A code review pass caught that a
+        # rejection past this point (bad JSON, a missing field, an
+        # unrecognized status, a malformed amount) was raised as the exact
+        # same InvalidSignature an actual forgery attempt gets, and
+        # handle_webhook()'s only caller discards it with no logging at
+        # all -- indistinguishable from routine internet scanning traffic
+        # in the payments service's own logs, silently losing visibility
+        # into what should be a rare, worth-investigating event: either a
+        # genuine account issue on a specific transaction, or Chapa having
+        # changed their webhook contract in some way this adapter doesn't
+        # yet handle.
         try:
             data = json.loads(raw_body)
         except json.JSONDecodeError as exc:
+            logger.warning("chapa_webhook_content_rejected", reason="body is not valid json")
             raise InvalidSignature("body is not valid json") from exc
 
         our_ref = data.get("tx_ref")
@@ -126,28 +143,42 @@ class ChapaProvider:
         raw_status = data.get("status")
         raw_amount = data.get("amount")
         if not our_ref or not reference or raw_status is None or raw_amount is None:
+            logger.warning(
+                "chapa_webhook_content_rejected",
+                reason="missing required webhook fields",
+                tx_ref=our_ref,
+                reference=reference,
+            )
             raise InvalidSignature("missing required webhook fields")
 
         try:
             status = _map_status(str(raw_status))
         except ValueError as exc:
+            logger.warning(
+                "chapa_webhook_content_rejected",
+                reason="unrecognized status",
+                tx_ref=our_ref,
+                reference=reference,
+                raw_status=raw_status,
+            )
             raise InvalidSignature(str(exc)) from exc
 
-        # A code review pass caught that this webhook's field-presence
-        # checks above (not missing/None) didn't also cover well-formed
-        # -ness: a signed but malformed "amount" (garbage text, a JSON
-        # object where a number was expected) made Decimal(str(...)) raise
-        # decimal.InvalidOperation, which handle_webhook()'s only caller
-        # (services/payments/app.py's chapa_webhook() route) doesn't
-        # catch -- propagating out as an unhandled 500 instead of the
-        # same clean, deliberate "untrustworthy payload, discard it"
-        # 401 response every other malformed-webhook case here already
-        # gets. Matches the exact same try/except-and-reraise pattern
-        # _map_status()'s own ValueError -> InvalidSignature conversion
-        # just above already uses for the same class of problem.
+        # The field-presence check above (not missing/None) doesn't cover
+        # well-formedness -- a garbage "amount" (non-numeric text, a JSON
+        # object where a number was expected) makes Decimal(str(...))
+        # raise decimal.InvalidOperation. Same treatment as the status
+        # check just above: caught and converted, not left to propagate
+        # as an unhandled 500.
         try:
             amount = Decimal(str(raw_amount))
         except InvalidOperation as exc:
+            logger.warning(
+                "chapa_webhook_content_rejected",
+                reason="malformed amount",
+                tx_ref=our_ref,
+                reference=reference,
+                raw_amount=raw_amount,
+            )
             raise InvalidSignature(f"malformed amount: {raw_amount!r}") from exc
 
         return VerifiedEvent(

@@ -9,7 +9,7 @@ from decimal import Decimal
 import pytest
 
 from packages.core import bingo, ledger
-from services.engine import round_engine
+from services.engine import round_engine, settlement
 from services.engine.round_engine import ClaimResult, RoundEngine, load_room_config
 from tests.integration.conftest import create_funded_user, create_room, recv_balance_update
 
@@ -55,7 +55,20 @@ async def test_full_round_35_players_ledger_balances(pool, redis, card_pool, con
             "SELECT user_id, amount FROM round_winners WHERE round_id = $1", round_row["id"]
         )
         assert len(winners) >= 1
-        assert sum((w["amount"] for w in winners), Decimal("0")) == round_row["derash"]
+        # A real draw over 35 real cards can legitimately produce more
+        # than one simultaneous winner, not just the single-winner case --
+        # settlement.split_derash() rounds each share DOWN to the cent and
+        # sends whatever fraction that leaves on the table to the house
+        # (tested directly in tests/unit/test_settlement.py, and exercised
+        # end to end by test_two_simultaneous_claims_split_derash_evenly
+        # below), so summing winners' amounts only equals derash exactly
+        # when it divides evenly among however many winners this draw
+        # actually produced -- recompute the real expected split rather
+        # than assuming a single winner always gets the whole derash.
+        expected_shares, _leftover_to_house = settlement.split_derash(
+            round_row["derash"], len(winners)
+        )
+        assert sorted(w["amount"] for w in winners) == sorted(expected_shares)
 
         mismatches = await ledger.reconcile(conn)
         assert mismatches == []

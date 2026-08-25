@@ -11,6 +11,7 @@ import json
 from decimal import Decimal
 
 import pytest
+from structlog.testing import capture_logs
 
 from services.payments.chapa import ChapaProvider
 from services.payments.provider import InvalidSignature
@@ -91,16 +92,25 @@ def test_unrecognized_status_is_rejected_not_silently_accepted():
     provider = ChapaProvider(SECRET)
     raw_body = _body(status="some_new_status_chapa_invented_later")
     headers = _sign(SECRET, raw_body)
-    with pytest.raises(InvalidSignature):
+    with capture_logs() as logs, pytest.raises(InvalidSignature):
         provider.verify_webhook(headers, raw_body)
+    assert any(
+        e.get("event") == "chapa_webhook_content_rejected" and e.get("reason") == "unrecognized status"
+        for e in logs
+    ), logs
 
 
 def test_missing_required_field_is_rejected():
     provider = ChapaProvider(SECRET)
     raw_body = json.dumps({"status": "success", "amount": "1"}).encode()  # no tx_ref/reference
     headers = _sign(SECRET, raw_body)
-    with pytest.raises(InvalidSignature):
+    with capture_logs() as logs, pytest.raises(InvalidSignature):
         provider.verify_webhook(headers, raw_body)
+    assert any(
+        e.get("event") == "chapa_webhook_content_rejected"
+        and e.get("reason") == "missing required webhook fields"
+        for e in logs
+    ), logs
 
 
 def test_malformed_amount_is_rejected_not_an_unhandled_crash():
@@ -114,5 +124,26 @@ def test_malformed_amount_is_rejected_not_an_unhandled_crash():
     provider = ChapaProvider(SECRET)
     raw_body = _body(amount="not-a-number")
     headers = _sign(SECRET, raw_body)
-    with pytest.raises(InvalidSignature):
+    with capture_logs() as logs, pytest.raises(InvalidSignature):
         provider.verify_webhook(headers, raw_body)
+    assert any(
+        e.get("event") == "chapa_webhook_content_rejected" and e.get("reason") == "malformed amount"
+        for e in logs
+    ), logs
+
+
+def test_a_forged_signature_is_not_logged_as_content_rejected():
+    # A code review pass caught that a *correctly signed* request rejected
+    # for bad content (the three tests above) was indistinguishable from
+    # an outright forgery attempt in this service's own logs -- both just
+    # vanished as a silent InvalidSignature. Fixed by logging the content
+    # -rejection cases specifically; this confirms the fix didn't also
+    # start logging genuine signature failures as though they were that,
+    # which would be actively misleading (a real forgery attempt logged
+    # as "huh, weird payload" rather than "someone without our secret key
+    # tried this").
+    provider = ChapaProvider(SECRET)
+    raw_body = _body()
+    with capture_logs() as logs, pytest.raises(InvalidSignature):
+        provider.verify_webhook(_sign("wrong-secret", raw_body), raw_body)
+    assert not any(e.get("event") == "chapa_webhook_content_rejected" for e in logs), logs
