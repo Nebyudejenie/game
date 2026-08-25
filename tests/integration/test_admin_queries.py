@@ -560,12 +560,24 @@ async def test_dashboard_summary_reflects_real_state(pool, redis, card_pool, con
     engine = RoundEngine(pool, redis, room, card_pool)
     task = asyncio.create_task(engine.run_forever())
     try:
+        # stakes_today/payouts_today/house_revenue_today read from this
+        # session's shared, ever-growing ledger_entries table -- a
+        # before/after delta, not an absolute total, is what's actually
+        # meaningful here, the same discipline this session's other
+        # shared-ledger tests already settled on.
+        stakes_before = Decimal((await queries.dashboard_summary(pool))["stakes_today"])
+
         p1 = await create_funded_user(conn)
         assert (await engine.join(p1, 1)).ok
 
         summary = await queries.dashboard_summary(pool)
         assert summary["active_rounds"] >= 1
         assert summary["active_rooms"] >= 1
+        # A code review pass consolidated this from three separate
+        # queries into one FILTER-based query -- this confirms the
+        # consolidated version still attributes a real stake to the
+        # right bucket, not just that it runs without error.
+        assert Decimal(summary["stakes_today"]) - stakes_before == Decimal("10.00")
     finally:
         await engine.stop()
         await asyncio.wait_for(task, timeout=10)

@@ -5,6 +5,73 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Consolidated `dashboard_summary`'s three queries into one; reviewed and declined the rest of the efficiency tail
+
+Twenty-second follow-up to the full-platform `/code-review` entry.
+
+**Fixed**: `dashboard_summary()`'s `stakes_today`/`payouts_today`/
+`house_revenue_today` were three separate scans over `ledger_entries`
+for the same day, differing only in their `WHERE a.kind = ... AND
+t.kind = ...` filter. Consolidated into one query bucketing all three
+sums via `FILTER (WHERE ...)` in a single pass -- verified equivalent to
+the original three WHERE clauses one for one, including that
+`house_revenue_today` carries no `t.kind` restriction of its own,
+matching the original exactly. Extended the existing
+`test_dashboard_summary_reflects_real_state` test with a real
+before/after assertion on `stakes_today` (this session's shared ledger
+makes an absolute total meaningless, so a delta across a real stake is
+what's actually verified) -- confirmed it passes identically against
+both the old three-query code and the new one-query code, the right
+check for a pure refactor rather than a "does this fail against the old
+code" check that doesn't apply when nothing was actually broken.
+
+**Reviewed and explicitly declined the remaining efficiency-tail items**,
+rather than grinding through the whole catalogued list uniformly:
+
+- The LTV formula "duplicated" across `player_ltv()`/
+  `top_players_by_ltv()` (admin reporting) and `withdrawals.py`'s
+  `lifetime_in`/`lifetime_out` (the real-time, transaction-locked
+  auto-approval eligibility gate) turned out on inspection to answer
+  genuinely different questions using a superficially similar SQL shape
+  -- "this player's overall net value" versus "has this player withdrawn
+  about as much as they've deposited, safe to auto-approve." Sharing one
+  helper across a lock-free reporting query and a `FOR UPDATE`
+  -transaction-scoped payment gate would risk changing the money-flow
+  -critical one for a stylistic win with no real consistency payoff --
+  these three were never at risk of drifting out of sync with each
+  other, because they were never really computing the same thing.
+- `commands.py`'s `send_command()` opening a fresh Redis pub/sub
+  subscription per player action instead of one long-lived per-process
+  demuxer is real, but fixing it properly means redesigning the
+  request/reply protocol across the gateway's whole command-dispatch
+  path (a shared demuxer, message routing by request id, gateway
+  startup lifecycle changes) -- not a contained change, and this
+  session's own load tests (1000 concurrent joins, full rush scenarios)
+  already pass within budget on the current pattern. Risk/effort
+  disproportionate to a currently-undemonstrated impact.
+- `fanout.py` hard-coding `DROPPABLE_TYPES` (bingo-specific message
+  type knowledge) into an otherwise domain-agnostic transport is a
+  design purity concern with zero live consequence: there is exactly
+  one consumer of this transport in the entire codebase. Abstracting it
+  away would be designing for a hypothetical reuse case that doesn't
+  exist, the exact premature-abstraction this project's own engineering
+  discipline explicitly rules out.
+- `list_rooms`'s "two near-duplicate branches" couldn't be precisely
+  relocated against either `list_rooms()` implementation in the current
+  codebase (gateway's or admin's) -- rather than guess at what the
+  original finding meant and risk changing the wrong thing, left
+  uninvestigated.
+
+Full clean-slate rebuild: `docker compose down -v` / `up -d`, migrations
+clean, mypy clean across 63 source files, `pytest tests/` 720 passed / 13
+deselected (unchanged -- an existing test was extended, not added to),
+`-m chaos_infra` 1 passed, `-m e2e` 7 passed clean. `-m load`: the same
+two already-documented latency-budget tests flaked in the full batch
+again (`test_gateway_fanout.py`'s stalled-reader test, `test_load_
+multiroom.py`), both clean together in isolation immediately after --
+the same shared-host contention pattern from the previous several
+entries, on code paths this admin-only, read-only change doesn't touch.
+
 ## 2026-08-25 — Ran `build_state_sync`'s two independent queries concurrently
 
 Twenty-first follow-up to the full-platform `/code-review` entry, from

@@ -617,36 +617,36 @@ async def dashboard_summary(pool: asyncpg.Pool) -> dict[str, Any]:
     )
     active_rooms = await pool.fetchval("SELECT count(*) FROM rooms WHERE is_active = true")
     today = datetime.now(ETHIOPIA_TZ).date()
-    stakes_today = await pool.fetchval(
-        "SELECT COALESCE(SUM(-e.amount), 0) FROM ledger_entries e "
-        "JOIN accounts a ON a.id = e.account_id "
-        "JOIN ledger_transactions t ON t.id = e.transaction_id "
-        "WHERE a.kind = 'user_cash' AND t.kind = 'stake' "
-        "AND (e.created_at AT TIME ZONE 'Africa/Addis_Ababa')::date = $1",
+    # A code review pass caught these as three near-identical scans over
+    # the same table for the same day -- one FILTER-based query, bucketing
+    # by kind in a single pass, produces the exact same three figures
+    # (verified against the original per-query WHERE clauses one for one,
+    # including that house_revenue_today has no t.kind restriction of its
+    # own, matching the original) instead of three separate round trips.
+    row = await pool.fetchrow(
+        """
+        SELECT
+            COALESCE(SUM(-e.amount) FILTER (WHERE a.kind = 'user_cash' AND t.kind = 'stake'), 0)
+                AS stakes_today,
+            COALESCE(SUM(e.amount) FILTER (WHERE a.kind = 'user_cash' AND t.kind = 'payout'), 0)
+                AS payouts_today,
+            COALESCE(SUM(e.amount) FILTER (WHERE a.kind = 'house_revenue'), 0)
+                AS house_revenue_today
+        FROM ledger_entries e
+        JOIN accounts a ON a.id = e.account_id
+        JOIN ledger_transactions t ON t.id = e.transaction_id
+        WHERE (e.created_at AT TIME ZONE 'Africa/Addis_Ababa')::date = $1
+          AND (t.kind IN ('stake', 'payout') OR a.kind = 'house_revenue')
+        """,
         today,
     )
-    payouts_today = await pool.fetchval(
-        "SELECT COALESCE(SUM(e.amount), 0) FROM ledger_entries e "
-        "JOIN accounts a ON a.id = e.account_id "
-        "JOIN ledger_transactions t ON t.id = e.transaction_id "
-        "WHERE a.kind = 'user_cash' AND t.kind = 'payout' "
-        "AND (e.created_at AT TIME ZONE 'Africa/Addis_Ababa')::date = $1",
-        today,
-    )
-    house_revenue_today = await pool.fetchval(
-        "SELECT COALESCE(SUM(e.amount), 0) FROM ledger_entries e "
-        "JOIN accounts a ON a.id = e.account_id "
-        "JOIN ledger_transactions t ON t.id = e.transaction_id "
-        "WHERE a.kind = 'house_revenue' "
-        "AND (e.created_at AT TIME ZONE 'Africa/Addis_Ababa')::date = $1",
-        today,
-    )
+    assert row is not None
     return {
         "active_rounds": active_rounds,
         "active_rooms": active_rooms,
-        "stakes_today": str(stakes_today),
-        "payouts_today": str(payouts_today),
-        "house_revenue_today": str(house_revenue_today),
+        "stakes_today": str(row["stakes_today"]),
+        "payouts_today": str(row["payouts_today"]),
+        "house_revenue_today": str(row["house_revenue_today"]),
     }
 
 
