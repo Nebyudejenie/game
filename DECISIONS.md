@@ -5,6 +5,62 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — `retention_cohorts` now buckets weeks using Ethiopia time, not UTC
+
+Seventh fix from the same fresh `/code-review high` pass.
+
+**The bug**: `services/admin/queries.py`'s `retention_cohorts()` computed
+`cohort_week` and `active_week` via `date_trunc('week', created_at)::date`
+and `date_trunc('week', r.started_at)::date` -- both operating on a
+`timestamptz` with no `AT TIME ZONE`, which truncates using Postgres's
+ambient session timezone (unconfigured, defaults to UTC). This is the same
+bug an earlier fix this session already closed twice in this same file
+(`dashboard_summary`'s day cutoff, `daily_ggr`'s two day cutoffs) --
+DECISIONS.md's existing entry for that fix explains it in full -- just via
+`date_trunc('week', ...)` instead of a bare `::date` cast, and never
+applied here. A signup or round in the ~3-hour window where UTC still says
+"Sunday" but Ethiopia (UTC+3) already says "Monday" got bucketed into the
+wrong cohort week entirely -- not just off by a few hours like the
+day-level version of this bug, but placed in an adjacent week's row,
+changing that week's `cohort_size` and every `active_users` count derived
+from it.
+
+**Fixed**: both `date_trunc('week', ...)` calls now wrap their `timestamptz`
+argument in `... AT TIME ZONE 'Africa/Addis_Ababa'` first, exactly matching
+the established pattern from the other two sites in this file.
+
+Added `test_retention_cohorts_buckets_signup_week_using_ethiopia_time_not_utc`
+to `tests/integration/test_admin_queries.py`, pinning a signup to
+`2024-03-10 22:00:00 UTC` -- confirmed directly against this project's own
+Postgres (not assumed) to truncate to `2024-03-04` without the fix and
+`2024-03-11` with it. Picked a date safely in the past (this session's
+"now" is 2026-08-25) so no unrelated test's `create_funded_user()` call
+ever lands in either of these same two week buckets and pollutes the
+count -- confirmed empirically during the regression-test verification
+step below, where the only other cohort weeks present were unrelated
+2026 dates. Also updated the existing
+`test_retention_cohorts_places_a_backdated_signup_in_a_later_week_offset`'s
+own verification query to the same `AT TIME ZONE` pattern -- its bare
+`date_trunc('week', created_at)::date` would have silently drifted out of
+sync with the now-fixed function and turned flaky near a future UTC/EAT
+week-boundary crossing, rather than failing loudly.
+
+Verified the new test is real: `git stash push` on just `queries.py`
+reverted to the old, UTC-based code, reran -- failed with `expected the
+Ethiopia-time Monday (2024-03-11), got cohort weeks {'2026-08-24',
+'2026-08-10', '2024-03-04'}` (the old buggy bucket, plus two unrelated real
+cohort weeks from this session's own test data, confirming the
+date-collision-safety assumption held) -- then `git stash pop` to restore
+the fix.
+
+**Full clean-slate rebuild**: `mypy` clean (63 source files) → `pytest
+tests/` (728 passed, up from 727) → `-m load` (5/5 passed clean) → `-m
+chaos_infra` (1 passed) → `-m e2e` (6/7 passed on the first pass,
+`test_history_tab_shows_a_completed_round` hit the already-documented
+occasional Playwright flake with a 25s selector timeout unrelated to this
+change; reran clean in isolation, then the full `-m e2e` batch reran
+7/7 clean). 741/741 real passes.
+
 ## 2026-08-25 — `/auth/login` now enforces the IP allowlist
 
 Sixth fix from the same fresh `/code-review high` pass.

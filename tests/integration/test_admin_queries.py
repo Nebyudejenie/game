@@ -149,6 +149,38 @@ async def test_retention_cohorts_counts_a_user_active_in_their_signup_week(pool,
     assert matching[0]["weeks"][0]["retention_rate"] is None
 
 
+async def test_retention_cohorts_buckets_signup_week_using_ethiopia_time_not_utc(pool, conn):
+    # A code review pass caught date_trunc('week', created_at)::date --
+    # created_at is timestamptz, so a bare date_trunc with no AT TIME ZONE
+    # truncates using Postgres's ambient session timezone (unconfigured,
+    # defaults to UTC), the same already-fixed bug DECISIONS.md documents
+    # for dashboard_summary/daily_ggr's own day-bucketing, just via
+    # date_trunc('week', ...) instead of a bare ::date cast. A signup at
+    # 2024-03-10 22:00 UTC is a Sunday in UTC (still the week starting
+    # Monday 2024-03-04) but already Monday 01:00 in Ethiopia (UTC+3) --
+    # the start of the *next* week, 2024-03-11. Confirmed directly against
+    # this project's own Postgres, not assumed: date_trunc('week', ...)
+    # on this instant gives 2024-03-04 without the fix, 2024-03-11 with
+    # it. A date safely in the past (nowhere near this session's own
+    # "now") so no unrelated test's create_funded_user() ever lands in
+    # either of these same two week buckets and pollutes the count.
+    user_id = await create_funded_user(conn)
+    await conn.execute(
+        "UPDATE users SET created_at = $2 WHERE id = $1",
+        user_id,
+        datetime(2024, 3, 10, 22, 0, 0, tzinfo=UTC),
+    )
+
+    cohorts = await queries.retention_cohorts(pool, weeks=1)
+    weeks_present = {c["cohort_week"] for c in cohorts}
+    assert "2024-03-11" in weeks_present, (
+        f"expected the Ethiopia-time Monday (2024-03-11), got cohort weeks {weeks_present}"
+    )
+    assert "2024-03-04" not in weeks_present, (
+        "user was bucketed into the UTC week (2024-03-04) instead of the Ethiopia week (2024-03-11)"
+    )
+
+
 async def test_retention_cohorts_places_a_backdated_signup_in_a_later_week_offset(pool, redis, card_pool, conn):
     # Signed up 2 weeks before today, active today -- must land at
     # week_offset 2 in their own cohort's row, not week_offset 0. Exactly
@@ -175,8 +207,15 @@ async def test_retention_cohorts_places_a_backdated_signup_in_a_later_week_offse
         await engine.stop()
         await asyncio.wait_for(task, timeout=15)
 
+    # Mirrors retention_cohorts()'s own AT TIME ZONE 'Africa/Addis_Ababa'
+    # bucketing -- this used to be a bare date_trunc('week', created_at),
+    # which happened to still agree with the fixed function on most days
+    # but would silently mismatch (and flake this test) whenever "now"
+    # fell near a UTC/Ethiopia week-boundary crossing.
     cohort_week = await conn.fetchval(
-        "SELECT date_trunc('week', created_at)::date FROM users WHERE id = $1", user_id
+        "SELECT date_trunc('week', created_at AT TIME ZONE 'Africa/Addis_Ababa')::date "
+        "FROM users WHERE id = $1",
+        user_id,
     )
     cohorts = await queries.retention_cohorts(pool, weeks=4)
     cohort = next(c for c in cohorts if c["cohort_week"] == cohort_week.isoformat())

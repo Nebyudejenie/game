@@ -186,14 +186,15 @@ async def retention_cohorts(pool: asyncpg.Pool, weeks: int = 8) -> list[dict[str
     rows = await pool.fetch(
         """
         WITH cohort AS (
-          SELECT id, date_trunc('week', created_at)::date AS cohort_week
+          SELECT id, date_trunc('week', created_at AT TIME ZONE 'Africa/Addis_Ababa')::date AS cohort_week
           FROM users
         ),
         cohort_sizes AS (
           SELECT cohort_week, count(*) AS cohort_size FROM cohort GROUP BY cohort_week
         ),
         activity AS (
-          SELECT DISTINCT re.user_id, date_trunc('week', r.started_at)::date AS active_week
+          SELECT DISTINCT re.user_id,
+            date_trunc('week', r.started_at AT TIME ZONE 'Africa/Addis_Ababa')::date AS active_week
           FROM round_entries re
           JOIN rounds r ON r.id = re.round_id
           WHERE r.started_at IS NOT NULL
