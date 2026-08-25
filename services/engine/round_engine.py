@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 import asyncpg
+import structlog
 from redis.asyncio import Redis
 
 from packages.core import bingo, ledger, metrics, responsible_gaming
@@ -36,6 +37,8 @@ from packages.core.bingo import Grid
 from packages.core.ledger import Entry, InsufficientFunds
 from services.engine import commands, refunds, settlement
 from services.engine.room_lock import RoomLock
+
+logger = structlog.get_logger()
 
 WINNER_TIE_WINDOW_SECONDS = 0.05
 
@@ -747,18 +750,34 @@ class RoundEngine:
             payload = {}
 
         result: JoinResult | ClaimResult
-        if action == "join":
-            result = await self.join(
-                user_id, payload.get("card_no", 0), auto_mark=payload.get("auto_mark", True)
+        try:
+            if action == "join":
+                result = await self.join(
+                    user_id, payload.get("card_no", 0), auto_mark=payload.get("auto_mark", True)
+                )
+            elif action == "drop_card":
+                result = await self.drop_card(user_id)
+            elif action == "claim":
+                result = await self.claim(user_id, source="manual")
+            elif action == "set_auto":
+                result = await self.set_auto(user_id, bool(payload.get("auto", True)))
+            else:
+                result = JoinResult(False, "unknown_action")
+        except Exception:
+            # A code review pass caught that this had no isolation at
+            # all: one malformed payload or edge-case bug anywhere in
+            # join()/drop_card()/claim()/set_auto() would propagate
+            # straight out of _serve_commands()'s loop and kill this
+            # room's single long-lived command consumer permanently (no
+            # restart) -- every subsequent join/drop/claim/set_auto for
+            # this room would silently time out for players (5s
+            # CommandTimeout) while the round itself kept running
+            # unattended. One bad command must fail that command, not
+            # the room.
+            logger.exception(
+                "engine_command_handler_raised", room_id=self._room.id, action=action, user_id=user_id
             )
-        elif action == "drop_card":
-            result = await self.drop_card(user_id)
-        elif action == "claim":
-            result = await self.claim(user_id, source="manual")
-        elif action == "set_auto":
-            result = await self.set_auto(user_id, bool(payload.get("auto", True)))
-        else:
-            result = JoinResult(False, "unknown_action")
+            result = JoinResult(False, "internal_error")
 
         if request_id:
             await self._redis.publish(

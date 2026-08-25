@@ -5,6 +5,67 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Three more of the previous entry's catalogued findings fixed: command isolation, room-lock split-brain, notifier resilience
+
+Follow-up to the entry directly below. Picked off the next three safest-
+to-fix-correctly items from that entry's "catalogued, not fixed" list --
+all genuinely severe, but each a contained, mechanical fix (exception
+handling / isolation) rather than new architecture, so safe to fix now
+rather than deferring further.
+
+1. **`round_engine.py`'s `_handle_command` had no exception isolation.**
+   Any unexpected exception inside `join()`/`drop_card()`/`claim()`/
+   `set_auto()` would propagate straight out of `_serve_commands()`'s
+   loop and kill the room's single long-lived command consumer
+   permanently (no restart) -- every subsequent command for that room
+   would silently time out for players while the round itself kept
+   running unattended. **Fixed**: the dispatch is now wrapped in a
+   try/except that logs and returns an `internal_error` result for that
+   one command, leaving the consumer loop alive for every other command.
+   New regression test simulates a real exception via monkeypatching
+   `engine.join` and confirms a *second*, real join still succeeds
+   afterward -- proving the room survives, not just that one bad call
+   fails cleanly.
+2. **`room_lock.py`'s `_refresh_loop`/`release()` had no error handling
+   around their Redis `eval()` calls** -- a real split-brain risk: an
+   unhandled Redis error (a transient blip, not even a full outage)
+   killed the refresh task *before* `self._held = False` ran, so
+   `is_held()` reported `True` forever, even after the real Redis TTL
+   key expired on schedule and a second engine legitimately acquired the
+   same room. **Fixed**: both now treat any Redis error identically to
+   "someone else already owns this lock" -- relinquish immediately,
+   consistent with the module's own docstring already framing lock loss
+   as the *safe* outcome of a refresh failure. Two new regression tests
+   inject a real exception from the actual `eval()` call (not a
+   hypothetical) and confirm `is_held()` goes `False` promptly in both
+   the refresh-loop and release() paths.
+3. **`notifier.py`'s worker loop only caught
+   `TelegramRetryAfter`/`TelegramForbiddenError`.** Any other exception
+   (e.g. `TelegramBadRequest` from malformed HTML in an interpolated user
+   string, a network error) propagated straight out of the loop and
+   killed the single global notification worker permanently -- nothing
+   supervises or restarts it, so every future deposit/win/withdrawal
+   notification for every user would silently stop until the whole
+   process restarted. **Fixed**: a broad `except Exception` logs and
+   drops that one message (not retried -- most causes here would never
+   succeed no matter how many times retried) without killing the worker.
+   New regression test injects a real `TelegramBadRequest` and confirms a
+   second, unrelated message still gets sent afterward.
+
+Still open from the previous entry's catalogue (payout reconciliation,
+`enqueue_payout`'s post-commit gap, cross-consumer payout recovery,
+auto-mark tie misallocation, `recovery.py`'s room-vs-round orphan gap,
+`max_players` TOCTOU, the loss-cap TOCTOU, live balance-update pushes for
+stakes/settlement, `notification_relay`'s ack-before-delivery gap, the
+Mini App reconnect storm, `phone.py`'s non-Ethiopian-number gap, the
+day-boundary timezone mismatch, and the efficiency/reuse list) -- these
+remain genuinely deferred, not silently dropped; see the previous entry
+for full detail on each.
+
+Full clean-slate rebuild: mypy clean across 63 source files, `pytest
+tests/` 686 passed / 13 deselected (up from 682), `-m load` 5 passed,
+`-m chaos_infra` 1 passed, `-m e2e` 7 passed.
+
 ## 2026-08-25 — A full-platform `/code-review high` pass (Phase 3 through the pre-observability baseline): 5 fixed, ~20 more catalogued
 
 Ran `/code-review high 812eb65..4cc23c4` -- the entire core platform

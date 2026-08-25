@@ -16,7 +16,10 @@ import asyncio
 import contextlib
 import uuid
 
+import structlog
 from redis.asyncio import Redis
+
+logger = structlog.get_logger()
 
 LOCK_TTL_SECONDS = 15
 REFRESH_INTERVAL_SECONDS = 5
@@ -89,9 +92,27 @@ class RoomLock:
     async def _refresh_loop(self) -> None:
         while True:
             await asyncio.sleep(self._refresh_interval_seconds)
-            refreshed = await self._redis.eval(
-                _REFRESH_IF_OWNER, 1, self._key, self._worker_id, self._ttl_seconds
-            )
+            try:
+                refreshed = await self._redis.eval(
+                    _REFRESH_IF_OWNER, 1, self._key, self._worker_id, self._ttl_seconds
+                )
+            except Exception:
+                # A code review pass caught a real split-brain risk here:
+                # an unhandled Redis error (a transient network blip, not
+                # even a full outage) used to kill this task *before*
+                # self._held = False ran, so is_held() reported True
+                # forever -- even after the real Redis TTL key expired on
+                # schedule and a second engine legitimately acquired the
+                # same room, both engines would then believe they alone
+                # owned it. Treated identically to "someone else already
+                # holds this lock": relinquish immediately. This module's
+                # own docstring already frames losing the lock as the
+                # *safe* outcome of a refresh failure -- a real Redis
+                # error is just one more reason refreshing can fail, not
+                # a special case that should leave ownership ambiguous.
+                logger.warning("room_lock_refresh_failed", room_id=self._room_id, exc_info=True)
+                self._held = False
+                return
             if not refreshed:
                 self._held = False
                 return
@@ -102,5 +123,11 @@ class RoomLock:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._refresh_task
             self._refresh_task = None
-        await self._redis.eval(_DELETE_IF_OWNER, 1, self._key, self._worker_id)
-        self._held = False
+        try:
+            await self._redis.eval(_DELETE_IF_OWNER, 1, self._key, self._worker_id)
+        finally:
+            # Same reasoning as _refresh_loop: a Redis error deleting the
+            # key must not leave self._held stuck True -- we're releasing
+            # either way, and the real key will still expire via its own
+            # TTL even if this DEL never lands.
+            self._held = False

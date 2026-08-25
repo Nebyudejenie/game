@@ -15,8 +15,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import structlog
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
+
+logger = structlog.get_logger()
 
 GLOBAL_RATE_PER_SECOND = 25.0
 MIN_INTERVAL_SECONDS = 1.0 / GLOBAL_RATE_PER_SECOND
@@ -77,5 +80,19 @@ class Notifier:
                     await self._queue.put(message)
             except TelegramForbiddenError:
                 pass  # the user blocked the bot -- nothing to retry
+            except Exception:
+                # A code review pass caught that any other exception here
+                # (e.g. TelegramBadRequest from malformed HTML in an
+                # interpolated string, a network error) used to propagate
+                # straight out of this loop and kill the single global
+                # notification worker permanently -- nothing supervises
+                # or restarts it, so every future deposit/win/withdrawal
+                # notification for every user would silently stop until
+                # the whole process restarted. Logged and dropped, not
+                # retried (most causes here -- malformed content in
+                # particular -- would never succeed no matter how many
+                # times retried), but the worker itself must keep running
+                # for every other queued and future message.
+                logger.exception("notifier_send_failed", chat_id=message.chat_id)
             else:
                 await asyncio.sleep(MIN_INTERVAL_SECONDS)

@@ -5,6 +5,8 @@ a hope.
 
 import asyncio
 
+import pytest
+
 from services.engine.room_lock import RoomLock
 
 
@@ -75,3 +77,56 @@ async def test_lock_expires_and_becomes_available_if_never_refreshed(redis):
     finally:
         await lock_a.release()
         await lock_b.release()
+
+
+async def test_a_redis_error_during_refresh_relinquishes_ownership_rather_than_sticking(
+    redis, monkeypatch
+):
+    # Regression: a real code review pass caught a genuine split-brain
+    # risk -- an unhandled Redis error during refresh (a transient blip,
+    # not even a full outage) used to kill the refresh task *before*
+    # self._held = False ran, so is_held() reported True forever, even
+    # after the real Redis TTL key expired on schedule and a second
+    # engine legitimately acquired the same room. Confirmed directly here
+    # rather than assumed: a real exception raised from the actual
+    # eval() call this lock depends on, not a hypothetical.
+    room_id = 900006
+    lock_a = RoomLock(redis, room_id, worker_id="worker-a", ttl_seconds=5, refresh_interval_seconds=0.2)
+    try:
+        assert await lock_a.acquire() is True
+
+        real_eval = redis.eval
+        call_count = 0
+
+        async def flaky_eval(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ConnectionError("simulated Redis blip")
+            return await real_eval(*args, **kwargs)
+
+        monkeypatch.setattr(redis, "eval", flaky_eval)
+
+        await asyncio.sleep(0.4)  # >= one refresh interval, hits the flaky eval
+
+        assert lock_a.is_held() is False
+    finally:
+        await lock_a.release()
+
+
+async def test_a_redis_error_during_release_still_clears_held(redis, monkeypatch):
+    room_id = 900007
+    lock_a = RoomLock(redis, room_id, worker_id="worker-a")
+    assert await lock_a.acquire() is True
+
+    async def failing_eval(*args, **kwargs):
+        raise ConnectionError("simulated Redis blip")
+
+    monkeypatch.setattr(redis, "eval", failing_eval)
+
+    with pytest.raises(ConnectionError):
+        await lock_a.release()
+    # Even though the DEL itself failed, is_held() must not stay stuck
+    # True -- we're releasing either way, and the real key will still
+    # expire via its own TTL regardless.
+    assert lock_a.is_held() is False

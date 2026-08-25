@@ -7,7 +7,7 @@ types, just triggered by a fake bot instead of a real 429 response.
 import asyncio
 from unittest.mock import AsyncMock
 
-from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.methods import SendMessage
 
 from services.bot.notifier import Notifier
@@ -21,6 +21,12 @@ def _retry_after(seconds: int) -> TelegramRetryAfter:
 
 def _forbidden() -> TelegramForbiddenError:
     return TelegramForbiddenError(method=SendMessage(chat_id=1, text="x"), message="bot was blocked")
+
+
+def _bad_request() -> TelegramBadRequest:
+    return TelegramBadRequest(
+        method=SendMessage(chat_id=1, text="x"), message="Bad Request: can't parse entities"
+    )
 
 
 async def _run_briefly(notifier: Notifier, seconds: float = 0.2) -> None:
@@ -83,6 +89,29 @@ async def test_forbidden_error_drops_message_without_retry_storm():
         await notifier.send(123, "hello")
         await asyncio.sleep(0.2)
         assert bot.send_message.call_count == 1
+    finally:
+        await notifier.stop()
+
+
+async def test_an_unexpected_send_error_does_not_kill_the_worker():
+    # Regression: a real code review pass caught that any exception here
+    # other than TelegramRetryAfter/TelegramForbiddenError (e.g.
+    # TelegramBadRequest from malformed HTML in an interpolated user
+    # string) used to propagate straight out of the worker loop and kill
+    # it permanently -- nothing supervises or restarts this task, so
+    # every future notification for every user would silently stop.
+    bot = AsyncMock()
+    bot.send_message.side_effect = [_bad_request(), None]
+    notifier = Notifier(bot)
+    notifier.start()
+    try:
+        await notifier.send(123, "message with <malformed> html")
+        await notifier.send(456, "a second, unrelated message")
+        await asyncio.sleep(0.3)
+        # Both sends were attempted -- the worker survived the first
+        # message's unexpected failure and went on to process the next
+        # one, rather than dying silently after the first.
+        assert bot.send_message.call_count == 2
     finally:
         await notifier.stop()
 
