@@ -87,6 +87,21 @@ class Notifier:
                 await self._queue.put(message)
                 await asyncio.sleep(min(backoff_until - now, MAX_BACKOFF_SLEEP_SECONDS))
                 continue
+            if backoff_until is not None:
+                # The window passed -- a code review pass caught that
+                # nothing ever removed this entry once it stopped
+                # mattering, so _backoff_until grew by one entry for
+                # every chat_id that had *ever* triggered even a single
+                # 429, for the entire life of this long-running process.
+                # Cleaning it up here closes that for the common case (a
+                # chat that got 429'd is, by definition, one this worker
+                # is actively sending to, so another message for it
+                # dequeuing soon is the expected case) without adding a
+                # periodic full-dict sweep for the residual, smaller case
+                # of a chat that happens to never send another message
+                # again after its one 429 -- not fully unbounded anymore,
+                # but not a hard zero either.
+                del self._backoff_until[message.chat_id]
 
             try:
                 await self._bot.send_message(message.chat_id, message.text, **message.kwargs)

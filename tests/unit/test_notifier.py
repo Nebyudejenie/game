@@ -58,6 +58,27 @@ async def test_retry_after_backs_off_then_eventually_succeeds():
         await notifier.stop()
 
 
+async def test_expired_backoff_entry_is_cleaned_up_not_left_forever():
+    # A code review pass caught that _backoff_until never removed an
+    # entry once its window passed -- it grew by one entry for every
+    # chat_id that had *ever* triggered even a single 429, for the
+    # entire life of this long-running process. Once a later message for
+    # the same chat is actually dequeued (the common case: a chat that
+    # just got 429'd is one this worker is actively sending to), the
+    # stale entry must be removed, not just silently ignored.
+    bot = AsyncMock()
+    bot.send_message.side_effect = [_retry_after(1), None]
+    notifier = Notifier(bot)
+    notifier.start()
+    try:
+        await notifier.send(123, "hello")
+        await asyncio.sleep(1.4)
+        assert bot.send_message.call_count == 2
+        assert 123 not in notifier._backoff_until  # noqa: SLF001
+    finally:
+        await notifier.stop()
+
+
 async def test_backed_off_chat_does_not_block_other_chats():
     call_order: list[int] = []
 

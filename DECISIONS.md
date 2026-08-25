@@ -5,6 +5,48 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Stopped `notifier.py`'s `_backoff_until` dict growing forever
+
+Twentieth follow-up to the full-platform `/code-review` entry, another
+item from the catalogue's own lowest-priority efficiency/reuse tail --
+a real, if slow, resource leak in a long-running singleton process, not
+a functional bug.
+
+**The issue**: `_backoff_until[message.chat_id] = ...` gets set whenever
+a chat triggers a `TelegramRetryAfter` (429), but nothing ever removed
+the entry once its window passed. `Notifier` is a single long-running
+process-lifetime object -- over weeks or months, every chat_id that ever
+triggered even one 429 left a permanent entry, for as long as the
+process stays up.
+
+**Fixed**: once a message for a chat_id is dequeued and its
+`backoff_until` has already passed, the entry is now deleted rather than
+just silently ignored. This closes the leak for the common case (a chat
+that got 429'd is, by definition, one this worker was actively sending
+to, so another message for it dequeuing again soon is the expected
+case) without adding a periodic full-dict sweep for the smaller residual
+case of a chat that happens to never send another message again after
+its one 429 -- documented honestly as "not fully unbounded anymore, but
+not a hard zero either," matching how this fix was actually scoped
+rather than overstating it.
+
+**Regression test confirmed against the unfixed code before trusting
+it**: reused the existing 429-then-succeeds scenario
+(`test_retry_after_backs_off_then_eventually_succeeds`'s own setup) and
+added an assertion that the chat_id is gone from `_backoff_until`
+afterward. Failed against the unfixed code exactly as expected -- the
+entry was still there.
+
+Full clean-slate rebuild: `docker compose down -v` / `up -d`, migrations
+clean, mypy clean across 63 source files, `pytest tests/` 720 passed / 13
+deselected (up from 719), `-m chaos_infra` 1 passed, `-m e2e` 7 passed
+clean. `-m load`: two already-documented latency-budget tests
+(`test_gateway_fanout.py`'s stalled-reader test, `test_load_multiroom
+.py`) flaked in the full batch again, both passing cleanly together in
+isolation immediately after -- the same shared-host contention pattern
+from the previous two entries, on code paths this notifier-only change
+doesn't touch at all.
+
 ## 2026-08-25 — Two reuse/consistency fixes from the efficiency tail: consolidated `get_user_detail`'s balance lookup, closed `approve_withdrawal`'s missing reason check
 
 Nineteenth follow-up to the full-platform `/code-review` entry, working
