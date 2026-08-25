@@ -8,19 +8,35 @@
 
 import { setState, getState } from "./state.js";
 
-const RECONNECT_DELAY_MS = 1000;
+const RECONNECT_BASE_DELAY_MS = 1000;
+const RECONNECT_MAX_DELAY_MS = 30000;
 const PING_INTERVAL_MS = 20000;
 
 let socket = null;
 let initData = null;
 let pingTimer = null;
 let reconnectTimer = null;
+let reconnectAttempts = 0;
 let authResolvers = [];
 const messageHandlers = new Map(); // type -> Set<fn>
 
 function wsUrl() {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${window.location.host}/ws`;
+}
+
+// Exponential backoff with full jitter (a code review pass caught this
+// was previously a flat 1s retry, forever, with zero randomization): every
+// client that dropped its connection at the same moment -- a gateway
+// restart, a shared network blip affecting a whole room -- was retrying in
+// lockstep, so they'd all hit the gateway again in the same tight burst
+// right as it's most fragile (cold caches, connection pool still warming
+// up). Doubling the delay per failed attempt, capped, and picking a
+// *random* point in [0, cap] rather than the cap itself decorrelates
+// those simultaneous retries instead of just spacing out one client's own.
+export function _reconnectDelayForAttempt(attempt) {
+  const cap = Math.min(RECONNECT_MAX_DELAY_MS, RECONNECT_BASE_DELAY_MS * 2 ** attempt);
+  return Math.random() * cap;
 }
 
 export function on(type, handler) {
@@ -47,6 +63,7 @@ function open() {
   socket = new WebSocket(wsUrl());
 
   socket.addEventListener("open", () => {
+    reconnectAttempts = 0;
     send({ t: "auth", init_data: initData });
   });
 
@@ -75,8 +92,9 @@ function open() {
     setState({ connection: "offline" });
     clearInterval(pingTimer);
     // 1012 = "service restart" (our own gateway's graceful-shutdown code,
-    // spec section 6): reconnect immediately, no backoff needed.
-    const delay = event.code === 1012 ? 0 : RECONNECT_DELAY_MS;
+    // spec section 6): reconnect immediately, no backoff needed -- the
+    // server just told us it's about to be available again right away.
+    const delay = event.code === 1012 ? 0 : _reconnectDelayForAttempt(reconnectAttempts++);
     reconnectTimer = setTimeout(open, delay);
   });
 

@@ -5,6 +5,64 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-25 — Fixed the Mini App's WS reconnect storm risk with exponential backoff + jitter
+
+Twelfth follow-up to the full-platform `/code-review` entry. Client-side
+(`web/miniapp/js/ws.js`), not backend -- an availability/resilience gap,
+not a money-safety one.
+
+**The bug**: `open()`'s `close` handler retried every dropped connection
+after a flat, constant `RECONNECT_DELAY_MS = 1000`, forever, with zero
+randomization (the one deliberate exception, code `1012` -- this
+codebase's own graceful-restart signal -- correctly reconnects
+immediately, and stayed that way). Every client that dropped its
+connection at the same moment -- a gateway restart, a shared network
+blip affecting a whole room -- was therefore retrying in lockstep,
+hitting the gateway again in the same tight ~1-second-wide burst right
+as it's most likely to still be fragile (cold caches, connection pool
+still warming up), a real "thundering herd" risk for exactly the
+scenario (many simultaneously-connected real-money players) this
+platform is built around.
+
+**Fixed**: added `_reconnectDelayForAttempt(attempt)` -- the standard
+"full jitter" exponential backoff pattern: `random(0, min(30s, 1s *
+2^attempt))`. A `reconnectAttempts` counter increments on every non-1012
+close and resets to 0 on a successful `open`, so a healthy connection
+that later drops still starts back at the short end, not wherever a
+previous outage left off. The 1012 path is untouched -- still instant,
+still doesn't touch the attempt counter -- since that's the server
+telling the client it's specifically safe to reconnect right away, not
+the general case this fix is about.
+
+**Verification, and why it doesn't look like this session's usual
+regression tests**: this repo has no JS test framework anywhere (the
+Mini App is deliberately framework-free vanilla JS per `state.js`'s own
+docstring) and no existing precedent for testing frontend logic outside
+the Playwright E2E suite. Rather than either skip automated verification
+or bolt on a new JS test framework for one function, exported
+`_reconnectDelayForAttempt` and added a plain-node smoke test
+(`tests/frontend/test_reconnect_backoff.mjs`, using only node's built-in
+`assert` module) run via a thin pytest wrapper
+(`tests/unit/test_miniapp_reconnect_backoff.py`) so it's part of the
+normal `pytest tests/` pass. Confirmed against the unfixed code first:
+importing the not-yet-exported function raised `SyntaxError: ... does
+not provide an export named '_reconnectDelayForAttempt'` -- a real
+failure, not a false negative -- before restoring the fix. Also reran
+the full real-browser Playwright E2E suite (which loads and exercises
+this exact file end to end, including a full gameplay round) to confirm
+the edit didn't break anything a syntax-only smoke test wouldn't catch.
+
+Full clean-slate rebuild: `docker compose down -v` / `up -d`, migrations
+clean, mypy clean across 63 source files, `pytest tests/` 706 passed / 13
+deselected (up from 705 -- the one new node-backed test), `-m load` 5
+passed, `-m chaos_infra` 1 passed, `-m e2e` 7 passed (one transient
+Playwright failure on `test_miniapp_full_gameplay_flow` in the full-suite
+run -- a *different* test than the three prior sessions in this arc have
+each independently flaked on, `#your-card-section` visibility this time
+-- passed cleanly on an immediate rerun; the same UI-timing flake pattern
+already documented multiple times, not a regression from a client-side
+timing-only change with no visible UI difference).
+
 ## 2026-08-25 — Pushed live balance_update to every real money-moving action, not just deposits
 
 Eleventh follow-up to the full-platform `/code-review` entry. The
