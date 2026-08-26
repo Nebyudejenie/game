@@ -5,6 +5,84 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-26 — Real production entrypoints for the engine worker, payout worker, and bot
+
+User request ("do ci cd too"), first step: CI/CD needs something real to
+build and run. Before this, three of this repo's six deployable units had
+no way to actually start as a long-running process -- `services/engine/
+worker.py`'s `EngineWorker` and `services/payments/payout_worker.py`'s
+`run_forever()` were both classes/functions with no `main()` anywhere,
+and `services/bot/app.py` built an aiohttp `Application` but never
+actually served it, registered the webhook with Telegram, or started the
+`Notifier`/`notification_relay.py` pipeline. The other three (gateway,
+admin, payments) are already real FastAPI apps startable via a plain
+`uvicorn services.X.app:app`, so they needed no changes.
+
+**`services/bot/app.py`**: added `main()` -- builds the bot, pool, redis,
+`Notifier` (started), and `notification_relay.run_forever()` as a
+background task sharing that one `Notifier` instance (its own docstring:
+this is what keeps the global rate pace and per-chat 429 backoff enforced
+in exactly one place, rather than needing a second process to
+coordinate with this one), registers the webhook with Telegram via
+`bot.set_webhook()` if `public_base_url` is configured, and serves via
+`aiohttp.web.run_app()` (which already handles SIGTERM/SIGINT and drives
+`on_shutdown`, no manual signal wiring needed).
+
+**`services/engine/worker.py`**: added `main()` -- crash recovery, claims
+every active room, then re-scans on a 30s timer so a room activated
+*after* startup still gets an engine (nothing previously watched for
+that at all). This exposed a real, independent bug in `run_active_rooms()`
+itself: it called `claim_room()` unconditionally for every active room on
+every invocation, and `claim_room()` has no guard against being called
+twice for a room it already owns -- it just overwrites `self._engines`/
+`self._tasks`, silently orphaning the previous, still-running engine task
+(no reference left to stop it on shutdown) while a redundant second
+engine raced it for a lock it could only lose. Fixed by skipping any
+room whose task is already running. Added
+`test_run_active_rooms_is_safe_to_call_repeatedly` to `tests/integration/
+test_worker.py`. Verified it against the unfixed code via `git stash`:
+it failed, but not with a clean assertion -- with a raw `redis.exceptions
+.ConnectionError` from a *different* test's teardown, because the
+orphaned engine task from the first `run_active_rooms()` call was still
+alive in the background, still polling Redis for its lock refresh, when
+pytest closed the shared `redis` fixture's connection -- an even more
+concrete demonstration of the bug than a bare assertion would have been.
+
+Writing this test surfaced a separate, pre-existing data-hygiene problem:
+`rooms.is_active` defaults to `true` (schema default) and no test ever
+deactivates a room afterward, and this session's shared dev database has
+accumulated 3092 such rows across months of testing. `run_active_rooms()`
+is the first thing to ever run an unscoped `WHERE is_active = true` query
+and act on every row -- every prior test either calls `claim_room()`
+directly by id or bypasses `EngineWorker` entirely. Confirmed no test
+asserts an absolute `is_active` count (`test_dashboard_summary_reflects_
+real_state` uses `>= 1`, matching this codebase's established
+"deltas/bounds, not absolutes, against a shared accumulating database"
+convention) and no round was left non-terminal, then deactivated all
+`test-room-%`/`admin-test-%` rows (3092 total) -- safe, reversible, and
+scoped precisely to this session's own test-data naming patterns.
+
+**`services/payments/payout_worker.py`**: added `main()` -- the payout
+stream consumer (`run_forever()`, the primary job) alongside the two
+other "safe to run on a timer" payments sweeps that had no periodic
+invoker anywhere: `deposits.py`'s `poll_pending_deposits()` (a webhook
+that never arrives) and `withdrawals.py`'s `sweep_stuck_approved_payouts()`
+(an enqueue that never landed). All three share one process/`ChapaProvider`
+rather than three separate containers, since none individually justifies
+its own; each sweep's own exception is caught and logged per-tick rather
+than killing the other two, the same isolation reasoning as `_handle_
+command()`'s and the auto-claim scan's own fixes.
+
+**Full clean-slate rebuild**: `mypy` clean (63 source files) → `pytest
+tests/` (732 passed, up from 731) → `-m load`: the same already
+-documented shared-host-contention pattern, worse again (492-667ms against
+the 300ms budget, load average 2.02, climbing across this session purely
+from other unrelated Docker projects on this shared host) -- confirmed
+this batch's new code can't be the cause, since every new `main()`/
+`main_async()` is gated behind `if __name__ == "__main__":` and never
+invoked by any test → `-m chaos_infra` (1 passed) → `-m e2e` (7/7 passed
+clean).
+
 ## 2026-08-26 — Auto-claim scan no longer crashes the whole room on an unexpected exception
 
 Tenth fix from the fresh `/code-review high` pass, revisited on request.

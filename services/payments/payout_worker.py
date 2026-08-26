@@ -35,7 +35,10 @@ vocabulary rather than guessed at.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import signal
+from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from typing import Any
 
@@ -45,9 +48,14 @@ from redis.asyncio import Redis
 from redis.exceptions import ResponseError
 
 from packages.core import ledger, metrics, tracing
+from packages.core.config import get_settings
+from packages.core.logging import configure_logging
 from packages.core.notifications import notify_user
+from packages.core.redis_conn import get_redis
+from services.payments.chapa import ChapaProvider
+from services.payments.deposits import poll_pending_deposits
 from services.payments.provider import PaymentProvider
-from services.payments.withdrawals import PAYOUT_STREAM
+from services.payments.withdrawals import PAYOUT_STREAM, sweep_stuck_approved_payouts
 
 logger = structlog.get_logger()
 _tracer = tracing.get_tracer(__name__)
@@ -347,3 +355,85 @@ async def run_forever(
             entries = _flatten(fresh)
         for msg_id, fields in entries:
             await process_one(pool, redis, provider, msg_id=msg_id, our_ref=fields["our_ref"])
+
+
+DEPOSIT_POLL_INTERVAL_SECONDS = 30
+WITHDRAWAL_SWEEP_INTERVAL_SECONDS = 60
+
+
+async def _run_periodic_sweep(
+    name: str, interval_seconds: int, sweep: Callable[[], Awaitable[Any]]
+) -> None:
+    # One bad sweep must not kill the other background jobs sharing this
+    # process, the same reasoning as _handle_command()'s and the
+    # auto-claim scan's own isolation fixes elsewhere in this codebase --
+    # a real DB/Redis blip on one timer tick shouldn't silently stop every
+    # future tick of this specific sweep forever.
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await sweep()
+        except Exception:
+            logger.exception("payments_periodic_sweep_failed", sweep=name)
+
+
+async def main_async() -> None:
+    """Real production entrypoint: the payout stream consumer (this
+    module's own run_forever(), the primary job) alongside the two other
+    "safe to run on a timer" payments reconciliation sweeps that need a
+    periodic invoker somewhere -- deposits.py's poll_pending_deposits()
+    (a webhook that never arrives) and withdrawals.py's
+    sweep_stuck_approved_payouts() (an enqueue that never landed, since
+    that XADD runs after the DB commit, not inside it). All three share
+    one process/provider rather than three separate ones since none of
+    them individually justifies its own container, and all three are
+    already designed to be safe under concurrent, independent invocation.
+    """
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    tracing.configure_tracing("payout-worker", settings.otel_exporter_endpoint)
+
+    pool = await asyncpg.create_pool(dsn=settings.database_url, min_size=2, max_size=20)
+    redis = get_redis()
+    provider = ChapaProvider(settings.chapa_api_key)
+
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop_event.set)
+
+    consumer_task = asyncio.create_task(run_forever(pool, redis, provider))
+    sweep_tasks = [
+        asyncio.create_task(
+            _run_periodic_sweep(
+                "poll_pending_deposits",
+                DEPOSIT_POLL_INTERVAL_SECONDS,
+                lambda: poll_pending_deposits(pool, redis, provider),
+            )
+        ),
+        asyncio.create_task(
+            _run_periodic_sweep(
+                "sweep_stuck_approved_payouts",
+                WITHDRAWAL_SWEEP_INTERVAL_SECONDS,
+                lambda: sweep_stuck_approved_payouts(pool, redis),
+            )
+        ),
+    ]
+
+    try:
+        await stop_event.wait()
+    finally:
+        consumer_task.cancel()
+        for task in sweep_tasks:
+            task.cancel()
+        await asyncio.gather(consumer_task, *sweep_tasks, return_exceptions=True)
+        await redis.aclose()
+        await pool.close()
+
+
+def main() -> None:
+    asyncio.run(main_async())
+
+
+if __name__ == "__main__":
+    main()

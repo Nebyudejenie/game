@@ -12,6 +12,7 @@ guarantee, applied to inbound instead of outbound).
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Awaitable, Callable
 
 import asyncpg
@@ -24,13 +25,16 @@ from aiohttp import web
 from prometheus_client import generate_latest
 from redis.asyncio import Redis
 
-from packages.core.config import Settings
+from packages.core.config import Settings, get_settings
+from packages.core.logging import configure_logging
+from packages.core.redis_conn import get_redis
 from packages.core.tracing import configure_tracing
-from services.bot import dedup
+from services.bot import dedup, notification_relay
 from services.bot.handlers import router
 from services.bot.notifier import Notifier
 
 WEBHOOK_PATH = "/webhook"
+DEFAULT_PORT = 8003
 
 
 async def _dedup_middleware(
@@ -87,3 +91,60 @@ def build_app(bot: Bot, dp: Dispatcher, settings: Settings) -> web.Application:
     ).register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
     return app
+
+
+def main() -> None:
+    """Real production entrypoint: registers the webhook with Telegram,
+    starts the Notifier's send loop and notification_relay.run_forever()
+    (services/bot/notification_relay.py's own docstring: the only other
+    thing allowed to call Notifier.send(), for notifications that
+    originate outside this process entirely -- sharing one Notifier
+    instance here is what keeps its global rate pace and per-chat 429
+    backoff enforced in exactly one place, per its own docstring, rather
+    than needing a second process to coordinate with this one), and serves
+    the webhook app until the container runtime sends SIGTERM/SIGINT.
+    """
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    pool: asyncpg.Pool | None = None
+    redis: Redis | None = None
+    notifier: Notifier | None = None
+    relay_task: asyncio.Task[None] | None = None
+
+    async def _on_startup() -> None:
+        nonlocal relay_task
+        assert notifier is not None and pool is not None and redis is not None
+        if settings.public_base_url:
+            await bot.set_webhook(
+                url=f"{settings.public_base_url.rstrip('/')}{WEBHOOK_PATH}",
+                secret_token=settings.telegram_webhook_secret or None,
+            )
+        notifier.start()
+        relay_task = asyncio.create_task(notification_relay.run_forever(pool, redis, notifier))
+
+    async def _on_shutdown() -> None:
+        if relay_task is not None:
+            relay_task.cancel()
+        assert notifier is not None and pool is not None and redis is not None
+        await notifier.stop()
+        if pool is not None:
+            await pool.close()
+        if redis is not None:
+            await redis.aclose()
+
+    async def _build() -> web.Application:
+        nonlocal pool, redis, notifier
+        pool = await asyncpg.create_pool(dsn=settings.database_url, min_size=2, max_size=10)
+        redis = get_redis()
+        notifier = Notifier(bot)
+        dp = build_dispatcher(pool, redis, notifier, settings)
+        dp.startup.register(_on_startup)
+        dp.shutdown.register(_on_shutdown)
+        return build_app(bot, dp, settings)
+
+    bot = build_bot(settings)
+    web.run_app(_build(), host="0.0.0.0", port=DEFAULT_PORT)
+
+
+if __name__ == "__main__":
+    main()

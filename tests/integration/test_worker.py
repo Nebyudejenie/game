@@ -46,6 +46,31 @@ async def test_worker_claims_and_runs_a_room(pool, redis, conn):
         await worker.shutdown()
 
 
+async def test_run_active_rooms_is_safe_to_call_repeatedly(pool, redis, conn):
+    # A real production entrypoint calls this on a timer, not just once at
+    # startup, so a room admin-created after startup still gets an engine.
+    # claim_room() itself has no guard against being called twice for the
+    # same room -- calling it again for a room this worker already owns
+    # would silently orphan the running task (still executing, but with no
+    # reference left to stop it on shutdown) while a redundant second
+    # engine raced it for a lock it could only ever lose.
+    room_id = await create_room(conn, stake=Decimal("10.00"), min_players=2)
+    worker = EngineWorker(pool, redis, worker_id="test-worker-repoll")
+    await worker.start()
+    try:
+        await worker.run_active_rooms()
+        first_task = worker._tasks[room_id]  # noqa: SLF001
+        first_engine = worker.engine_for(room_id)
+
+        await worker.run_active_rooms()
+        second_task = worker._tasks[room_id]  # noqa: SLF001
+
+        assert second_task is first_task, "an already-running room's engine got replaced"
+        assert worker.engine_for(room_id) is first_engine
+    finally:
+        await worker.shutdown()
+
+
 async def test_worker_start_recovers_orphaned_rounds(pool, redis, conn):
     room_id = await create_room(conn, stake=Decimal("10.00"), min_players=2, call_interval_ms=50)
     room = await load_room_config(pool, room_id)
