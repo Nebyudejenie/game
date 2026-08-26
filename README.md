@@ -171,6 +171,19 @@ picks its own command against it) — gateway/admin/payments/bot on ports
 8000-8003, engine-worker/payout-worker's `/metrics` endpoints (the only
 HTTP surface those two have) on 8004-8005.
 
+**Verified against the real repo, not assumed:** a status-audit pass
+checked GitHub's own run history (`gh run list`) rather than trusting
+this file's earlier claim that CD only needed a runner. It didn't --
+`build-and-push` had genuinely failed on every single run so far
+(`docker build`'s tag rejected: GHCR requires an all-lowercase
+repository name, and `github.repository` preserves this repo's real
+mixed-case owner). Fixed (lowercased in the same shell step, see
+`DECISIONS.md`). The self-hosted runner is still not registered and no
+`production` environment exists yet (`gh api .../actions/runners` and
+`.../environments` both currently return zero) -- that part of step 1/3
+above is still a real, open action item, now confirmed to be the only
+one CI/CD's own automation can't do for you.
+
 ## What's actually implemented
 
 **Foundations (Phase 0):**

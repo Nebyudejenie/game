@@ -5,6 +5,73 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-26 — CD was actually broken by a real bug, not just waiting on the runner; fixed
+
+Moving to the infrastructure item from the deep-read audit ("CD needs
+the self-hosted runner registered"), the instruction was explicit: don't
+modify production infrastructure blindly, inspect first. Inspecting
+meant actually checking GitHub's own record of what happened, not
+re-reading the workflow file and assuming it was correct because it
+looked reasonable -- `gh run list` and `gh run view --log` against this
+repo's real Actions history, not a guess.
+
+That inspection contradicted the earlier status report. Every CD run
+since the pipeline was added (4 for 4) had failed -- but not in the
+`deploy` job the "just needs a runner" framing implied. `deploy` had
+never even run; it showed `skipped` every time, because `build-and-push`
+-- a plain GitHub-hosted job, no runner involved at all -- was failing
+first, on every single run, with:
+```
+ERROR: failed to build: invalid tag "ghcr.io/Nebyudejenie/game:<sha>":
+repository name must be lowercase
+```
+GHCR (like every OCI registry) requires an all-lowercase repository
+name; `${{ github.repository }}` preserves this repo's real casing
+(`Nebyudejenie/game`), and nothing lowercased it before it became half
+of a Docker tag. A real, live bug this session's own earlier status
+report missed -- the CD workflow was checked for existing (it does) and
+its setup steps documented (they were, accurately), but never checked
+against its own actual run history.
+
+**Fixed**: `.github/workflows/cd.yml`'s `build-and-push` step now
+lowercases `github.repository` (`tr '[:upper:]' '[:lower:]'`) into a
+local `REPO` variable before building either tag. `docker-compose.prod.
+yml` only ever consumes the already-built `JOBINGO_IMAGE` string as an
+opaque value (confirmed by reading it), so this one fix is the complete
+fix, not a partial one needing a second change elsewhere. Verified with
+`actionlint` (downloaded fresh, the same real static analyzer this
+session's CI/CD work used originally) against both workflow files --
+clean -- and the lowercase transformation itself run directly in a
+shell to confirm it produces the exact tag GHCR requires
+(`ghcr.io/nebyudejenie/game:<sha>`). Not pushed to `main` and not
+run against real GitHub Actions -- per this session's standing
+discipline, commits stay local; the user pushes independently, and the
+next real push will be the actual end-to-end proof this fix works.
+
+**Two smaller doc bugs caught in the same pass, fixed alongside**:
+`docker-compose.prod.yml`'s own header comment pointed at a
+`.env.example` file that doesn't exist (the real one is
+`.env.prod.example`) and a README "Deploying" section that doesn't
+exist either (the real heading is "CI/CD") -- both corrected. Also
+added the one env var `.env.prod.example` was missing relative to what
+`packages/core/config.py` actually reads: `MAX_WITHDRAWALS_PER_DAY`
+(this session's own withdrawal-velocity gate), documented the same way
+every other has-a-default-but-worth-showing value already is in that
+file.
+
+**What's actually still open, confirmed via the GitHub API directly**
+(`gh api repos/.../actions/runners`, `.../environments`), not assumed:
+zero self-hosted runners registered, zero environments configured. Both
+require the user's own GitHub account access (Settings -> Actions ->
+Runners; Settings -> Environments) -- genuinely outside what this
+session can do, not deferred out of caution. Whether `deploy` itself
+has any *further* problems beyond the runner is honestly unknown: it
+has never once run far enough to find out, blocked first by the bug
+above. The runner is the next real blocker as far as static inspection
+can tell, not a guarantee everything past it is already proven correct.
+
+---
+
 ## 2026-08-26 — Gateway-kill reconnect chaos test (spec 10.3), and how its socket count was actually chosen
 
 The second buildable-now item from the deep-read status audit: spec

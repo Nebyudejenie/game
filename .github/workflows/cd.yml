@@ -56,8 +56,16 @@ jobs:
         id: image
         run: |
           set -euo pipefail
-          IMAGE="ghcr.io/${{ github.repository }}:${{ github.event.workflow_run.head_sha }}"
-          LATEST="ghcr.io/${{ github.repository }}:latest"
+          # GHCR (like every OCI registry) requires an all-lowercase
+          # repository name -- github.repository preserves this repo's
+          # real casing (Nebyudejenie/game), which docker build/push both
+          # reject outright ("repository name must be lowercase"). Every
+          # single run of this workflow failed on exactly this before it
+          # was caught -- confirmed via `gh run view --log` against the
+          # real failing runs, not assumed.
+          REPO="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          IMAGE="ghcr.io/${REPO}:${{ github.event.workflow_run.head_sha }}"
+          LATEST="ghcr.io/${REPO}:latest"
           docker build -t "$IMAGE" -t "$LATEST" .
           docker push "$IMAGE"
           docker push "$LATEST"

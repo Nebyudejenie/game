@@ -8,8 +8,8 @@ name: jobingo-prod
 # deploy/docker-compose.yml is.
 #
 # Needs a real .env file next to this one (never committed -- see
-# .env.example for every variable this reads, and README.md's "Deploying"
-# section for how the CD workflow gets it onto the server). POSTGRES_
+# .env.prod.example for every variable this reads, and README.md's
+# "CI/CD" section for how the CD workflow gets it onto the server). POSTGRES_
 # PASSWORD has no default on purpose: an empty default here would be a
 # real, silent security hole in a file whose whole purpose is production.
 #
