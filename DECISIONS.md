@@ -5,6 +5,68 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — Permanent real-browser coverage for the admin console frontend
+
+With every explicit boundary item from the status audit now genuinely
+blocked on the user (a decision, GitHub access, external connectivity,
+or a lawyer), the next safe task came from applying this session's own
+just-proven lesson -- verify a status claim against reality instead of
+trusting it -- one more time, to a different area: `web/admin/` (the
+admin console frontend, shipped two commits ago) had real, thorough
+manual verification at the time (a Playwright walkthrough, screenshots,
+a genuine CSS bug caught and fixed), but that verification script was
+never committed. `tests/integration/test_admin_app.py`/`test_admin_
+queries.py` only ever exercised the API layer. The whole frontend has
+had zero permanent regression coverage since the moment it shipped --
+the same gap `test_miniapp_e2e.py`/`test_miniapp_wallet_e2e.py` already
+closed for the player-facing frontend, just never closed here.
+
+**What was built**: `tests/integration/test_admin_console_e2e.py`,
+matching `test_miniapp_e2e.py`'s own established pattern exactly (real
+Chromium via the shared `browser` fixture, the real `admin_server`
+in-process app, no mocked DOM) -- four tests: login through the actual
+form lands on a genuinely-hidden login screen and a real dashboard with
+zero JS errors; a full users-search-to-KYC-action round trip through
+the UI that confirms the database row actually changed, not just that a
+toast appeared; an RBAC-denied screen showing a real, specific error
+(not a blank page); and logout returning to the login screen.
+
+**A real bug in the test itself, caught by running it repeatedly, not
+once**: the KYC-action test's `wait_for_function` polled `document.
+getElementById('kyc-select').value === '2'` -- `users.js`'s own
+`loadDetail()` briefly clears and rebuilds the whole detail panel after
+a successful action, so the element is genuinely `null` for a moment,
+and Playwright surfaces that `TypeError` as a real test error rather
+than treating it as "still false, keep polling." Fixed with optional
+chaining (`?.value`), the actual fix for the actual race, not a longer
+timeout papering over it. Confirmed by running the full file 5
+consecutive times after the fix with zero failures (it had failed
+roughly one run in three before).
+
+**A second thing this caught, in the RBAC test**: the first draft
+asserted the error banner contained the word "access," assuming `js/
+app.js`'s generic 403 fallback message would show. It doesn't --
+`js/screens/risk.js` catches its own fetch error and renders the real
+backend detail directly (`"role 'support' lacks 'risk:view'"`), which
+is more useful to an admin than a generic message would be. Not a bug;
+the test's assumption was wrong, not the app -- fixed the assertion to
+match the real, correct, already-documented-in-code behavior.
+
+**Verification**: full clean-slate rebuild -- `docker compose down -v`
+-> `up -d` -> `alembic upgrade head` -> `mypy` clean (64 source files)
+-> full default suite 751 passed, 18 deselected (up 4 for the new
+`e2e`-marked tests) -> `-m load` 1 failure (`test_load_multiroom.py`,
+the same well-documented host-contention pattern, confirmed via
+`uptime`/`docker ps`, unrelated to this turn) -> `-m chaos_infra` 2
+passed -> `-m e2e` 11 passed on the clean rerun, after one unrelated
+transient flake in `test_miniapp_full_gameplay_flow` (a pre-existing
+test this turn never touched) reproduced as passing cleanly both alone
+and in a full clean rerun -- the same shared-host-contention pattern
+extended to a gameplay-timing assertion instead of a raw latency budget,
+not a regression.
+
+---
+
 ## 2026-08-26 — CD was actually broken by a real bug, not just waiting on the runner; fixed
 
 Moving to the infrastructure item from the deep-read audit ("CD needs

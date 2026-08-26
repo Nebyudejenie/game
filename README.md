@@ -120,6 +120,15 @@ authenticate with; the E2E tests stub it (see
 `tests/integration/test_miniapp_e2e.py`) the same way a real integration
 would supply real `initData`.
 
+The admin console (`web/admin/`, mounted at `/console` by
+`services/admin/app.py`) has the same kind of real-browser coverage:
+`tests/integration/test_admin_console_e2e.py` drives an actual Chromium
+tab through login, the dashboard, a real state-changing action (setting
+a user's KYC level end to end, confirmed against the database, not just
+the toast), an RBAC-denied screen, and logout -- the permanent
+regression coverage that didn't exist when the frontend itself shipped
+(only a one-off, uncommitted verification script did at the time).
+
 Copy `.env.example` to `.env` if you want to override any connection
 settings; most defaults are baked into `packages/core/config.py`, which
 already point at the docker-compose ports above. One exception:
