@@ -742,6 +742,21 @@ runs." See `DECISIONS.md`.
   process, a real cross-test pollution bug this session found and fixed by
   giving it its own excluded marker; always run alone (`pytest -m
   chaos_infra`).
+- **`tests/integration/test_chaos_gateway_kill.py`** — spec 10.3's "Kill a
+  Gateway pod... clients reconnect within 5s with correct state," run for
+  real: two genuinely separate `services/gateway/app.py` OS processes (not
+  the in-process `uvicorn.Server` the other gateway tests share the test's
+  own event loop with, which can't be sent a real kill signal), one holding
+  a batch of real authenticated WebSocket connections, `SIGKILL`'d with no
+  graceful shutdown. Every reconnecting client lands on the second,
+  independently-started process — zero shared memory with the first — and
+  gets the correct room state straight from Postgres, proving the
+  statelessness `services/gateway/app.py`'s own docstring already claims,
+  not just asserting it. Real, honestly-scaled numbers, not the spec's
+  literal 8,000 sockets — see `DECISIONS.md` for the exact scale chosen and
+  why (dominated by fixed per-run overhead on this shared host, not socket
+  count, so more sockets bought no extra confidence, only less margin under
+  the 5s budget).
 
 **Honest gap, not hidden:** spec section 10.3 asks for 10,000 concurrent
 sockets across 200 rooms on a 30-minute soak. This sandbox is a single

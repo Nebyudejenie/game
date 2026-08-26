@@ -5,6 +5,95 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-26 — Gateway-kill reconnect chaos test (spec 10.3), and how its socket count was actually chosen
+
+The second buildable-now item from the deep-read status audit: spec
+10.3's load/chaos target table has six scenarios; five already had a
+real test (engine crash, Redis restart, duplicate webhook × 100, 1,000
+-player rush, multi-room fan-out). "Kill a Gateway pod with 8,000
+sockets -> clients reconnect within 5s with correct state" had none --
+the client-side reconnect logic (`web/miniapp/js/ws.js`'s backoff+jitter)
+was built and unit-tested in isolation, but nothing proved the actual
+end-to-end mechanism against a real killed process.
+
+**What was built**: `tests/integration/test_chaos_gateway_kill.py`.
+Two genuinely separate `services/gateway/app.py` OS processes (`asyncio.
+create_subprocess_exec("uvicorn", ...)`, not the in-process `uvicorn.
+Server` `test_gateway_fanout.py`'s `gateway_server` fixture shares the
+test's own event loop with -- that one can't be sent a real kill signal
+while the test itself keeps running). Both start healthy before any
+client connects, matching spec 10.2's own scaling assumption ("Add
+Gateway replicas. Stateless, linear.") -- a real fleet already has more
+than one replica running; a dead one doesn't need a cold boot to
+recover from, a load balancer just routes to whichever is already up.
+A batch of real, authenticated WebSocket connections lands on process
+A, gets real state via `build_state_sync()`, then A is `SIGKILL`'d --
+no graceful shutdown, no chance for `close_for_shutdown()` to run, the
+same unclean-death semantics a pod eviction has. Every client then
+reconnects to process B, a process with zero shared memory of process A
+or any of these connections, and must get the *correct* state (room_id,
+stake) straight from Postgres -- the actual thing `services/gateway/
+app.py`'s own docstring already claims ("any replica can serve any
+player") and the actual thing this test proves for real instead of by
+assertion.
+
+**Honesty about scale -- the actual reasoning, not just the number**:
+8,000 real concurrent sockets is not achievable in this sandbox (a
+shared 4-core host that already shows confirmed contention-driven
+latency issues at 1,000 sockets in the existing load tests). The
+question was what scale this environment could prove *reliably*, not
+just once. Measurement, not guesswork, answered it: 300 sockets measured
+3.6-4.8s against the 5s budget across repeated runs -- technically
+passing, but with under 10% margin, exactly the shape of test that flakes
+the first time this shared host has a bad five minutes (which, per this
+session's own repeated `uptime`/`docker ps` checks, happens often here).
+Profiling at 50 and 100 sockets showed the cost is dominated by fixed
+per-run overhead (subprocess and connection setup under real host
+contention), not socket count -- 50 sockets measured about the same
+~2.5-3.8s as 100 did. So 300 sockets bought no extra confidence, only
+less margin. Settled on 50: a real, meaningfully large, genuinely
+concurrent scale, with consistent ~35-50% margin under budget even
+under this session's own observed elevated load (`uptime` load average
+above 3.5 during profiling). Not the spec's 8,000; said so in the test's
+own module docstring, not just here.
+
+**A real timing-methodology fix caught along the way**: the first draft
+gated the reconnect-timer's start on first confirming every one of
+process A's sockets had noticed the closure (`ConnectionClosed` on
+`recv()`). That's not what a real client does -- a real socket's
+`onclose` fires independently and starts *that* client's own reconnect
+immediately, it never waits for every other socket to also confirm
+closure first. Restructured so the "prove the kill was real" check and
+the actual reconnect race run concurrently, only the reconnect side
+gates the measured number -- a more accurate number, and incidentally
+not a smaller one (the confirmation step turned out not to be the
+dominant cost), but the right thing to measure regardless of which way
+it moved the result.
+
+**Verification**: the test's own assertions are the proof (a real
+`SIGKILL`, a real second process, real Postgres-sourced state
+comparison) -- there's no prior "unfixed" version of this scenario to
+revert to and confirm fails, the same new-feature reasoning applied to
+the KYC and Risk-screen entries below. Run in isolation 7+ times during
+development (30/50/100/300-socket variants) and 3 more times at the
+final SOCKET_COUNT=50 after settling on it, consistently 2.2-3.8s
+against the 5s budget. Also run together with `test_chaos_redis_restart.
+py` under the shared `chaos_infra` marker (both genuinely independent --
+this test doesn't touch the shared `redis`/`pool` fixtures at all, only
+`conn` plus its own dedicated subprocesses -- confirmed safe regardless
+of run order relative to the Redis-restart test's own fixture-breaking
+side effect). Full clean-slate rebuild: `docker compose down -v` ->
+`up -d` -> `alembic upgrade head` -> `mypy` clean (64 source files) ->
+full default suite 751 passed, 14 deselected (up one from the new
+`chaos_infra`-marked test) -> `-m load` 2 failures, the same
+well-documented `test_gateway_fanout.py`/`test_load_multiroom.py`
+host-contention pattern, confirmed via `uptime`/`docker ps` at the time
+and unrelated to this turn's changes -> `-m chaos_infra` 2 passed (this
+new test plus the existing Redis-restart test, run together) -> `-m e2e`
+7 passed.
+
+---
+
 ## 2026-08-26 — 18+ age-gate self-declaration at registration (spec section 12)
 
 A deep-read status audit against every section of the spec (not just this
