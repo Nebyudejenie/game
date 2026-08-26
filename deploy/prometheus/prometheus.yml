@@ -35,6 +35,14 @@ scrape_configs:
     static_configs:
       - targets: ["host.docker.internal:8003"]
 
+  - job_name: engine-worker
+    static_configs:
+      - targets: ["host.docker.internal:8004"]
+
+  - job_name: payout-worker
+    static_configs:
+      - targets: ["host.docker.internal:8005"]
+
   - job_name: pushgateway
     # honor_labels: a pushed job's own "job"/"instance" labels (e.g.
     # reconcile_job.py's job="reconcile_job") should win over this scrape

@@ -330,18 +330,34 @@ async def create_room(
     call_interval_ms: int = 20,
     result_seconds: int = 0,
     win_patterns: list[str] | None = None,
+    is_active: bool = False,
 ) -> int:
     """Fast-timing test room by default -- lobby closes in 1s, a number is
     called every 20ms (so all 75 calls take ~1.5s worst case), and there's
     no lingering result display. Override per test where the timing itself
     is what's under test.
+
+    is_active defaults to False, deliberately overriding the schema's own
+    `DEFAULT true` -- a real code review pass caught that every one of the
+    dozens of tests calling this helper was silently leaving its room
+    `is_active = true` forever (nothing here or in any test ever flips it
+    back), and no test actually needs that: every one of them reaches its
+    own room by the id this function already returns, never through
+    services/engine/worker.py's `WHERE is_active = true` scan. This
+    session's shared dev database had accumulated 3092 such rows before
+    that was caught, and run_active_rooms() (the only thing that ever
+    queries that column in bulk) trying to claim all of them at once was
+    enough to genuinely exhaust a real Redis client's connection pool
+    during a full test run -- not just slow, an actual test failure. Pass
+    is_active=True explicitly for the one or two tests that specifically
+    exercise that scan (or dashboard_summary()'s own active_rooms count).
     """
     row = await conn.fetchrow(
         """
         INSERT INTO rooms
             (code, stake, house_cut_bps, min_players, max_players,
-             lobby_seconds, call_interval_ms, result_seconds, win_patterns)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             lobby_seconds, call_interval_ms, result_seconds, win_patterns, is_active)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         RETURNING id
         """,
         f"test-room-{uuid.uuid4()}",
@@ -353,5 +369,6 @@ async def create_room(
         call_interval_ms,
         result_seconds,
         json.dumps(win_patterns if win_patterns is not None else ["row", "col", "diag", "corners"]),
+        is_active,
     )
     return row["id"]

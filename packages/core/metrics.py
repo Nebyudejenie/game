@@ -24,7 +24,8 @@ not a literal spec quote, in DECISIONS.md.
 
 from __future__ import annotations
 
-from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
+from aiohttp import web
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 
 # --- gateway -----------------------------------------------------------
 
@@ -94,3 +95,32 @@ ledger_reconciliation_mismatch_count = Gauge(
     "Accounts whose cached balance disagreed with their ledger entries on the last reconciliation run",
     registry=reconcile_registry,
 )
+
+# --- bare /metrics server, for the two long-running processes with no
+# other HTTP surface of their own (engine worker, payout worker) --------
+
+# A real, pre-existing gap this closes: services/engine/round_engine.py
+# and services/payments/payout_worker.py already record real metrics
+# (engine_calls_total, engine_rooms_active, and friends) against this
+# module's own default registry, but nothing ever served them anywhere in
+# production -- gateway/admin/payments/bot each define their own
+# framework-native /metrics route, but the engine worker and payout
+# worker are plain background loops with no HTTP surface at all. One
+# tiny, shared aiohttp app (not a full FastAPI app, to avoid pulling in a
+# second web framework for one endpoint) rather than duplicating this
+# same handful of lines in both entrypoints.
+async def start_metrics_server(port: int) -> web.AppRunner:
+    """Starts a bare /metrics-only HTTP server in the background. Returns
+    the AppRunner so the caller can `await runner.cleanup()` on shutdown.
+    """
+    app = web.Application()
+
+    async def _metrics(_request: web.Request) -> web.Response:
+        return web.Response(body=generate_latest(), content_type="text/plain", charset="utf-8")
+
+    app.router.add_get("/metrics", _metrics)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+    await site.start()
+    return runner

@@ -19,6 +19,7 @@ import uuid
 import asyncpg
 from redis.asyncio import Redis
 
+from packages.core import metrics
 from packages.core.bingo import Grid
 from packages.core.config import get_settings
 from packages.core.logging import configure_logging
@@ -26,6 +27,8 @@ from packages.core.redis_conn import get_redis
 from packages.core.tracing import configure_tracing
 from services.engine.recovery import recover_orphaned_rounds
 from services.engine.round_engine import RoundEngine, load_card_pool, load_room_config
+
+METRICS_PORT = 8004
 
 # How often a live worker re-scans for newly-activated rooms. Deliberately
 # not tied to anything room-specific (lobby_seconds etc.) -- this is
@@ -120,6 +123,7 @@ def main() -> None:
         pool = await asyncpg.create_pool(dsn=settings.database_url, min_size=2, max_size=20)
         redis = get_redis()
         worker = EngineWorker(pool, redis)
+        metrics_runner = await metrics.start_metrics_server(METRICS_PORT)
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -133,6 +137,7 @@ def main() -> None:
                     await asyncio.wait_for(stop_event.wait(), timeout=CLAIM_POLL_INTERVAL_SECONDS)
         finally:
             await worker.shutdown()
+            await metrics_runner.cleanup()
             await redis.aclose()
             await pool.close()
 

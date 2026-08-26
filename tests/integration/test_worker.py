@@ -54,7 +54,7 @@ async def test_run_active_rooms_is_safe_to_call_repeatedly(pool, redis, conn):
     # would silently orphan the running task (still executing, but with no
     # reference left to stop it on shutdown) while a redundant second
     # engine raced it for a lock it could only ever lose.
-    room_id = await create_room(conn, stake=Decimal("10.00"), min_players=2)
+    room_id = await create_room(conn, stake=Decimal("10.00"), min_players=2, is_active=True)
     worker = EngineWorker(pool, redis, worker_id="test-worker-repoll")
     await worker.start()
     try:

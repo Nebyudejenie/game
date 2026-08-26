@@ -46,12 +46,16 @@ async def recv_until(ws, message_type: str, *, attempts: int = 50, timeout: floa
 
 
 async def test_full_gameplay_over_websocket(gateway_server, pool, redis, card_pool, conn):
+    # is_active=True: the gateway's own "rooms" list command reads WHERE
+    # is_active = true, unlike every other test using create_room() (see
+    # its own docstring for why False is the right default there).
     room_id = await create_room(
         conn,
         stake=Decimal("10.00"),
         min_players=2,
         lobby_seconds=1,
         call_interval_ms=10,
+        is_active=True,
     )
     room = await load_room_config(pool, room_id)
     engine = RoundEngine(pool, redis, room, card_pool)

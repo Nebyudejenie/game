@@ -359,6 +359,7 @@ async def run_forever(
 
 DEPOSIT_POLL_INTERVAL_SECONDS = 30
 WITHDRAWAL_SWEEP_INTERVAL_SECONDS = 60
+METRICS_PORT = 8005
 
 
 async def _run_periodic_sweep(
@@ -396,6 +397,7 @@ async def main_async() -> None:
     pool = await asyncpg.create_pool(dsn=settings.database_url, min_size=2, max_size=20)
     redis = get_redis()
     provider = ChapaProvider(settings.chapa_api_key)
+    metrics_runner = await metrics.start_metrics_server(METRICS_PORT)
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -427,6 +429,7 @@ async def main_async() -> None:
         for task in sweep_tasks:
             task.cancel()
         await asyncio.gather(consumer_task, *sweep_tasks, return_exceptions=True)
+        await metrics_runner.cleanup()
         await redis.aclose()
         await pool.close()
 

@@ -116,8 +116,12 @@ async def test_miniapp_loads_authenticates_and_shows_balance(gateway_server, bro
 
 
 async def test_miniapp_full_gameplay_flow(gateway_server, browser, pool, redis, card_pool, conn):
+    # is_active=True: the gateway's own room list (what the miniapp UI
+    # browses) reads WHERE is_active = true, unlike every other test using
+    # create_room() (see its own docstring for why False is the default).
     room_id = await create_room(
-        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=8, call_interval_ms=15
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=8, call_interval_ms=15,
+        is_active=True,
     )
     room = await load_room_config(pool, room_id)
     engine = RoundEngine(pool, redis, room, card_pool)
@@ -213,7 +217,8 @@ async def test_verify_draw_button_shows_a_verified_seed(gateway_server, browser,
     would actually use to see it works.
     """
     room_id = await create_room(
-        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=8, call_interval_ms=15
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=8, call_interval_ms=15,
+        is_active=True,
     )
     room = await load_room_config(pool, room_id)
     engine = RoundEngine(pool, redis, room, card_pool)

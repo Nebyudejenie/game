@@ -594,7 +594,12 @@ async def test_update_room_admin_audit_log_stores_win_patterns_as_a_real_array(p
 
 
 async def test_dashboard_summary_reflects_real_state(pool, redis, card_pool, conn):
-    room_id = await create_room(conn, stake=Decimal("10.00"), min_players=5, lobby_seconds=5)
+    # is_active=True: dashboard_summary()'s own active_rooms count reads
+    # WHERE is_active = true, unlike every other test using create_room()
+    # (see its own docstring for why False is the right default there).
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=5, lobby_seconds=5, is_active=True
+    )
     room = await load_room_config(pool, room_id)
     engine = RoundEngine(pool, redis, room, card_pool)
     task = asyncio.create_task(engine.run_forever())

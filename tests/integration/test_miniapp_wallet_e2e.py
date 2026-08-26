@@ -202,8 +202,12 @@ async def test_withdraw_flow_shows_a_real_outcome(gateway_server, browser, pool,
 
 
 async def test_history_tab_shows_a_completed_round(gateway_server, browser, pool, redis, card_pool, conn):
+    # is_active=True: the gateway's own room list (what the miniapp UI
+    # browses) reads WHERE is_active = true, unlike every other test using
+    # create_room() (see its own docstring for why False is the default).
     room_id = await create_room(
-        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=8, call_interval_ms=15
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=8, call_interval_ms=15,
+        is_active=True,
     )
     room = await load_room_config(pool, room_id)
     engine = RoundEngine(pool, redis, room, card_pool)

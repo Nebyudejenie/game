@@ -1,0 +1,28 @@
+# Mirrors .gitignore, plus build-context-specific exclusions -- keeps the
+# image build fast and the image itself from accidentally bundling a local
+# .venv, secrets, or test/dev-only artifacts nothing at runtime needs.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.local
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+dist/
+build/
+node_modules/
+.DS_Store
+
+/backups/
+.git/
+.github/
+tests/
+idea.md
+DECISIONS.md
+README.md

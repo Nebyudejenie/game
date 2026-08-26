@@ -5,6 +5,110 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-26 — Metrics endpoints for the two workerless processes; a real bug in the shared test DB found by running the full suite against the fix
+
+Verifying the Dockerfile's own build (previous entry) surfaced two more
+real gaps, closed the same way: found by actually running things, not by
+inspection.
+
+**`packages/core/metrics.py`**: `services/engine/round_engine.py` and
+`services/payments/payout_worker.py` already record real metrics
+(`engine_calls_total`, `engine_rooms_active`, and others) against this
+module's own default registry, but nothing ever served them anywhere in
+production -- gateway/admin/payments/bot each define their own
+framework-native `/metrics` route; the engine worker and payout worker are
+plain background loops with no HTTP surface at all, and `deploy/
+prometheus/prometheus.yml` had no scrape target for either. Added
+`start_metrics_server(port)`, one small shared aiohttp app (not a second
+web framework pulled in for one endpoint) rather than duplicating the
+same handful of lines in both entrypoints. Wired into both `main()`s
+(ports 8004/8005) and into `prometheus.yml`'s scrape config. Verified for
+real: built the image, ran both processes against real dev Postgres/
+Redis, `curl`ed both `/metrics` endpoints, got real Prometheus exposition
+output back.
+
+**A real, load-bearing bug in the shared test database**, found by running
+the *full* suite (not just the directly-affected files) after adding
+`test_run_active_rooms_is_safe_to_call_repeatedly` (previous session
+entry): `redis.exceptions.MaxConnectionsError: Too many connections`,
+elsewhere in the suite. Root cause: `rooms.is_active` defaults to `true`
+(the schema's own default) and no test -- across dozens of tests, this
+whole session -- ever set it back, so this session's shared dev database
+had silently accumulated 3092 such rows. `run_active_rooms()` is the only
+thing that ever queries that column in bulk, and no test exercised it
+before this session's own auto-claim work added one; once it did, trying
+to claim thousands of stray rooms at once was enough to genuinely exhaust
+a real Redis client's connection pool during a full run, not just add
+noise. Fixed at the source: `tests/integration/conftest.py`'s
+`create_room()` now takes `is_active: bool = False`, overriding the
+schema default, since an audit of every real production query against
+that column (`admin/queries.py`'s dashboard count, `engine/worker.py`'s
+scan, `gateway/queries.py`'s room list) confirmed no test needed the old
+default *except* the handful actually exercising one of those three --
+`test_dashboard_summary_reflects_real_state`, `test_run_active_rooms_is_
+safe_to_call_repeatedly`, `test_full_gameplay_over_websocket`, and three
+Playwright tests that browse the miniapp's own room list
+(`test_miniapp_full_gameplay_flow`, `test_verify_draw_button_shows_a_
+verified_seed`, `test_history_tab_shows_a_completed_round`) -- each
+updated to pass `is_active=True` explicitly. Deactivated the existing
+3092+ accumulated rows the same way as before (safe, reversible, scoped
+to this session's own `test-room-%`/`admin-test-%` naming patterns); a
+full suite run afterward left only 16 active rooms, confirming the fix
+actually bounds the accumulation rather than just resetting it once.
+
+## 2026-08-26 — Dockerfile, and two real packaging bugs it caught immediately
+
+CI/CD step two: a real `docker build` of this project, verified by actually
+building and running it -- not just writing a Dockerfile and assuming.
+
+**`Dockerfile`**: one image for all six deployable units (each gets its own
+`command:` in `deploy/docker-compose.prod.yml`, added next). Editable
+install (`pip install -e .`), matching this project's own documented local
+-dev method exactly, deliberately not a "real" wheel build:
+`services/gateway/app.py` locates `web/miniapp/` by a path relative to its
+own file location, which only survives if the source tree stays laid out
+exactly as it is in the repo -- an editable install (a `.pth` file
+pointing straight back at `/app`) preserves that; installing into
+site-packages would not. No `build-essential`: confirmed directly (a real
+build, not assumed) that every C-extension dependency here -- asyncpg,
+cryptography, bcrypt, psycopg2-binary -- installs from a prebuilt
+manylinux wheel against this exact base image.
+
+**Building it immediately surfaced two real, pre-existing packaging bugs**,
+invisible until now because every dev/test environment this whole project
+has been built in already had every dependency installed, tracked or not:
+
+- `aiogram` was never declared in `pyproject.toml` at all -- not in the
+  base dependencies, not in `[dev]`. A plain `pip install .` (this
+  Dockerfile's own install step) would produce an image with no bot
+  functionality whatsoever, failing at import time. `aiohttp` (aiogram's
+  own transport, also imported directly by `services/bot/app.py`) was
+  equally undeclared, riding along only because *something* had
+  installed it manually at some earlier point in this project's history.
+- `httpx` -- `services/payments/chapa.py`'s real HTTP client for calling
+  Chapa's API -- was declared only under the `[dev]` extra, alongside
+  pytest/mypy/playwright. A production install skipping dev extras
+  (correctly, since none of those belong in a production image) would
+  have shipped with no way to actually reach a payment provider.
+
+Fixed by moving `aiogram`, `aiohttp`, and `httpx` into `pyproject.toml`'s
+base `dependencies`, matching the versions already proven working in
+every dev environment this session has used.
+
+**Verification**: sandbox containers here can't resolve DNS (a sandbox
+-specific Docker networking limitation -- raw IP connectivity works fine,
+confirmed via `ping 8.8.8.8`; the host's own `pip` reaches PyPI directly
+with no issue), so every `docker build`/`docker run` in this entry used
+`--network=host` to borrow the host's working resolver -- a local
+-verification-only workaround, not something baked into the Dockerfile or
+any workflow; GitHub's own runners and the target Proxmox server both
+have normal networking. Built the image, then actually ran all six
+services against this project's real dev Postgres/Redis: `uvicorn` for
+gateway/admin/payments (each confirmed via its own startup log), and
+`python -m services.X` for bot/engine-worker/payout-worker -- the bot
+confirmed via a real `curl` to `/healthz` returning `{"status": "ok"}`,
+the other two confirmed via clean startup logs.
+
 ## 2026-08-26 — Real production entrypoints for the engine worker, payout worker, and bot
 
 User request ("do ci cd too"), first step: CI/CD needs something real to
