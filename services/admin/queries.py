@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 import asyncpg
 from redis.asyncio import Redis
 
-from packages.core import bingo, ledger
+from packages.core import bingo, ledger, metrics
 from packages.core.notifications import notify_user
 from packages.core.phone_crypto import decrypt_phone, phone_lookup_hash
 from services.admin import audit
@@ -309,6 +309,11 @@ async def adjust_balance(
                 reason=reason,
                 ip_address=ip_address,
             )
+        # Only reachable once the transaction above has actually
+        # committed -- see ledger.post()'s own comment for why it can't
+        # safely record this itself when called nested, which every real
+        # call is.
+        metrics.ledger_transactions_total.labels(kind=txn.kind).inc()
     return txn.id
 
 
@@ -445,7 +450,7 @@ async def void_round_admin(
     async with pool.acquire() as conn:
         async with conn.transaction():
             before = await conn.fetchrow("SELECT status FROM rounds WHERE id = $1", round_id)
-            refunded = await refund_round_in_transaction(
+            refunded_count = await refund_round_in_transaction(
                 conn, round_id, reason=f"admin_void: {reason}"
             )
             await audit.record(
@@ -455,11 +460,17 @@ async def void_round_admin(
                 target_type="round",
                 target_id=str(round_id),
                 before={"status": before["status"] if before else None},
-                after={"status": "voided" if refunded else "unchanged (already terminal)"},
+                after={"status": "voided" if refunded_count else "unchanged (already terminal)"},
                 reason=reason,
                 ip_address=ip_address,
             )
-    return refunded
+        # Only reachable once this function's own transaction above has
+        # actually committed -- safe to record here even though
+        # refund_round_in_transaction() itself can't (see its own
+        # comment): this call site owns a real, non-nested transaction.
+        if refunded_count:
+            metrics.ledger_transactions_total.labels(kind="refund").inc(refunded_count)
+    return bool(refunded_count)
 
 
 async def list_rooms(pool: asyncpg.Pool) -> list[dict[str, Any]]:
@@ -771,7 +782,7 @@ async def reject_withdrawal_admin(
 
             locked = await ledger.get_or_create_account(conn, row["user_id"], "user_locked")
             cash = await ledger.get_or_create_account(conn, row["user_id"], "user_cash")
-            await ledger.post(
+            txn = await ledger.post(
                 conn,
                 "refund",
                 [ledger.Entry(locked.id, -row["amount"]), ledger.Entry(cash.id, row["amount"])],
@@ -797,6 +808,11 @@ async def reject_withdrawal_admin(
             )
             user_id = row["user_id"]
             amount = row["amount"]
+        # Only reachable once the transaction above has actually
+        # committed -- see ledger.post()'s own comment for why it can't
+        # safely record this itself when called nested, which every real
+        # call is.
+        metrics.ledger_transactions_total.labels(kind=txn.kind).inc()
 
     await notify_user(
         pool, redis, user_id=user_id, key="notify.withdrawal_rejected", amount=str(amount), reason=reason

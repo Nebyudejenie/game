@@ -44,7 +44,7 @@ import structlog
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
 
-from packages.core import ledger, tracing
+from packages.core import ledger, metrics, tracing
 from packages.core.notifications import notify_user
 from services.payments.provider import PaymentProvider
 from services.payments.withdrawals import PAYOUT_STREAM
@@ -218,6 +218,11 @@ async def _settle_success(
                 provider_ref,
                 txn.id,
             )
+        # Only reachable once the transaction above has actually
+        # committed -- see ledger.post()'s own comment for why it can't
+        # safely record this itself when called nested, which every real
+        # call is.
+        metrics.ledger_transactions_total.labels(kind=txn.kind).inc()
 
 
 async def _reverse(
@@ -227,7 +232,7 @@ async def _reverse(
         async with conn.transaction():
             locked = await ledger.get_or_create_account(conn, user_id, "user_locked")
             cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
-            await ledger.post(
+            txn = await ledger.post(
                 conn,
                 "refund",
                 [ledger.Entry(locked.id, -amount), ledger.Entry(cash.id, amount)],
@@ -240,6 +245,11 @@ async def _reverse(
                 payment_id,
                 reason,
             )
+        # Only reachable once the transaction above has actually
+        # committed -- see ledger.post()'s own comment for why it can't
+        # safely record this itself when called nested, which every real
+        # call is.
+        metrics.ledger_transactions_total.labels(kind=txn.kind).inc()
 
 
 def _flatten(streams: Any) -> list[tuple[str, dict[str, str]]]:

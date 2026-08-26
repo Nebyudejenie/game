@@ -20,7 +20,7 @@ import asyncpg
 import structlog
 from redis.asyncio import Redis
 
-from packages.core import ledger, tracing
+from packages.core import ledger, metrics, tracing
 from services.payments.provider import PaymentProvider
 
 _tracer = tracing.get_tracer(__name__)
@@ -208,6 +208,11 @@ async def request_withdrawal(
                 assert payment_row is not None
                 payment_id: int = payment_row["id"]
 
+        # Only reachable once the transaction above has actually
+        # committed -- see ledger.post()'s own comment for why it can't
+        # safely record this itself when called nested, which every real
+        # call is.
+        metrics.ledger_transactions_total.labels(kind=txn.kind).inc()
         await ledger.publish_balance_update(pool, redis, user_id)
         if status == STATUS_APPROVED:
             await enqueue_payout(redis, our_ref=our_ref, payment_id=payment_id)

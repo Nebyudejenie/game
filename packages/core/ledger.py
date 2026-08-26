@@ -140,6 +140,24 @@ async def post(
     if not entries:
         raise ValueError("post() requires at least one entry")
 
+    # A second code review pass caught that the fix below (incrementing
+    # only after the `async with` block exits, not inside it) is still
+    # not safe in general: every real production caller already has its
+    # own transaction open by the time it calls post(), which makes this
+    # function's own `async with conn.transaction()` a SAVEPOINT, not a
+    # real commit. If a later statement in the *caller's* own transaction
+    # then fails, the whole thing rolls back -- but by then this metric
+    # would already have fired for a ledger write that never actually
+    # persisted. Checked here, before opening this function's own block:
+    # if the caller already has a transaction open, this call can't know
+    # whether it will ultimately commit, so it leaves the metric to the
+    # caller to record once *its* own transaction genuinely commits --
+    # the same convention this module's own publish_balance_update()
+    # already documents, for the same reason. Only when post() itself is
+    # the real top-level transaction owner (a direct, non-nested call --
+    # this module's own tests, notably) is it safe to record here.
+    already_in_transaction = conn.is_in_transaction()
+
     async with conn.transaction():
         txn_row = await conn.fetchrow(
             """
@@ -261,12 +279,8 @@ async def post(
             memo=txn_row["memo"],
         )
 
-    # Only after the `async with` block above has actually committed --
-    # incrementing inside it (as an earlier draft did) would overcount if
-    # the commit itself failed (a dropped connection, a DB restart) right
-    # after this point: the metric would show a transaction that never
-    # actually persisted.
-    metrics.ledger_transactions_total.labels(kind=result.kind).inc()
+    if not already_in_transaction:
+        metrics.ledger_transactions_total.labels(kind=result.kind).inc()
     return result
 
 

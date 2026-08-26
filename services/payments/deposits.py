@@ -299,6 +299,12 @@ async def _apply_confirmed_status(
                 credited_amount = payment["amount"]
 
         assert user_id is not None
+        # Only reachable once the transaction above has actually
+        # committed -- see ledger.post()'s own comment for why it can't
+        # safely record this itself when called nested, which every real
+        # call is. Matches this function's own already-established
+        # deposit_outcomes_total placement right below.
+        metrics.ledger_transactions_total.labels(kind=txn.kind).inc()
         snapshot = await ledger.publish_balance_update(pool, redis, user_id)
         await notify_user(
             pool, redis, user_id=user_id, key="notify.deposit_confirmed",

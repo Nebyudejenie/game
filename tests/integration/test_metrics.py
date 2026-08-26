@@ -216,6 +216,61 @@ async def test_ledger_transactions_counter_increments_on_a_real_post(pool, conn)
     assert after == before + 1
 
 
+async def test_post_does_not_increment_the_metric_when_the_outer_transaction_rolls_back(pool, conn):
+    # A code review pass caught that an earlier fix wasn't actually safe:
+    # every real production caller already has its own transaction open
+    # by the time it calls ledger.post(), which makes post()'s own
+    # `async with conn.transaction()` a SAVEPOINT, not a real commit --
+    # incrementing right after that savepoint releases (as the earlier
+    # fix did) still overcounts if a LATER statement in the *caller's*
+    # transaction then fails and rolls everything back. Simulates that
+    # directly: post() succeeds inside an outer transaction this test
+    # then deliberately rolls back, standing in for whatever real
+    # statement (an UPDATE, an audit-log INSERT) a real caller runs after
+    # post() but before its own commit.
+    user_id = await create_funded_user(conn)
+    cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
+    house = await ledger.get_or_create_account(conn, None, "house_float")
+
+    before = metrics.ledger_transactions_total.labels(kind="adjustment")._value.get()
+
+    outer = conn.transaction()
+    await outer.start()
+    try:
+        await ledger.post(
+            conn,
+            "adjustment",
+            [ledger.Entry(house.id, -Decimal("5.00")), ledger.Entry(cash.id, Decimal("5.00"))],
+            idempotency_key=f"test-rollback-{user_id}",
+        )
+    finally:
+        await outer.rollback()
+
+    after = metrics.ledger_transactions_total.labels(kind="adjustment")._value.get()
+    assert after == before, "metric incremented even though the outer transaction rolled back"
+
+
+async def test_join_increments_ledger_transactions_metric_on_a_real_commit(pool, redis, card_pool, conn):
+    # The other side of the fix above: a real call site (round_engine.py's
+    # join(), which always calls post() with its own transaction already
+    # open) must still increment the metric once ITS OWN transaction
+    # genuinely commits -- confirming responsibility actually moved to the
+    # caller, not just disappeared.
+    room_id = await create_room(conn, stake=Decimal("10.00"), min_players=2, call_interval_ms=10)
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        user_id = await create_funded_user(conn)
+        before = metrics.ledger_transactions_total.labels(kind="stake")._value.get()
+        assert (await engine.join(user_id, 1)).ok
+        after = metrics.ledger_transactions_total.labels(kind="stake")._value.get()
+        assert after == before + 1
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
 async def test_rounds_voided_counter_increments_on_a_real_refund(pool, redis, card_pool, conn):
     # A genuine round, gotten to "running" with real stakes through the
     # real engine (not hand-crafted rows), then killed mid-round the same
@@ -243,10 +298,16 @@ async def test_rounds_voided_counter_increments_on_a_real_refund(pool, redis, ca
     await redis.delete(f"room:lock:{room_id}")
 
     before = metrics.engine_rounds_voided_total._value.get()
+    ledger_before = metrics.ledger_transactions_total.labels(kind="refund")._value.get()
     refunded = await refunds.refund_round(pool, round_id, reason="test-forced-void")
-    assert refunded
+    assert refunded == 2  # p1 and p2, each their own ledger transaction
     after = metrics.engine_rounds_voided_total._value.get()
     assert after == before + 1
+    # refund_round_in_transaction() itself can't safely record this (see
+    # its own comment) -- confirms the caller-side fix actually counts
+    # every entrant refunded, not just fires once regardless of how many.
+    ledger_after = metrics.ledger_transactions_total.labels(kind="refund")._value.get()
+    assert ledger_after == ledger_before + 2
 
 
 @dataclass

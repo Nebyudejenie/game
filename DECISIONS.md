@@ -5,6 +5,122 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-26 — `ledger_transactions_total` no longer overcounts across a caller's own rollback
+
+Ninth fix from the fresh `/code-review high` pass -- the largest and most
+architecturally significant one, revisited on request after the session's
+earlier status summary had described the review catalogue's remaining
+items as lower-priority.
+
+**The bug**: an earlier fix this session made `packages/core/ledger.py`'s
+`post()` increment `ledger_transactions_total` right after its own `async
+with conn.transaction()` block exited, reasoning that this only fires
+"after the transaction has actually committed." That's true of `post()`'s
+own block in isolation, but false for what actually matters: every real
+production caller (10 call sites across 6 files) already has its own
+transaction open by the time it calls `post()`, which makes `post()`'s
+block a Postgres `SAVEPOINT`, not a real `COMMIT`. If a *later* statement
+in the caller's own transaction then failed -- an `UPDATE`, an audit-log
+`INSERT`, any of the real work several of these call sites do right after
+posting -- the whole thing rolled back, but the metric had already fired
+for a ledger write that never actually persisted. `git blame` confirmed
+this was introduced by this session's own earlier fix, not pre-existing.
+
+**Fixed**: `post()` now checks `conn.is_in_transaction()` *before* opening
+its own block. If the caller already had one open, `post()` can't know
+whether it will ultimately commit, so it leaves the metric to the caller
+-- the same convention this file's own `publish_balance_update()` already
+documents for the identical reason. Only when `post()` itself is the real,
+non-nested transaction owner (this module's own tests, notably) does it
+record the metric internally.
+
+Every real call site was updated to record the metric itself, right after
+its *own* transaction genuinely commits:
+`round_engine.py`'s `join()`, `drop_card()`, `_settle_with_winners()`;
+`payout_worker.py`'s `_settle_success()`, `_reverse()`;
+`withdrawals.py`'s `request_withdrawal()`; `deposits.py`'s webhook handler
+(matching its own already-established `deposit_outcomes_total` placement
+exactly); `admin/queries.py`'s `adjust_balance()`, `reject_withdrawal_
+admin()`. `refunds.py`'s `refund_round_in_transaction()` -- called from
+inside *either* of two different callers' transactions (`refund_round()`'s
+own, or the admin void action's) -- can't safely record it either, for
+the same reason `post()` can't; it now returns the number of entrants
+refunded (0 for a no-op) instead of a bare bool, so each of its two real
+owners can record the right count once their own transaction commits.
+`refund_round()` itself always owns a real, non-nested transaction (a
+fresh `pool.acquire()`), so it records the metric internally, the same
+way `post()` does when non-nested -- its own three callers
+(`round_engine.py` x2, `recovery.py`) needed no changes at all.
+`void_round_admin()` calls `refund_round_in_transaction()` directly (not
+through `refund_round()`), so it records the metric itself; its own
+external contract (a strict `bool`, checked with `is True`/`is False` in
+an existing test, and returned as JSON from `/rounds/{id}/void`) was
+kept byte-for-byte identical by converting the internal count with
+`bool(...)` at the return statement, rather than changing its signature.
+
+Added four tests. `tests/integration/test_metrics.py`'s `test_post_does_
+not_increment_the_metric_when_the_outer_transaction_rolls_back` is the
+core regression: calls `post()` with `conn` already inside a manually
+-started transaction, then rolls that outer transaction back, and asserts
+the counter never moved. `test_join_increments_ledger_transactions_
+metric_on_a_real_commit` confirms the other side -- a real call site still
+increments correctly once responsibility actually moved to it. Extended
+the existing `test_rounds_voided_counter_increments_on_a_real_refund` to
+also assert `ledger_transactions_total{kind="refund"}` increases by
+exactly the entrant count (2), not just once regardless of how many --
+this caught a real design flaw in an earlier draft of this fix (see
+below). `tests/integration/test_admin_queries.py`'s existing `test_void_
+round_admin_refunds_and_is_idempotent` (`is True`/`is False` checks) and
+`services/admin/app.py`'s `/rounds/{id}/void` JSON response were the
+concrete reason `void_round_admin()`'s own return type stayed `bool`
+rather than becoming `int` like the two internal functions underneath it.
+
+Verified the regression test is real: `git stash push` on just `ledger.py`
+reverted to the old, unconditional-increment code, reran -- failed with
+`assert 1.0 == 0.0` ("metric incremented even though the outer
+transaction rolled back") -- then `git stash pop` to restore the fix.
+
+**A design flaw caught by the test suite itself, not by inspection**: the
+first draft of this fix left `refund_round()`'s three callers
+(`round_engine.py` x2, `recovery.py`) responsible for incrementing the
+metric themselves using the count `refund_round()` returned. Running the
+extended `test_rounds_voided_counter_increments_on_a_real_refund` against
+that draft failed -- `1.0 == (1.0 + 2)`, no increment at all -- because
+the test calls `refunds.refund_round()` *directly*, the same way a real
+caller would, and none of those three real callers' own wrapper code was
+what the test was exercising. This is exactly what the fix's own
+reasoning says should have happened: `refund_round()` always owns a real,
+non-nested transaction, so pushing the recording responsibility out to
+*its own* callers was unnecessary indirection, not the caller-can't-know
+-if-it-committed problem the rest of this fix addresses. Moved the
+increment back into `refund_round()` itself and reverted the three
+now-redundant caller-side additions -- simpler, and the actual bug this
+test exists to catch (a caller of `refund_round()` forgetting the
+increment) is structurally impossible now rather than merely unlikely.
+
+**Full clean-slate rebuild**: `mypy` clean (63 source files) → `pytest
+tests/` (730 passed, up from 728) → `-m load`: `test_load_multiroom.py`
+and `test_gateway_fanout.py` intermittently exceeded their 300ms p99
+budgets across six full-batch attempts (304-576ms), never on a test
+related to this fix; confirmed via a controlled experiment (`git stash`
+on just `round_engine.py`, 5 trials each way) that `test_full_round_
+35_players_ledger_balances` -- a different, timing-tight test that
+surfaced during this same verification pass -- fails at the *same* rate
+(3/5) with this fix fully reverted as with it applied, proving that
+specific flake pre-exists this change entirely; `docker ps` showed
+`spos-backend` actively restarting and load average at 1.94 on this
+4-core host, both confirmed twice. `test_load_multiroom.py` alone (no
+other test running) still exceeded budget (447ms) on a dedicated run,
+confirming this is genuine current host contention from unrelated
+projects, not a contention effect between tests in the same batch, and
+architecturally unconnected to anything this fix touches (ledger
+-transaction metric recording, not the gateway WebSocket fanout path
+these two tests exercise) → `-m chaos_infra` (1 passed) → `-m e2e`: one
+transient failure on `test_miniapp_full_gameplay_flow` (a Playwright
+selector-visibility flake under the same host load, different symptom
+each occurrence -- an already-documented pattern from earlier in this
+session), clean on immediate rerun and on a full 7/7 batch rerun.
+
 ## 2026-08-25 — Restored a dropped assertion in `test_small_amount_auto_approved_and_enqueued`
 
 Eighth and last straightforward item from the same fresh `/code-review

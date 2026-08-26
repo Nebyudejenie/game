@@ -310,6 +310,11 @@ class RoundEngine:
                             self._room.stake,
                             round_id,
                         )
+                    # Only reachable once the transaction above has
+                    # actually committed -- see ledger.post()'s own
+                    # comment for why it can't safely record this itself
+                    # when called nested, which every real call is.
+                    metrics.ledger_transactions_total.labels(kind=txn.kind).inc()
                 except asyncpg.exceptions.UniqueViolationError as exc:
                     reason = "already_joined" if "user_id" in (exc.constraint_name or "") else "card_taken"
                     return JoinResult(False, reason)
@@ -336,7 +341,7 @@ class RoundEngine:
             async with conn.transaction():
                 cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
                 pot_account = await ledger.get_or_create_account(conn, None, "pot_escrow")
-                await ledger.post(
+                txn = await ledger.post(
                     conn,
                     "refund",
                     [Entry(pot_account.id, -self._room.stake), Entry(cash.id, self._room.stake)],
@@ -354,6 +359,11 @@ class RoundEngine:
                     self._room.stake,
                     round_id,
                 )
+            # Only reachable once the transaction above has actually
+            # committed -- see ledger.post()'s own comment for why it
+            # can't safely record this itself when called nested, which
+            # every real call is.
+            metrics.ledger_transactions_total.labels(kind=txn.kind).inc()
 
         del self._entries[user_id]
         self._pot -= self._room.stake
@@ -715,6 +725,11 @@ class RoundEngine:
                     derash,
                     self._server_seed,
                 )
+            # Only reachable once the transaction above has actually
+            # committed -- see ledger.post()'s own comment for why it
+            # can't safely record this itself when called nested, which
+            # every real call is.
+            metrics.ledger_transactions_total.labels(kind=txn.kind).inc()
 
         for w in winners:
             await ledger.publish_balance_update(self._pool, self._redis, w.user_id)
