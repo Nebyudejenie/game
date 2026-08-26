@@ -28,8 +28,20 @@ async def make_engine(pool, redis, card_pool, room_id) -> RoundEngine:
 
 
 async def test_full_round_35_players_ledger_balances(pool, redis, card_pool, conn):
+    # lobby_seconds needs real margin here, unlike this file's other tests:
+    # the lobby deadline is fixed the moment the first join starts the
+    # round (round_engine.py's own _lobby_deadline_monotonic), not
+    # extended by later joins, and this test joins 35 users *sequentially*
+    # -- each one several real DB round trips -- rather than concurrently.
+    # A flaky "not_joinable" failure a code review pass caught (this ran
+    # comfortably inside the old 1-second default in isolation, but failed
+    # 3 of 5 runs under real host contention -- other unrelated Docker
+    # containers on the same shared 4-core box) confirmed 1 second leaves
+    # no real margin for 35 sequential joins once the host is under any
+    # load at all.
     room_id = await create_room(
-        conn, stake=Decimal("20.00"), house_cut_bps=2000, min_players=2, call_interval_ms=5
+        conn, stake=Decimal("20.00"), house_cut_bps=2000, min_players=2,
+        lobby_seconds=20, call_interval_ms=5,
     )
     engine = await make_engine(pool, redis, card_pool, room_id)
     task = asyncio.create_task(engine.run_forever())
@@ -39,7 +51,7 @@ async def test_full_round_35_players_ledger_balances(pool, redis, card_pool, con
             result = await engine.join(user_id, card_no=i + 1)
             assert result.ok, result.reason
 
-        await wait_until(lambda: engine.status == "idle" and engine.round_id is None, timeout=15)
+        await wait_until(lambda: engine.status == "idle" and engine.round_id is None, timeout=45)
 
         round_row = await pool.fetchrow(
             "SELECT id, pot, derash, status FROM rounds WHERE room_id = $1 "

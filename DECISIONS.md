@@ -5,6 +5,44 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-26 — Gave `test_full_round_35_players_ledger_balances` real lobby margin
+
+A follow-up, not from the review catalogue: surfaced incidentally while
+verifying the previous fix, and worth closing immediately since a flaky
+test undermines the "a green suite means safe" discipline this whole
+session runs on.
+
+**The bug**: `create_room()`'s `lobby_seconds` defaults to 1 -- fine for
+every other test in this file, which either join a handful of players or
+join many *concurrently* via `asyncio.gather`. This test joins 35 users
+*sequentially*, each a real, multi-round-trip `engine.join()` call, and
+`round_engine.py`'s own `_lobby_deadline_monotonic` is fixed the instant
+the first join starts the round -- it is never extended by later joins.
+Confirmed directly, not assumed: with the old 1-second default, this test
+failed 3 of 5 runs with `not_joinable` (a later `join()` call arriving
+after the lobby had already closed) purely from real host contention
+(other, unrelated Docker containers competing for this shared 4-core
+box) -- no code defect, just no margin at all for 35 sequential real
+transactions once the host is under any load.
+
+**Fixed**: `lobby_seconds=20` for this test only (every other test in
+this file keeps its own, already-correct value). Confirmed 5/5 clean
+runs at ~21.5s each. Raised the test's own subsequent `wait_until(...,
+timeout=15)` to `45` to match -- the round can't even start running
+until the longer lobby window elapses.
+
+**Full clean-slate rebuild**: `mypy` clean (63 source files, unaffected)
+→ `pytest tests/` (730 passed, same count -- a timing-only change to an
+existing test) → `-m load`: same already-documented shared-host
+-contention flake as the previous entry, this time on `test_gateway_
+fanout.py` (`test_stalled_reader_does_not_delay_other_sockets` in the
+full batch, `test_many_sockets_receive_a_call_within_budget` on an
+isolated rerun, 377-451ms against the 300ms budget) -- a different
+subsystem (WebSocket fanout, not round-engine lobby timing) than
+anything touched here, confirming this is ambient host load rather than
+anything connected to this change → `-m chaos_infra` (1 passed) → `-m
+e2e` (7/7 passed clean).
+
 ## 2026-08-26 — `ledger_transactions_total` no longer overcounts across a caller's own rollback
 
 Ninth fix from the fresh `/code-review high` pass -- the largest and most
