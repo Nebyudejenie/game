@@ -215,6 +215,78 @@ async def test_two_simultaneous_auto_mark_winners_both_split_derash(pool, redis,
         await asyncio.wait_for(task, timeout=15)
 
 
+async def test_settlement_publishes_winner_balance_updates_concurrently(
+    pool, redis, card_pool, conn, monkeypatch
+):
+    # A code review pass caught _settle_with_winners()'s own balance-update
+    # push as a plain sequential `for ... await` loop -- each publish is
+    # fully independent (a different user, its own pool connection, its
+    # own Redis channel), so a simultaneous-tie round with several winners
+    # used to serialize several round trips before round_end could even
+    # broadcast, delaying that message for every player in the room, not
+    # just whichever winner's own push was still waiting its turn.
+    #
+    # Same bingo.winning_patterns() monkeypatch technique as the sibling
+    # tie test above, for the same reason: makes both real, real-joined
+    # players' cards deterministic simultaneous winners, no reliance on
+    # the real card pool's draw-order luck. Additionally monkeypatches
+    # ledger.publish_balance_update() itself to make user_a's own publish
+    # artificially slow -- proving the property under test directly:
+    # user_b's publish must not be delayed behind it.
+    room_id = await create_room(
+        conn, stake=Decimal("20.00"), house_cut_bps=2000, min_players=2, call_interval_ms=15
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        user_a = await create_funded_user(conn)
+        user_b = await create_funded_user(conn)
+        card_a, card_b = 1, 2
+        grid_a = card_pool[card_a]
+        grid_b = card_pool[card_b]
+        winning_pattern = bingo.Pattern(name="row_0", kind="row", cells=((0, 0), (0, 1), (0, 2), (0, 3), (0, 4)))
+
+        def fake_winning_patterns(grid, called, enabled):
+            if grid is grid_a or grid is grid_b:
+                return [winning_pattern]
+            return []
+
+        assert (await engine.join(user_a, card_a, auto_mark=True)).ok
+        assert (await engine.join(user_b, card_b, auto_mark=True)).ok
+
+        await wait_until(lambda: engine.status == "running", timeout=5)
+        monkeypatch.setattr(round_engine.bingo, "winning_patterns", fake_winning_patterns)
+
+        real_publish = ledger.publish_balance_update
+        published_at: dict[int, float] = {}
+
+        async def instrumented_publish(pool_, redis_, user_id):
+            if user_id == user_a:
+                await asyncio.sleep(0.5)
+            result = await real_publish(pool_, redis_, user_id)
+            published_at[user_id] = asyncio.get_running_loop().time()
+            return result
+
+        monkeypatch.setattr(round_engine.ledger, "publish_balance_update", instrumented_publish)
+
+        start = asyncio.get_running_loop().time()
+        await wait_until(lambda: engine.status == "idle", timeout=15)
+
+        assert user_a in published_at and user_b in published_at
+        # Sequential (the old bug) would put user_b's publish ~0.5s after
+        # user_a's slow one finished; concurrent puts it close to `start`
+        # regardless of user_a's own delay.
+        b_delay = published_at[user_b] - start
+        assert b_delay < 0.3, (
+            f"user_b's balance update landed {b_delay:.2f}s after settlement "
+            "started -- stalled behind user_a's slow publish"
+        )
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
 async def test_an_unexpected_exception_during_auto_claim_does_not_crash_the_room(
     pool, redis, card_pool, conn, monkeypatch
 ):

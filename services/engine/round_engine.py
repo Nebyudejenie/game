@@ -764,8 +764,18 @@ class RoundEngine:
             # every real call is.
             metrics.ledger_transactions_total.labels(kind=txn.kind).inc()
 
-        for w in winners:
-            await ledger.publish_balance_update(self._pool, self._redis, w.user_id)
+        # A code review pass caught this as a plain sequential for/await --
+        # each publish is fully independent (a different user, its own
+        # pool connection, its own Redis channel), so a simultaneous-tie
+        # round with several winners serialized several round trips before
+        # round_end could even broadcast, delaying that message for every
+        # player in the room, not just the winners waiting on their own
+        # balance push. Concurrent instead, the same pattern already used
+        # elsewhere in this codebase for independent per-item work
+        # (services/gateway/queries.py, services/bot/notification_relay.py).
+        await asyncio.gather(
+            *(ledger.publish_balance_update(self._pool, self._redis, w.user_id) for w in winners)
+        )
 
         await self._publish_room(
             {

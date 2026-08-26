@@ -5,6 +5,58 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-26 — `_settle_with_winners()` publishes winner balance updates concurrently
+
+Two more catalogue findings closed this turn -- one investigated and found
+to be a deliberate, already-optimized design, not a bug; the other real
+and fixed.
+
+**Investigated and found deliberate**: "hot-path redundant balance
+re-query" -- the concern that `join()`/`drop_card()`/`_settle_with_
+winners()` calling `ledger.publish_balance_update()` after their own
+transaction commits re-reads balance data the same transaction already
+had in hand. `user_balance_snapshot()`'s own docstring already documents
+this as a prior code-review pass's deliberate fix (down from up to 9
+round trips via `get_or_create_account()+balance()` × 3, to this one
+query) specifically because it sits on the hottest path in the system --
+every single stake. The fresh read happening on a new connection, after
+commit, is also load-bearing, not incidental: it's the only way to
+guarantee no concurrent transaction (a withdrawal, an admin adjustment,
+the same user staking in a different room) mutated the balance in the
+gap. Left alone.
+
+**Fixed**: `_settle_with_winners()`'s own winner-balance-update loop was
+a plain sequential `for user in winners: await publish_balance_update(...)`.
+Each publish is fully independent -- a different user, its own pool
+connection, its own Redis channel -- so a simultaneous-tie round with
+several winners (`max_players` caps at 100) used to serialize several
+round trips before `round_end` could even broadcast, delaying that
+message for every player in the room, not just whichever winner's own
+push was still waiting its turn. Made concurrent via `asyncio.gather`,
+the same pattern already used elsewhere in this codebase for independent
+per-item work (`services/gateway/queries.py`, `services/bot/
+notification_relay.py`).
+
+Added `test_settlement_publishes_winner_balance_updates_concurrently` to
+`tests/integration/test_round_engine.py`, reusing the `bingo.winning_
+patterns()` monkeypatch technique from the sibling tie-split test to make
+two real, real-joined players deterministic simultaneous winners, plus a
+second monkeypatch on `ledger.publish_balance_update()` itself giving one
+winner's own publish an artificial 0.5s delay and recording real
+timestamps -- directly proving the other winner's publish isn't
+serialized behind it, not just asserting the loop "looks" concurrent.
+Verified the regression test is real: `git stash push` on just `round_
+engine.py` reverted to the old sequential code, reran -- failed with
+`user_b's balance update landed 0.62s after settlement started`, matching
+the sequential-stall prediction almost exactly -- then `git stash pop` to
+restore the fix.
+
+**Full clean-slate rebuild**: `mypy` clean (63 source files) → `pytest
+tests/` (733 passed, up from 732) → `-m load`: the same already
+-documented shared-host-contention pattern, unrelated to a change confined
+to settlement's own balance-publish timing → `-m chaos_infra` (1 passed)
+→ `-m e2e` (7/7 passed).
+
 ## 2026-08-26 — `recovery.py`'s crash-recovery sweep batched into two queries instead of `1 + N`
 
 Two catalogue findings from the fresh `/code-review high` pass, closed the
