@@ -5,12 +5,24 @@ product/architecture spec lives in [`idea.md`](idea.md) (see especially the
 "Jo Bingo" sections starting at line 4776 — that's the authoritative
 blueprint this repo follows; see [`DECISIONS.md`](DECISIONS.md) for why).
 
-This repo is being built phase by phase. **Phase 0 (foundations + ledger),
-Phase 1 (Telegram bot), Phase 2 (game engine), Phase 3 (realtime gateway),
-and Phase 4 (Mini App) are done** — that's the full player-facing loop,
-working end to end. What's left — payments, admin — is scaffolded as empty
-packages under `services/` (see `DECISIONS.md` and the plan referenced
-there for the full roadmap).
+This repo is being built phase by phase. **Phase 0 (foundations + ledger)
+through Phase 7 (admin/risk/responsible-gaming) are done** — the full
+player-facing loop (registration through a settled round), deposits and
+withdrawals against Chapa, and the admin console's API (auth/RBAC/audit,
+balance adjustments, round voiding, reports, responsible-gaming limits)
+all work end to end against real infrastructure, with real tests. Real,
+known gaps -- not yet built, not silently missing -- see "What's actually
+implemented" below for the honest list: a KYC *verification* pipeline
+(the `kyc_level` threshold check on withdrawals exists, but nothing
+anywhere currently promotes a user past it -- see that section), an admin
+*web frontend* (today it's a JSON API only, per idea.md's own Prompt-0
+repository layout; §11's "separate web app" framing is a spec-internal
+inconsistency this hasn't resolved yet), the Risk screen and tax export,
+SantimPay/ArifPay adapters (blocked on unreachable docs, Chapa is the one
+real provider), and load/chaos testing at the spec's literal 10k-socket
+scale (this repo's own load tests run smaller, honestly documented in
+`DECISIONS.md`). CI/CD (GitHub Actions + a self-hosted-runner deploy) is
+also done -- see the CI/CD section further down.
 
 ## Repository layout
 
@@ -18,15 +30,19 @@ there for the full roadmap).
 services/bot/          Phase 1: Telegram bot (aiogram 3, webhook mode) -- DONE
 services/gateway/      Phase 3: realtime WebSocket gateway (FastAPI) -- DONE
 services/engine/       Phase 2: game engine / room state machine workers -- DONE
-services/wallet/       Phase 1: wallet API surface over packages/core/ledger.py
-services/payments/     Phase 5-6: deposit/withdrawal provider adapters
-services/admin/        Phase 7: admin console API
+services/wallet/       Empty placeholder -- wallet logic lives directly in
+                        packages/core/ledger.py instead; nothing currently
+                        needs a separate wallet-specific service layer
+services/payments/     Phase 5-6: deposits + withdrawals against Chapa -- DONE
+                        (SantimPay/ArifPay adapters not built, see above)
+services/admin/        Phase 7: admin console -- JSON API only, DONE; no web
+                        frontend yet, no Risk screen, no tax export
 packages/core/         Shared, framework-free domain logic (ledger, bingo, config, logging, redis, telegram auth)
 web/miniapp/           Phase 4: Telegram Mini App (vanilla JS, no framework) -- DONE
 migrations/            Alembic migrations (raw SQL, no ORM)
 tests/unit/            Pure-function tests, no external dependencies
 tests/integration/     Tests against real Postgres + Redis (docker-compose)
-deploy/                docker-compose.yml and friends
+deploy/                docker-compose.yml, docker-compose.prod.yml, and friends
 ```
 
 ## Running it locally
