@@ -8,28 +8,21 @@ blueprint this repo follows; see [`DECISIONS.md`](DECISIONS.md) for why).
 This repo is being built phase by phase. **Phase 0 (foundations + ledger)
 through Phase 7 (admin/risk/responsible-gaming) are done** — the full
 player-facing loop (registration through a settled round), deposits and
-withdrawals against Chapa, and the admin console's API (auth/RBAC/audit,
-balance adjustments, round voiding, reports, responsible-gaming limits)
-all work end to end against real infrastructure, with real tests. Real,
-known gaps -- not yet built, not silently missing -- see "What's actually
-implemented" below for the honest list: a KYC *document-verification
-pipeline* (the `kyc_level` threshold check on withdrawals now has a real,
-audited admin action to promote/demote a user past it -- `POST
-/users/{id}/kyc` -- but no automated document-collection/verification
-provider behind that admin's own judgment call -- see that section), an
-admin *web frontend* (today it's a JSON API only, per idea.md's own
-Prompt-0 repository layout; §11's "separate web app" framing is a
-spec-internal inconsistency this hasn't resolved yet), the Risk screen's
-own frontend and tax export (the Risk screen's backend -- shared-payout
--account clustering, repeat winner/loser room pairings, flagged
-withdrawals -- is real and tested, reachable at `GET
-/risk/shared-payout-accounts` and `GET /risk/repeat-pairings`, but has no
-UI yet; tax export has zero code either way), SantimPay/ArifPay adapters
-(blocked on unreachable docs, Chapa is the one real provider), and
-load/chaos testing at the spec's literal 10k-socket scale (this repo's
-own load tests run smaller, honestly documented in `DECISIONS.md`). CI/CD
-(GitHub Actions + a self-hosted-runner deploy) is also done -- see the
-CI/CD section further down.
+withdrawals against Chapa, and the admin console (API + a real web
+frontend: dashboard, users, payments, rounds, rooms, reports, risk, audit
+log) all work end to end against real infrastructure, with real tests.
+Real, known gaps -- not yet built, not silently missing -- see "What's
+actually implemented" below for the honest list: a KYC *document
+-verification pipeline* (the `kyc_level` threshold check on withdrawals
+now has a real, audited admin action to promote/demote a user past it --
+`POST /users/{id}/kyc`, reachable from the console's Users screen -- but
+no automated document-collection/verification provider behind that
+admin's own judgment call -- see that section) and tax export (zero code
+either way). SantimPay/ArifPay adapters are blocked on unreachable docs
+(Chapa is the one real provider), and load/chaos testing runs at a
+smaller scale than the spec's literal 10k-socket figure, honestly
+documented in `DECISIONS.md`. CI/CD (GitHub Actions + a self-hosted
+-runner deploy) is also done -- see the CI/CD section further down.
 
 ## Repository layout
 
@@ -42,10 +35,13 @@ services/wallet/       Empty placeholder -- wallet logic lives directly in
                         needs a separate wallet-specific service layer
 services/payments/     Phase 5-6: deposits + withdrawals against Chapa -- DONE
                         (SantimPay/ArifPay adapters not built, see above)
-services/admin/        Phase 7: admin console -- JSON API only, DONE; no web
-                        frontend yet, no Risk screen, no tax export
+services/admin/        Phase 7: admin console API -- DONE; no tax export
 packages/core/         Shared, framework-free domain logic (ledger, bingo, config, logging, redis, telegram auth)
 web/miniapp/           Phase 4: Telegram Mini App (vanilla JS, no framework) -- DONE
+web/admin/             Phase 7: admin console frontend (vanilla JS, no
+                        framework, no build step -- same approach as
+                        web/miniapp/) -- DONE, served at /console by
+                        services/admin/app.py
 migrations/            Alembic migrations (raw SQL, no ORM)
 tests/unit/            Pure-function tests, no external dependencies
 tests/integration/     Tests against real Postgres + Redis (docker-compose)
@@ -503,12 +499,23 @@ remains a genuine, unmade product decision. See `DECISIONS.md`.
   raises rather than relying on convention.
 - **`services/admin/app.py`** — the FastAPI admin API: dashboard summary,
   user search/detail/ledger history, balance adjustment, user status
-  (active/limited/banned — never self-exclusion, see above), round list/detail, the fairness-verification
+  (active/limited/banned — never self-exclusion, see above), KYC level
+  promotion/demotion, round list/detail, the fairness-verification
   route (`GET /rounds/{id}/fairness` — reveals the committed `server_seed`
   once a round is terminal and independently re-verifies the draw), admin
   round voiding, room CRUD, reports (daily GGR, player LTV, weekly
-  retention cohorts), and the audit log itself (restricted to
-  `superadmin`) — plus an optional source-IP allowlist.
+  retention cohorts), risk screens (shared payout-account clusters,
+  repeat winner/loser room pairings), and the audit log itself
+  (restricted to `superadmin`) — plus an optional source-IP allowlist,
+  also enforced (via a dedicated middleware, since it has no per-route
+  `Depends` of its own) on **`web/admin/`**, the real frontend for all of
+  the above mounted at `/console`: plain HTML/CSS/vanilla-JS, no
+  framework or build step, same approach as `web/miniapp/`. Bearer
+  session token in `localStorage`, one screen per nav item, each
+  screen's own fetch calls hitting this same API — verified with a real
+  Playwright walkthrough (login, every screen, a real KYC-level action
+  end to end through the UI, logout) against the real dev database, not
+  just curl.
 - **Reports (spec section 11):** player LTV (net lifetime deposits minus
   withdrawals, both per-user on the user detail view and as a ranked
   leaderboard) and weekly signup-cohort retention (one set-based SQL
@@ -519,11 +526,13 @@ remains a genuine, unmade product decision. See `DECISIONS.md`.
   weeks from reading as 0% churn — see `DECISIONS.md`. Bonuses/referral
   rewards and tax export were deliberately not attempted: the former
   needs real business parameters (bonus amounts, wagering multipliers)
-  this session has no authority to invent, the same reasoning
-  `risk_flags` was left unbuilt; the latter needs a specific format the
-  tax authority requires, genuinely unknown here — guessing at a
-  compliance export risks something worse than no export at all. See
-  `DECISIONS.md`.
+  this session has no authority to invent; the latter needs a specific
+  format the tax authority requires, genuinely unknown here — guessing
+  at a compliance export risks something worse than no export at all.
+  (The Risk screens above cover two of spec 8.4's anti-fraud rules that
+  *were* computable from existing data — see `DECISIONS.md` for why a
+  stored `risk_flags` table and device-fingerprint clustering were
+  scoped out of that same pass.) See `DECISIONS.md`.
 
 Building the fairness route surfaced a real gap in Phase 2:
 `round_engine.py` was committing to `server_seed_hash` up front (correct)

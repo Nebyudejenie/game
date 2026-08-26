@@ -241,6 +241,29 @@ async def test_metrics_endpoint_is_blocked_by_the_ip_allowlist(admin_server):
         admin_app.state.ip_allowlist = []
 
 
+async def test_console_frontend_is_reachable_with_no_allowlist(admin_server):
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{admin_server}/console/")
+    assert response.status_code == 200
+    assert "Jo Bingo Admin" in response.text
+
+
+async def test_console_frontend_is_blocked_by_the_ip_allowlist(admin_server):
+    # The frontend mounted at /console is plain StaticFiles -- unlike
+    # every API route, it has no Depends(current_admin) of its own to run
+    # the allowlist check through, which is exactly the gap /metrics and
+    # /auth/login were each separately caught with before (see their own
+    # tests above). This is the same regression guard for the dedicated
+    # _console_frontend_ip_allowlist middleware that closes it here.
+    admin_app.state.ip_allowlist = ["10.0.0.1"]
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{admin_server}/console/")
+        assert response.status_code == 403
+    finally:
+        admin_app.state.ip_allowlist = []
+
+
 async def test_audit_log_is_immutable_at_the_database_level(pool):
     admin_id, *_ = await create_test_admin(pool)
     row = await pool.fetchrow(

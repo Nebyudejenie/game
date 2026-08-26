@@ -7,16 +7,20 @@ the ledger like any other money movement.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Annotated, Any
 
 import asyncpg
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
+
+ADMIN_WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web" / "admin"
 
 from packages.core.config import get_settings
 from packages.core.redis_conn import get_redis
@@ -53,6 +57,24 @@ def _check_ip_allowlist(request: Request) -> None:
         return
     if _client_ip(request) not in allowlist:
         raise HTTPException(status_code=403, detail="source IP not permitted")
+
+
+@app.middleware("http")
+async def _console_frontend_ip_allowlist(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    # The frontend mounted below at /console is plain StaticFiles, which
+    # (unlike every API route) can't run a Depends(current_admin) IP
+    # check -- and every other unauthenticated route in this file
+    # (/auth/login, /metrics) already learned the hard way, via a real
+    # code review finding, that "no bearer token yet" is not license to
+    # skip the allowlist spec section 9.2 asks the whole admin panel to
+    # have. This is the same check, just as middleware, since a static
+    # mount has no dependency-injection point of its own.
+    if request.url.path.startswith("/console") and app.state.ip_allowlist:
+        if _client_ip(request) not in app.state.ip_allowlist:
+            return Response(status_code=403, content="source IP not permitted")
+    return await call_next(request)
 
 
 def _require_reason(reason: str) -> None:
@@ -519,3 +541,12 @@ async def metrics_endpoint(request: Request) -> Response:
     # whole admin panel to have -- now applies here too.
     _check_ip_allowlist(request)
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+# Mounted last, same reasoning as services/gateway/app.py's own miniapp
+# mount: FastAPI matches routes in registration order, so every API route
+# above must be registered first or this catch-all would shadow them.
+# Protected by _console_frontend_ip_allowlist above, not by StaticFiles
+# itself -- the frontend calls back into this same app's API routes for
+# actual data, each of which still requires a real session token on top.
+app.mount("/console", StaticFiles(directory=ADMIN_WEB_DIR, html=True), name="console")

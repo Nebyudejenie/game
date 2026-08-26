@@ -5,6 +5,81 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-26 — Admin console web frontend (`web/admin/`), mounted at `/console`
+
+The last major gap from the project-completion audit that also produced
+the KYC and Risk-screen entries below: `services/admin/app.py` has been a
+JSON API only since Phase 7, with every screen idea.md's own admin-panel
+table (§6231: dashboard, users, rounds, rooms, payments, reports, risk,
+audit log) describes never actually reachable except via curl or a test
+client. Built the real frontend for it.
+
+**Approach**: `web/admin/` -- plain HTML/CSS/vanilla JS, ES modules, no
+framework and no build step, the exact same approach `web/miniapp/`
+already established for the player-facing Mini App rather than
+introducing a second, inconsistent frontend stack for one more surface.
+One shell page (`index.html`) with a login screen and an app screen;
+`js/app.js` toggles between screen modules (`js/screens/*.js`, one per
+nav item) that each own their own render/fetch/error-handling, calling
+straight back into the same-origin admin API (`js/api.js`'s thin `fetch`
+wrapper, bearer token in `localStorage`). Covers all eight nav items:
+dashboard, users (search, detail, adjust balance, set status, set KYC
+level, ledger history), payments (withdrawal review queue, approve
+/reject), rounds (list, detail, fairness verification, void), rooms
+(list, create, activate/deactivate), reports (GGR, LTV, retention),
+risk (both screens from the entry below), and the audit log.
+
+**Mounted at `/console`, not `/`**: `services/admin/app.py` already
+serves a JSON API from `/`, so the frontend needed its own path (unlike
+`services/gateway/app.py`, which has nothing else living at `/` for the
+Mini App's own static mount to collide with). Protected by a new
+`_console_frontend_ip_allowlist` middleware, not by `Depends()` the way
+every API route is -- a plain `StaticFiles` mount has no dependency
+-injection point of its own to run the allowlist check through, which
+is exactly the same gap `/metrics` and `/auth/login` were each already
+caught with in earlier passes (see their own code comments). Spec
+section 9.2 asks the *whole* admin panel to sit behind an IP allowlist,
+not just its API half.
+
+**A real bug this caught**: the first real-browser pass (not just curl)
+found that the login screen never actually disappeared after a
+successful login -- `#login-screen` and `#app-shell` toggle via the
+`hidden` attribute in `app.js`, but `admin.css` gave each an
+unconditional `display: flex`/`display: grid` rule keyed off a bare ID
+selector, which outranks the browser's own `[hidden] { display: none }`
+(an ID selector beats an attribute selector on specificity) -- so
+setting `.hidden = true` silently did nothing and the login card stayed
+stacked on top of the dashboard underneath it. Fixed by scoping both
+rules to `:not([hidden])` instead of fighting the attribute's own
+specificity. Exactly the kind of bug curl or an API-level test would
+never catch, and the reason this session's own discipline requires a
+real browser pass for UI work, not just a green test suite.
+
+**Verification**: a real Playwright walkthrough (Chromium, the same
+browser this repo's own e2e tests already use) against the live dev
+database: create a real admin user, log in through the actual form
+(username + password + real TOTP code), visit all eight screens, run a
+real search that returns real users, open a user's detail panel, submit
+the KYC-level action through the UI and confirm both the toast and the
+reloaded panel reflect the change, log out and confirm the login screen
+reappears. Zero console/page errors other than the browser's own
+automatic (and harmless) `/favicon.ico` request. Two new automated
+regression tests mirror the existing `/metrics`/`/auth/login` allowlist
+tests: `test_console_frontend_is_reachable_with_no_allowlist`,
+`test_console_frontend_is_blocked_by_the_ip_allowlist` -- the latter
+confirmed to genuinely fail (404, no mount at all) against the
+pre-change file. Full clean-slate rebuild: `docker compose down -v` ->
+`up -d` -> `alembic upgrade head` -> `mypy` clean (63 source files) ->
+full default suite 747 passed (up from 745), 13 deselected -> `-m load`
+2 failures, both `test_gateway_fanout.py`/`test_load_multiroom.py`
+latency-budget tests exceeding budget under confirmed real host
+contention (`uptime` load average ~1.3, unrelated `santim-commerce-*`/
+`spos-*` containers active) -- the same well-documented pattern from
+throughout this session, and this turn touched no gateway/fanout code
+at all -> `-m chaos_infra` 1 passed -> `-m e2e` 7 passed.
+
+---
+
 ## 2026-08-26 — Risk screen backend (spec 8.4/6231) and the missing withdrawal-velocity gate
 
 Continuing the same project-completion audit that found the KYC gap
