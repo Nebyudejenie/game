@@ -215,6 +215,86 @@ async def test_two_simultaneous_auto_mark_winners_both_split_derash(pool, redis,
         await asyncio.wait_for(task, timeout=15)
 
 
+async def test_an_unexpected_exception_during_auto_claim_does_not_crash_the_room(
+    pool, redis, card_pool, conn, monkeypatch
+):
+    # Regression: a real code review pass caught that _call_next_number()'s
+    # auto-claim scan had no exception isolation at all, unlike
+    # _handle_command()'s own identical fix for the manual command path
+    # (see its own comment there). An unexpected exception from claim() --
+    # realistically _record_claim_attempt()'s own audit-log write, the one
+    # real DB call left unguarded in claim() -- propagated straight out of
+    # this loop, through _call_next_number(), _run_running()'s bare for
+    # loop, and run_forever()'s own while loop, killing this room's entire
+    # engine task. Nothing restarts it: the round would sit stuck until a
+    # *different* engine worker started and recovery.py's crash sweep
+    # found it -- which VOIDS AND REFUNDS the round rather than resuming
+    # it, so the legitimate winner would lose their win entirely, along
+    # with every other player in the room losing their round to a refund,
+    # over one exception.
+    #
+    # Same bingo.winning_patterns() monkeypatch technique as the test
+    # above, for the same reason: makes exactly one real, real-joined
+    # player's card a deterministic immediate winner, so the auto-claim
+    # scan's only ever call to claim() is fully predictable -- no reliance
+    # on the real card pool's draw-order luck to land a specific player's
+    # win on a specific call.
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, call_interval_ms=15
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        user_a = await create_funded_user(conn)
+        user_b = await create_funded_user(conn)
+        card_a, card_b = 1, 2
+        grid_a = card_pool[card_a]
+        winning_pattern = bingo.Pattern(name="row_0", kind="row", cells=((0, 0), (0, 1), (0, 2), (0, 3), (0, 4)))
+
+        def fake_winning_patterns(grid, called, enabled):
+            return [winning_pattern] if grid is grid_a else []
+
+        assert (await engine.join(user_a, card_a, auto_mark=True)).ok
+        assert (await engine.join(user_b, card_b, auto_mark=True)).ok
+
+        real_claim = engine.claim
+        call_count = 0
+
+        async def flaky_claim(user_id, *, source="manual"):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("simulated bug in claim()")
+            return await real_claim(user_id, source=source)
+
+        await wait_until(lambda: engine.status == "running", timeout=5)
+        monkeypatch.setattr(round_engine.bingo, "winning_patterns", fake_winning_patterns)
+        monkeypatch.setattr(engine, "claim", flaky_claim)
+
+        await wait_until(lambda: engine.status == "idle" and engine.round_id is None, timeout=15)
+
+        # The whole point of isolation: the engine task survived the
+        # exception instead of dying and waiting for recovery.py's next
+        # crash sweep to void and refund the round.
+        assert not task.done()
+        assert call_count >= 2, "user_a's failed auto-claim was never retried on a later call"
+
+        round_row = await pool.fetchrow(
+            "SELECT id, status FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1", room_id
+        )
+        assert round_row["status"] == "done"  # not voided/refunded
+        winners = await pool.fetch(
+            "SELECT user_id FROM round_winners WHERE round_id = $1", round_row["id"]
+        )
+        # user_a still won -- the retry actually recovered the claim, not
+        # just avoided crashing while silently losing it.
+        assert {w["user_id"] for w in winners} == {user_a}
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
 async def test_same_user_double_claim_race_settles_exactly_once(pool, redis, card_pool, conn):
     """Regression test: a real crash found by the Mini App's E2E test.
 

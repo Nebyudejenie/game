@@ -5,6 +5,70 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-26 — Auto-claim scan no longer crashes the whole room on an unexpected exception
+
+Tenth fix from the fresh `/code-review high` pass, revisited on request.
+Turned out more severe than the finding's own framing suggested.
+
+**The bug**: `_call_next_number()`'s auto-claim scan (`round_engine.py`)
+looped over every `auto_mark`-enabled entry and called `self.claim(user_id,
+source="auto")` for anyone with a winning pattern, with no exception
+handling around that call at all -- unlike `_handle_command()`, the
+manual/gateway command path, which already wraps every command in `try
+/except Exception:` for exactly this reason ("One bad command must fail
+that command, not the room"). An unexpected exception from `claim()` --
+realistically its own `_record_claim_attempt()` audit-log write, the one
+real DB call `claim()` leaves unguarded -- didn't just skip *later*
+entries in the same scan: it propagated straight through
+`_call_next_number()`, `_run_running()`'s bare `for` loop, and
+`run_forever()`'s own `while` loop, killing the room's entire engine
+`asyncio.Task`. Nothing restarts it. The round sits stuck until a
+*different* engine worker starts and `recovery.py`'s crash sweep finds it
+-- which **voids and refunds** the round rather than resuming it, so the
+legitimate winner loses their win entirely, and every other player in the
+room loses their round to a refund, over one exception.
+
+**Fixed**: wrapped the `claim()` call in `try/except Exception:`,
+matching `_handle_command()`'s own established pattern and logging via
+`logger.exception()` the same way. On failure, also removes `user_id`
+from `_auto_claimed` so the *next* number call retries them: `claim()`
+raising means it never reached its own state-mutating section (that
+happens well after the one DB write that can actually fail, per its own
+control flow), so nothing about the round was left inconsistent -- the
+user's winning pattern is exactly as valid on the next call as it was on
+this one, and bingo patterns only ever gain numbers, never lose them.
+
+Added `test_an_unexpected_exception_during_auto_claim_does_not_crash_the_
+room` to `tests/integration/test_round_engine.py`, reusing the
+`bingo.winning_patterns()` monkeypatch technique from the sibling
+`test_two_simultaneous_auto_mark_winners_both_split_derash` test to make
+exactly one real, real-joined player's card a deterministic immediate
+winner -- no reliance on the real card pool's draw-order luck to land a
+specific player's win on a specific call. Verified the regression test is
+real: `git stash push` on just `round_engine.py` reverted to the old,
+unguarded code, reran -- failed with the `RuntimeError` propagating all
+the way through `run_forever()` and killing the engine task, exactly as
+the bug describes -- then `git stash pop` to restore the fix.
+
+**Full clean-slate rebuild**: `mypy` clean (63 source files) → `pytest
+tests/` (731 passed, up from 730) → `-m load`: the same already
+-documented shared-host-contention pattern from the two prior entries,
+worse at first (3 failures, load average 2.51 on this 4-core host,
+confirmed via `docker ps` showing `spos-backend` restarting again) then
+narrowing to 1 as load settled to 1.22 -- never a test related to this
+fix, which touches only exception handling around an already-existing
+`claim()` call with zero behavioral change on the success path (a
+try/except wrapping identical code is a no-op when nothing raises) → `-m
+chaos_infra` (1 passed) → `-m e2e`: `test_miniapp_full_gameplay_flow`
+flaked three different ways across repeated full-batch runs under the
+same elevated load (a balance mismatch, a hidden `#your-card-section`,
+a `#screen-game.active` timeout) while passing clean every time it ran in
+isolation or once load dropped -- consistent with this session's already
+-established "varying, non-reproducible Playwright symptoms under host
+load, always clean on rerun" pattern, not a regression: nothing about
+spectator-mode or room-capacity logic is anywhere near this fix. A later
+full `-m e2e` run, once load had settled, passed 7/7 clean.
+
 ## 2026-08-26 — Gave `test_full_round_35_players_ledger_balances` real lobby margin
 
 A follow-up, not from the review catalogue: surfaced incidentally while

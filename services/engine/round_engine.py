@@ -654,7 +654,40 @@ class RoundEngine:
             grid = self._card_pool[entry.card_no]
             if bingo.winning_patterns(grid, self._called, self._room.win_patterns):
                 self._auto_claimed.add(user_id)
-                await self.claim(user_id, source="auto")
+                try:
+                    await self.claim(user_id, source="auto")
+                except Exception:
+                    # A code review pass caught this had no isolation at
+                    # all, unlike _handle_command()'s own identical fix
+                    # for the manual command path (see its own comment
+                    # there): an unexpected exception from claim() --
+                    # realistically _record_claim_attempt()'s own
+                    # audit-log write, the one real DB call left
+                    # unguarded in claim() -- propagated straight out of
+                    # this loop, through _call_next_number(),
+                    # _run_running()'s bare for loop, and run_forever()'s
+                    # own while loop, killing this room's entire engine
+                    # task. Nothing restarts it: the round sits stuck
+                    # until a *different* engine worker starts and
+                    # recovery.py's crash sweep finds it -- which VOIDS
+                    # AND REFUNDS the round rather than resuming it, so
+                    # the legitimate winner loses their win entirely,
+                    # along with every other player in the room losing
+                    # their round to a refund, over one exception.
+                    # Un-claims user_id so the *next* call retries them --
+                    # claim() raising means it never reached its own
+                    # state-mutating section (that happens well after the
+                    # one DB write that can actually fail), so nothing
+                    # about the round was left inconsistent; this user's
+                    # winning pattern is still exactly as valid on the
+                    # next call as it was on this one.
+                    self._auto_claimed.discard(user_id)
+                    logger.exception(
+                        "engine_auto_claim_raised",
+                        room_id=self._room.id,
+                        round_id=round_id,
+                        user_id=user_id,
+                    )
 
     async def _finalize_after_window(self, deadline: float) -> None:
         remaining = deadline - time.monotonic()
