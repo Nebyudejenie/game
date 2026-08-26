@@ -5,6 +5,56 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-26 — `recovery.py`'s crash-recovery sweep batched into two queries instead of `1 + N`
+
+Two catalogue findings from the fresh `/code-review high` pass, closed the
+same turn -- one turned out moot on investigation, the other real but
+already fixed, and the third (this one) genuinely needed doing.
+
+**Investigated and found moot**: "advisory-lock namespacing" (a concern
+that `round_engine.py`'s per-user `pg_advisory_xact_lock` -- taken in
+`join()` to close a daily-loss-cap TOCTOU race across a user joining two
+rooms at once -- might now collide with a second, newer call site). A
+full-codebase grep found exactly one real advisory-lock call site, same
+as the comment already claims; `git log -S"pg_advisory_xact_lock"` shows
+only the one commit that ever introduced it. No second call site exists,
+so there is nothing for `user_id` to collide with.
+
+**Investigated and found already fixed**: whether that same advisory lock
+had any test coverage. It does --
+`tests/integration/test_responsible_gaming.py`'s `test_loss_cap_holds_
+under_two_concurrent_joins_in_different_rooms` fires two real concurrent
+`engine.join()` calls (`asyncio.gather`) against two different rooms for
+the same user with a cap deliberately set so either stake alone passes
+but both together would exceed it, and asserts exactly one succeeds with
+the loser's reason as `"loss_limit_reached"`. Confirmed it currently
+passes.
+
+**Actually fixed**: `recover_orphaned_rounds()` did one `SELECT max(seq)
+...` round-trip per stuck round found, inside a loop -- a real N+1. This
+function runs synchronously at `EngineWorker.start()`, before any room
+can be claimed, so its own runtime directly delays the whole platform
+coming back up after a real incident (many engines crashing together
+would leave rounds stuck across many rooms at once, exactly the scenario
+this function exists to recover from). Replaced with one batched query
+(`GROUP BY room_id`) covering every room a stuck round belongs to,
+scoped to just those room_ids via the same `room_id` column `ix_rounds_
+room_status` already indexes -- not a full scan of every round this
+platform has ever run. A pure refactor, not a behavior change: verified
+by running the existing test suite unchanged rather than a revert-and
+-confirm-it-fails step, since nothing was broken to begin with --
+`test_stuck_round_is_still_recovered_after_the_room_gets_a_newer_round`
+in particular already exercises the exact multi-round-per-room case this
+refactor needs to keep handling correctly, and passed identically before
+and after.
+
+**Full clean-slate rebuild**: `mypy` clean (63 source files) → `pytest
+tests/` (732 passed, same count -- a pure refactor) → `-m load`: the same
+already-documented shared-host-contention pattern, unrelated to a change
+that touches only a startup-time SQL query shape → `-m chaos_infra` (1
+passed -- exercises `recovery.py` directly via a real crash-and-restart)
+→ `-m e2e` (7/7 passed).
+
 ## 2026-08-26 — CI/CD: GitHub Actions, GHCR, and a self-hosted-runner deploy to Proxmox
 
 Closes out the user's "do ci cd too" request. Two decisions genuinely
