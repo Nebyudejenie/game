@@ -1,0 +1,104 @@
+name: CD
+
+# Runs only after CI (ci.yml) genuinely succeeds on main -- workflow_run,
+# not a plain push trigger, so a broken build can never reach production
+# just because it landed on main; there is no path from a red CI run to a
+# deploy. Two jobs: build-and-push (GitHub-hosted, needs real internet to
+# reach GHCR) then deploy (the self-hosted runner living on the actual
+# Proxmox server this deploys to -- see the setup notes below).
+#
+# --- One-time setup this workflow depends on (not something this file
+# can do for you) ---
+#
+# 1. Register a self-hosted runner for this repo: Settings > Actions >
+#    Runners > New self-hosted runner, then run the setup script it gives
+#    you on the Proxmox VM/LXC that will actually run the app. No custom
+#    label needed -- the `runs-on: self-hosted` below matches any runner
+#    registered to this repo.
+# 2. On that same server, in this repo's checkout, create deploy/.env
+#    from deploy/.env.prod.example with real values (POSTGRES_PASSWORD,
+#    PHONE_ENCRYPTION_KEY, etc. -- never commit it). checkout's own
+#    `clean: false` below is what lets this file survive every future
+#    deploy instead of being wiped by the next checkout.
+# 3. Optional but recommended for a real-money system: Settings >
+#    Environments > New environment named "production", with required
+#    reviewers turned on -- the `environment: production` on the deploy
+#    job below is what that protects. With no reviewers configured, this
+#    environment is a no-op label and deploys run straight through.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  build-and-push:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: image
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${{ github.repository }}:${{ github.event.workflow_run.head_sha }}"
+          LATEST="ghcr.io/${{ github.repository }}:latest"
+          docker build -t "$IMAGE" -t "$LATEST" .
+          docker push "$IMAGE"
+          docker push "$LATEST"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: build-and-push
+    runs-on: self-hosted
+    environment: production
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          # Preserves deploy/.env (gitignored, created once by hand on
+          # this server per the setup notes above) across every deploy --
+          # checkout's default behavior wipes untracked files, which
+          # would otherwise delete real production secrets on every run.
+          clean: false
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull and restart
+        working-directory: deploy
+        env:
+          JOBINGO_IMAGE: ${{ needs.build-and-push.outputs.image }}
+        run: |
+          set -euo pipefail
+          if [ ! -f .env ]; then
+            echo "deploy/.env is missing -- copy deploy/.env.prod.example to deploy/.env" >&2
+            echo "on this server and fill in real values before the first deploy." >&2
+            exit 1
+          fi
+          docker compose -f docker-compose.prod.yml pull
+          docker compose -f docker-compose.prod.yml up -d --remove-orphans
+
+      - name: Prune old images
+        run: docker image prune -f --filter "until=168h"

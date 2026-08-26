@@ -110,6 +110,48 @@ you do need the actual `.env` file copied over for anything that touches
 registration to run outside the test suite (which sets its own fixed key
 directly, so `pytest` works with no `.env` at all).
 
+## CI/CD
+
+**CI** (`.github/workflows/ci.yml`) runs on every push and pull request
+against `main`: `mypy --strict`, the default test suite, `-m chaos_infra`,
+`-m e2e` (all blocking), `-m load` (informational only — see the job's own
+comment for why an absolute latency budget isn't meaningful on a shared
+GitHub-hosted runner), and a real `docker build` of the production image.
+Needs no setup — it's a normal GitHub Actions workflow using GitHub-hosted
+runners.
+
+**CD** (`.github/workflows/cd.yml`) builds and pushes a Docker image to
+GHCR, then deploys it — but only after CI genuinely succeeds on `main`
+(`workflow_run`, not a plain push trigger; there is no path from a red CI
+run to a deploy). The deploy step runs on a **self-hosted runner** on the
+actual target server, since GitHub's own cloud runners can't reach a
+private/local machine directly. One-time setup before the first deploy
+works:
+
+1. Register a self-hosted runner for this repo: **Settings → Actions →
+   Runners → New self-hosted runner**, then run the setup script it gives
+   you on the server that will actually run the app. No custom label
+   needed.
+2. On that same server, in this repo's checkout, copy
+   `deploy/.env.prod.example` to `deploy/.env` and fill in real values
+   (`POSTGRES_PASSWORD`, `PHONE_ENCRYPTION_KEY`, etc.). Never commit it —
+   the deploy job's checkout step deliberately skips its usual clean-working
+   -tree behavior so this file survives every future deploy instead of
+   being wiped.
+3. Optional but recommended for a real-money system: **Settings →
+   Environments → New environment** named `production`, with required
+   reviewers turned on. This gates the deploy job behind manual approval
+   even after CI passes — genuinely worth it before this is handling real
+   transactions. With no reviewers configured, deploys run straight
+   through once CI is green.
+
+`deploy/docker-compose.prod.yml` is the actual production stack: Postgres,
+Redis, a one-shot migration job every other service waits on, and all six
+deployable units (`Dockerfile` builds one shared image; each service just
+picks its own command against it) — gateway/admin/payments/bot on ports
+8000-8003, engine-worker/payout-worker's `/metrics` endpoints (the only
+HTTP surface those two have) on 8004-8005.
+
 ## What's actually implemented
 
 **Foundations (Phase 0):**

@@ -1,0 +1,132 @@
+name: jobingo-prod
+
+# Production stack: Postgres + Redis, a one-shot migration job, and all six
+# deployable units (Dockerfile builds one shared image; each service below
+# just picks its own command against it) -- run by the self-hosted GitHub
+# Actions runner on the Proxmox server this deploys to (see
+# .github/workflows/cd.yml), not by a developer's own machine the way
+# deploy/docker-compose.yml is.
+#
+# Needs a real .env file next to this one (never committed -- see
+# .env.example for every variable this reads, and README.md's "Deploying"
+# section for how the CD workflow gets it onto the server). POSTGRES_
+# PASSWORD has no default on purpose: an empty default here would be a
+# real, silent security hole in a file whose whole purpose is production.
+#
+# JOBINGO_IMAGE is set by the CD workflow to the exact tag it just built
+# and pushed (see cd.yml) -- defaulting to :latest here only so this file
+# is still directly runnable by hand (`docker compose -f deploy/docker
+# -compose.prod.yml up -d`) against whatever was last pulled.
+
+x-app-env: &app-env
+  env_file: .env
+  environment:
+    DATABASE_URL: postgresql://${POSTGRES_USER:-jobingo}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/${POSTGRES_DB:-jobingo}
+    DATABASE_URL_SYNC: postgresql+psycopg2://${POSTGRES_USER:-jobingo}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/${POSTGRES_DB:-jobingo}
+    REDIS_URL: redis://redis:6379/0
+
+x-app-depends-on: &app-depends-on
+  postgres:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  migrate:
+    condition: service_completed_successfully
+
+services:
+  postgres:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-jobingo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-jobingo}
+    volumes:
+      - jobingo_prod_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-jobingo} -d $${POSTGRES_DB:-jobingo}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    volumes:
+      - jobingo_prod_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot: applies every pending migration, then exits 0. Every real
+  # service below waits on this exiting successfully (service_completed_
+  # successfully), not just on Postgres being reachable -- so a fresh
+  # deploy never races app code against a schema it doesn't match yet.
+  migrate:
+    image: ${JOBINGO_IMAGE:-jobingo:latest}
+    restart: "no"
+    <<: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["alembic", "-c", "migrations/alembic.ini", "upgrade", "head"]
+
+  gateway:
+    image: ${JOBINGO_IMAGE:-jobingo:latest}
+    restart: unless-stopped
+    <<: *app-env
+    depends_on: *app-depends-on
+    ports:
+      - "8000:8000"
+    command: ["uvicorn", "services.gateway.app:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  admin:
+    image: ${JOBINGO_IMAGE:-jobingo:latest}
+    restart: unless-stopped
+    <<: *app-env
+    depends_on: *app-depends-on
+    ports:
+      - "8001:8001"
+    command: ["uvicorn", "services.admin.app:app", "--host", "0.0.0.0", "--port", "8001"]
+
+  payments:
+    image: ${JOBINGO_IMAGE:-jobingo:latest}
+    restart: unless-stopped
+    <<: *app-env
+    depends_on: *app-depends-on
+    ports:
+      - "8002:8002"
+    command: ["uvicorn", "services.payments.app:app", "--host", "0.0.0.0", "--port", "8002"]
+
+  bot:
+    image: ${JOBINGO_IMAGE:-jobingo:latest}
+    restart: unless-stopped
+    <<: *app-env
+    depends_on: *app-depends-on
+    ports:
+      - "8003:8003"
+    command: ["python", "-m", "services.bot.app"]
+
+  engine-worker:
+    image: ${JOBINGO_IMAGE:-jobingo:latest}
+    restart: unless-stopped
+    <<: *app-env
+    depends_on: *app-depends-on
+    ports:
+      - "8004:8004"
+    command: ["python", "-m", "services.engine.worker"]
+
+  payout-worker:
+    image: ${JOBINGO_IMAGE:-jobingo:latest}
+    restart: unless-stopped
+    <<: *app-env
+    depends_on: *app-depends-on
+    ports:
+      - "8005:8005"
+    command: ["python", "-m", "services.payments.payout_worker"]
+
+volumes:
+  jobingo_prod_postgres_data:
+  jobingo_prod_redis_data:

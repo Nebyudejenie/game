@@ -1,0 +1,131 @@
+name: CI
+
+# Every push and PR against main runs the real correctness gate: mypy,
+# the default test suite (unit + integration, against a real Postgres +
+# Redis -- exactly deploy/docker-compose.yml's own dev stack, same ports),
+# chaos_infra (a real mid-test Redis restart), e2e (a real headless
+# Chromium against the real Mini App), and a real `docker build` of the
+# production image. load tests run too, but never block merges -- their
+# own test-marker docstring in pyproject.toml already explains why:
+# absolute latency numbers are only meaningful on a dedicated, unshared
+# runner, and a GitHub-hosted one is neither of those things.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Start Postgres and Redis
+        run: docker compose -f deploy/docker-compose.yml up -d postgres redis
+
+      - name: Wait for Postgres
+        run: |
+          for i in $(seq 1 30); do
+            if docker exec jobingo-postgres-1 pg_isready -U jobingo -d jobingo; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "postgres did not become ready in time" >&2
+          exit 1
+
+      - name: Apply migrations
+        run: alembic -c migrations/alembic.ini upgrade head
+
+      - name: Type-check (mypy --strict)
+        run: mypy
+
+      - name: Run unit + integration tests
+        run: pytest tests/ -v
+
+      - name: Run chaos_infra tests
+        # Always alone, never batched with anything else -- restarts the
+        # real docker-compose redis service mid-test, which breaks every
+        # session-scoped fixture built on it for the rest of the pytest
+        # process, not just its own test (pyproject.toml's own marker
+        # docstring explains this in full).
+        run: pytest tests/ -m chaos_infra -v
+
+      - name: Install Playwright's Chromium
+        run: playwright install --with-deps chromium
+
+      - name: Run e2e tests
+        run: pytest tests/ -m e2e -v
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f deploy/docker-compose.yml down -v
+
+  load-test:
+    runs-on: ubuntu-latest
+    # Real numbers, worth seeing on every run -- but never a merge blocker.
+    # A GitHub-hosted runner's own CPU/network is shared with whatever else
+    # is on that host at the time, the same "clean reading needs a
+    # dedicated, unshared process" reasoning this repo's own load tests are
+    # already built around (see their marker docstring) -- an absolute
+    # latency budget assertion on infrastructure like that would be noise,
+    # not signal.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Start Postgres and Redis
+        run: docker compose -f deploy/docker-compose.yml up -d postgres redis
+
+      - name: Wait for Postgres
+        run: |
+          for i in $(seq 1 30); do
+            if docker exec jobingo-postgres-1 pg_isready -U jobingo -d jobingo; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+
+      - name: Apply migrations
+        run: alembic -c migrations/alembic.ini upgrade head
+
+      - name: Run load tests
+        run: pytest tests/ -m load -v -s
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f deploy/docker-compose.yml down -v
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the production image
+        # Verifies the image actually builds on every push/PR, the same
+        # way the two real packaging bugs in DECISIONS.md's own history
+        # were caught -- by building it, not by inspecting the Dockerfile.
+        # Not pushed anywhere from here; cd.yml's own build-and-push job
+        # is what actually publishes a real, deployable tag.
+        run: docker build -t jobingo:ci-check .

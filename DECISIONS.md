@@ -5,6 +5,65 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-26 — CI/CD: GitHub Actions, GHCR, and a self-hosted-runner deploy to Proxmox
+
+Closes out the user's "do ci cd too" request. Two decisions genuinely
+needed the user's own input rather than a guess, asked directly: where
+this actually deploys (a self-hosted server on their own Proxmox box, not
+a cloud platform), and how the deploy step updates it (build + push an
+image to a registry, then pull + run it, rather than the simpler
+`git pull` + rebuild-in-place alternative offered).
+
+**`.github/workflows/ci.yml`**: `mypy --strict`, the default suite,
+`-m chaos_infra`, and `-m e2e` all block merges; `-m load` runs too but
+`continue-on-error: true` -- a GitHub-hosted runner's own CPU/network is
+shared with whatever else is on that host at the time, the exact "clean
+reading needs a dedicated, unshared process" reasoning `pyproject.toml`'s
+own `load` marker docstring is already built around; an absolute latency
+assertion on infrastructure like that would be noise, not a real signal,
+the same conclusion this session's own dev-sandbox load-test flakiness
+kept reinforcing throughout every other entry in this file that mentions
+shared-host contention. A real `docker build` of the production image
+runs too (not pushed anywhere from CI -- cd.yml's own job is what
+publishes a real, deployable tag), so a packaging regression like the
+`aiogram`/`httpx` one two entries back would be caught on the very next
+push, not discovered by someone building it by hand months later.
+
+**`.github/workflows/cd.yml`**: triggered by `workflow_run` watching CI,
+not a plain `push` trigger -- there is no path from a red CI run to a
+deploy, only from a genuinely green one on `main`. `build-and-push` runs
+on a normal GitHub-hosted runner (needs real internet to reach GHCR) and
+tags the image with both the commit SHA and `:latest`. `deploy` runs on a
+**self-hosted runner** registered directly on the target server, since
+GitHub's own cloud runners have no path to a private/local machine --
+confirmed with the user this runner isn't set up yet; the workflow's own
+header comment walks through registering one, plus the two setup steps a
+workflow file genuinely can't do for the operator (creating
+`deploy/.env` from the new `deploy/.env.prod.example` template on the
+server itself, and optionally configuring a GitHub `production`
+Environment with required reviewers -- flagged as worth turning on given
+this is a real-money system, but left as the user's own call, not forced).
+`clean: false` on the deploy job's checkout is what lets `deploy/.env`
+survive every future deploy -- `actions/checkout`'s default behavior
+would otherwise wipe it (an untracked file) on every single run.
+
+**`deploy/docker-compose.prod.yml`**: Postgres, Redis, a one-shot
+`migrate` service every real service `depends_on` with `condition:
+service_completed_successfully` (so a fresh deploy can never race app
+code against a schema it doesn't match yet), and all six deployable
+units against the one image the Dockerfile builds -- YAML anchors
+(`x-app-env`, `x-app-depends-on`) instead of repeating the same
+`DATABASE_URL`/`REDIS_URL`/`depends_on` block six times. `JOBINGO_IMAGE`
+is set by the CD workflow to the exact tag it just pushed; defaults to
+`:latest` so the file is still directly runnable by hand. Validated for
+real: `docker compose -f docker-compose.prod.yml config` against a throwaway
+test `.env`, confirming every anchor merges and every `${...}` interpolates
+exactly as intended -- not just written and assumed correct, the same
+discipline as the Dockerfile and worker entrypoints before it. Both
+workflow files also passed `actionlint` (a real static analyzer for GitHub
+Actions YAML, downloaded and run directly, not just eyeballed) with zero
+findings.
+
 ## 2026-08-26 — Metrics endpoints for the two workerless processes; a real bug in the shared test DB found by running the full suite against the fix
 
 Verifying the Dockerfile's own build (previous entry) surfaced two more
