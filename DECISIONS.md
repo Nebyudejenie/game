@@ -5,6 +5,84 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-26 — 18+ age-gate self-declaration at registration (spec section 12)
+
+A deep-read status audit against every section of the spec (not just this
+session's own summarized memory of prior work) surfaced one real,
+previously-undocumented gap: spec 12's age-gate bullet is actually two
+separate controls -- "18+ declaration at registration, ID verification
+at KYC level 2" -- and only the second half had ever been tracked
+(`kyc_level`'s missing-writer gap, closed earlier this session, plus its
+own still-open document-verification-method decision). The first half, a
+plain self-declaration checkbox-equivalent at registration, simply never
+existed: no column recorded it, no prompt text mentioned it.
+
+**What was built**: the smallest correct integration point, not a new
+mechanism. `services/bot/registration.py`'s `register_from_contact()` --
+the one function that actually completes registration, on both of its
+write paths (a brand-new `users` row, and attaching a phone to an
+already-existing phoneless row left by the gateway's lazy
+`get_or_create_user_by_telegram_id()`) -- now sets a new
+`users.age_confirmed_at` timestamp (migration `d812e3d87349`) the moment
+registration first completes, `COALESCE`d against the existing value on
+both paths so a later idempotent re-registration can never overwrite the
+original declaration. The `register.prompt` i18n string (both `am.json`
+and `en.json`) shown alongside the existing share-contact button now
+states the 18+ requirement explicitly and frames sharing the contact as
+the confirmation -- the same "by continuing you confirm..." pattern most
+consent flows use, not a separate button, a new Redis pending-state
+module, or aiogram's FSM (none of which this bot uses anywhere else, and
+introducing one for a single declaration step would be a new mechanism
+where the existing single-message-plus-existing-button flow already
+says what's needed).
+
+**Deliberately not built**: an explicit "I am under 18" rejection path.
+Spec 12 asks for a declaration, not a hard input gate -- someone who
+isn't 18+ simply doesn't proceed, the standard shape for this kind of
+consent. Nothing here touches KYC-level identity verification, which
+stays exactly as open as the entry below already documents.
+
+**A real, honest translation caveat**: the Amharic declaration text was
+written carefully but has not been reviewed by a native Amharic speaker
+or legal/compliance counsel -- for a string with actual regulatory
+weight, that review should happen before this reaches real users, the
+same way the whole platform's NLA licensing question stays explicitly
+unclaimed as "done" anywhere in this repo.
+
+**Verification**: `test_new_registration_records_an_age_confirmation_
+timestamp`, `test_completing_a_phoneless_row_also_records_age_
+confirmation`, and `test_re_registering_does_not_reset_the_original_age_
+confirmation_timestamp` in `tests/integration/test_registration.py`;
+`test_start_registration_prompt_includes_the_18_plus_declaration` in
+`tests/integration/test_bot_handlers.py` (a real end-to-end run through
+aiogram's Dispatcher against a fake Telegram session). All four confirmed
+to genuinely fail against the pre-change files via the usual stash
+-revert step. The handler-level test also caught a real, pre-existing
+test-infrastructure fragility along the way: `_settle()`'s fixed 50ms
+sleep is already marginal for a two-message flow given `Notifier`'s own
+enforced ~40ms inter-message pacing gap, and flaked under this sandbox's
+documented host contention when this test ran as part of the full file
+rather than alone. Fixed locally in the one test that actually needs
+both messages (a real deadline poll instead of a fixed sleep), not by
+touching the shared `_settle()` helper 20+ other, single-message-only
+tests already rely on. Also caught: `tests/unit/test_i18n.py::test_
+lookup_in_amharic` hardcoded the old exact `register.prompt` string as
+its lookup-mechanism example; updated to the new real value, since that
+test was never asserting anything about the *content*, only that
+`i18n.t()` retrieves it correctly.
+
+Full clean-slate rebuild: `docker compose down -v` -> `up -d` ->
+`alembic upgrade head` (new migration applies cleanly from a fresh
+database) -> `mypy` clean (64 source files) -> full default suite 751
+passed (up from 747), 13 deselected -> `-m load` 2 failures, both the
+same well-documented `test_gateway_fanout.py`/`test_load_multiroom.py`
+host-contention pattern (confirmed via `uptime`/`docker ps` at the time,
+load average ~2.2, unrelated `santim-commerce-*`/`spos-*` containers
+active; this turn touched no gateway/fanout code) -> `-m chaos_infra` 1
+passed -> `-m e2e` 7 passed.
+
+---
+
 ## 2026-08-26 — Admin console web frontend (`web/admin/`), mounted at `/console`
 
 The last major gap from the project-completion audit that also produced

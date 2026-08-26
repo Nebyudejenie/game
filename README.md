@@ -466,6 +466,19 @@ action — an admin promotes a user's level only after reviewing their
 documents through some out-of-band channel, and which channel that is
 remains a genuine, unmade product decision. See `DECISIONS.md`.
 
+Spec section 12's other age-related control -- "18+ declaration at
+registration" -- is also now real and separate from the KYC-level
+pipeline above: `users.age_confirmed_at`, set the moment registration
+first completes (`services/bot/registration.py`), alongside declaration
+text now shown in the registration prompt itself
+(`register.prompt` in both locale files). This is a self-declaration, not
+identity verification -- the same distinction spec 12 itself draws
+between "age gate" and "ID verification at KYC level 2." Still open:
+dedicated problem-gambling helpline links in Amharic (`/support` only
+points to a generic contact today), and a real automated device
+-fingerprint collusion signal (no fingerprint is collected anywhere in
+the Mini App). See `DECISIONS.md`.
+
 **Admin console (Phase 7):**
 - **`services/admin/auth.py`** — a completely separate authentication path
   from players: username + bcrypt password + TOTP 2FA, Redis-backed session

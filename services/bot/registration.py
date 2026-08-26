@@ -22,6 +22,18 @@ mere row existence) -- get_registered_user() returns None for it, and
 register_from_contact() completes registration in place by attaching the
 just-validated contact's phone to that same row, rather than creating a
 duplicate account or crashing on the missing phone.
+
+Spec section 12's age gate ("18+ declaration at registration") is recorded
+here too: `users.age_confirmed_at` is set the moment registration first
+completes, on the theory that the declaration text shown alongside the
+share-contact prompt (services/bot/keyboards.py's registration_keyboard,
+services/bot/locales/*.json's `register.prompt`) and the act of actually
+sharing a real, matching contact together constitute the declaration --
+the same "by continuing you confirm..." pattern most consent flows use,
+not a separate confirmation step. `COALESCE`d in both write paths below
+so a user re-registering (already has a phone) or completing a
+previously-phoneless row never has their original declaration timestamp
+overwritten.
 """
 
 from __future__ import annotations
@@ -79,7 +91,8 @@ async def _attach_phone_to_existing_user(
         await pool.execute(
             """
             UPDATE users
-            SET phone_e164_encrypted = $2, phone_lookup_hash = $3, referred_by = COALESCE(referred_by, $4)
+            SET phone_e164_encrypted = $2, phone_lookup_hash = $3, referred_by = COALESCE(referred_by, $4),
+                age_confirmed_at = COALESCE(age_confirmed_at, now())
             WHERE id = $1
             """,
             user_id,
@@ -149,8 +162,9 @@ async def register_from_contact(
     try:
         row = await pool.fetchrow(
             """
-            INSERT INTO users (telegram_id, display_name, phone_e164_encrypted, phone_lookup_hash, referred_by)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO users
+                (telegram_id, display_name, phone_e164_encrypted, phone_lookup_hash, referred_by, age_confirmed_at)
+            VALUES ($1, $2, $3, $4, $5, now())
             RETURNING id, display_name
             """,
             sender_telegram_id,

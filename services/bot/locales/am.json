@@ -4,7 +4,7 @@
 
   "register.button": "📝 ይመዝገቡ",
   "register.instructions_button": "📖 መመሪያ",
-  "register.prompt": "ለመመዝገብ ስልክ ቁጥርዎን ያጋሩ።",
+  "register.prompt": "ጆ ቢንጎ ዕድሜያቸው 18 እና ከዚያ በላይ ለሆኑ ተጫዋቾች ብቻ ነው። ለመመዝገብ ስልክ ቁጥርዎን ያጋሩ - ይህንን በማድረግዎ ዕድሜዎ ቢያንስ 18 መሆኑን ያረጋግጣሉ።",
   "register.use_button": "እባክዎ 'ስልክ ቁጥር አጋራ' የሚለውን ቁልፍ ይጠቀሙ።",
   "register.contact_mismatch": "የተጋራው ስልክ ቁጥር የእርስዎ አይደለም። እባክዎ የራስዎን ስልክ ቁጥር ብቻ ያጋሩ።",
   "register.invalid_phone": "ይህ ትክክለኛ የኢትዮጵያ ስልክ ቁጥር አይመስልም። እባክዎ እንደገና ይሞክሩ።",

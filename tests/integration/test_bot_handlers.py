@@ -259,6 +259,34 @@ async def test_start_shows_registration_prompt_for_new_user(bot_ctx):
     assert "register" in combined.lower() or "መመዝገብ" in combined or "ስልክ" in combined
 
 
+async def test_start_registration_prompt_includes_the_18_plus_declaration(bot_ctx):
+    # spec section 12's age gate: the registration prompt a brand-new user
+    # sees before sharing their contact must state the 18+ requirement,
+    # not just silently register anyone who taps the button.
+    #
+    # cmd_start() sends two messages back to back (welcome, then the
+    # registration prompt this test cares about), and Notifier enforces a
+    # real inter-message pacing gap (services/bot/notifier.py's own
+    # MIN_INTERVAL_SECONDS) before the second is actually dequeued and
+    # sent -- _settle()'s fixed short sleep is fine for every other,
+    # single-message assertion in this file, but two messages need a real
+    # deadline poll, not a fixed guess, especially under this sandbox's
+    # documented host contention.
+    import asyncio
+
+    dp, bot, session = bot_ctx
+    telegram_id = next_telegram_id()
+    update = make_text_update(telegram_id, "/start")
+    await dp.feed_update(bot, update)
+
+    deadline = asyncio.get_running_loop().time() + 2.0
+    while len(session.sent) < 2 and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.02)
+
+    combined = " ".join(m.text or "" for m in session.sent)
+    assert "18" in combined
+
+
 async def test_balance_reflects_real_ledger_state(pool, conn, bot_ctx):
     from tests.integration.conftest import fund_user
 

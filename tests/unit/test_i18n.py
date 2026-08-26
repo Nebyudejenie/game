@@ -26,7 +26,10 @@ def test_unsupported_language_falls_back_to_default():
 
 
 def test_lookup_in_amharic():
-    assert i18n.t("register.prompt", "am") == "ለመመዝገብ ስልክ ቁጥርዎን ያጋሩ።"
+    assert i18n.t("register.prompt", "am") == (
+        "ጆ ቢንጎ ዕድሜያቸው 18 እና ከዚያ በላይ ለሆኑ ተጫዋቾች ብቻ ነው። "
+        "ለመመዝገብ ስልክ ቁጥርዎን ያጋሩ - ይህንን በማድረግዎ ዕድሜዎ ቢያንስ 18 መሆኑን ያረጋግጣሉ።"
+    )
 
 
 def test_lookup_in_english():

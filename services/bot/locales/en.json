@@ -4,7 +4,7 @@
 
   "register.button": "📝 Register",
   "register.instructions_button": "📖 Instructions",
-  "register.prompt": "Share your phone number to register.",
+  "register.prompt": "Jo Bingo is for players 18 and older only. Share your phone number to register -- doing so confirms you are at least 18 years old.",
   "register.use_button": "Please use the 'Share Phone Number' button.",
   "register.contact_mismatch": "That's not your own phone number. Please share only your own contact.",
   "register.invalid_phone": "That doesn't look like a valid Ethiopian phone number. Please try again.",

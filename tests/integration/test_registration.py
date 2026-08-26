@@ -212,6 +212,60 @@ async def test_register_from_contact_records_referral_for_a_phoneless_row(pool):
     assert row["referred_by"] == referrer_row["id"]
 
 
+async def test_new_registration_records_an_age_confirmation_timestamp(pool):
+    # spec section 12: "Age gate: 18+ declaration at registration." The
+    # declaration itself is the prompt text shown alongside the
+    # share-contact button (services/bot/locales/*.json's register.prompt)
+    # -- this is the durable record that it was shown and acted on.
+    telegram_id = next_telegram_id()
+    user = await register_from_contact(
+        pool, sender_telegram_id=telegram_id, contact_user_id=telegram_id,
+        contact_phone=unique_phone(), display_name="Nebyu",
+    )
+    row = await pool.fetchrow("SELECT age_confirmed_at FROM users WHERE id = $1", user.id)
+    assert row["age_confirmed_at"] is not None
+
+
+async def test_completing_a_phoneless_row_also_records_age_confirmation(pool):
+    # The other write path -- a Mini-App-first user completing
+    # registration by attaching a phone to their already-existing,
+    # phoneless row -- must record the same declaration, not just the
+    # brand-new-INSERT path above.
+    telegram_id = next_telegram_id()
+    user_id = await _create_phoneless_user(pool, telegram_id)
+
+    await register_from_contact(
+        pool, sender_telegram_id=telegram_id, contact_user_id=telegram_id,
+        contact_phone=unique_phone(), display_name="Mini App User",
+    )
+
+    row = await pool.fetchrow("SELECT age_confirmed_at FROM users WHERE id = $1", user_id)
+    assert row["age_confirmed_at"] is not None
+
+
+async def test_re_registering_does_not_reset_the_original_age_confirmation_timestamp(pool):
+    telegram_id = next_telegram_id()
+    phone = unique_phone()
+    await register_from_contact(
+        pool, sender_telegram_id=telegram_id, contact_user_id=telegram_id,
+        contact_phone=phone, display_name="Nebyu",
+    )
+    first = await pool.fetchrow(
+        "SELECT id, age_confirmed_at FROM users WHERE telegram_id = $1", telegram_id
+    )
+
+    await register_from_contact(
+        pool, sender_telegram_id=telegram_id, contact_user_id=telegram_id,
+        contact_phone=phone, display_name="Nebyu",
+    )
+    second = await pool.fetchrow(
+        "SELECT id, age_confirmed_at FROM users WHERE telegram_id = $1", telegram_id
+    )
+
+    assert first["id"] == second["id"]
+    assert first["age_confirmed_at"] == second["age_confirmed_at"]
+
+
 async def test_register_from_contact_still_rejects_a_phone_already_used_elsewhere_for_a_phoneless_row(pool):
     existing_phone = unique_phone()
     other_id = next_telegram_id()
