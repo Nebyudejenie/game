@@ -16,6 +16,7 @@ from services.engine.round_engine import RoundEngine, load_room_config
 from tests.integration.conftest import (
     create_funded_user,
     create_room,
+    create_user,
     next_telegram_id,
     unique_phone,
 )
@@ -427,6 +428,101 @@ async def test_set_kyc_level_rejects_an_out_of_range_level(pool, conn):
 
     kyc_level = await conn.fetchval("SELECT kyc_level FROM users WHERE id = $1", user_id)
     assert kyc_level == 0
+
+
+async def test_shared_payout_account_clusters_finds_users_sharing_a_payout_destination(pool, conn):
+    # spec 8.4: "Same payout account across multiple accounts -> Link
+    # accounts, flag cluster." Risk screen data, built entirely from
+    # payment_methods -- no new instrumentation needed, unlike the
+    # device-fingerprint half of the same spec rule (see
+    # shared_payout_account_clusters()'s own docstring).
+    shared_ref = f"09{next_telegram_id()}"
+    user_a = await create_user(conn)
+    user_b = await create_user(conn)
+    solo_user = await create_user(conn)
+
+    await conn.execute(
+        "INSERT INTO payment_methods (user_id, kind, account_ref, holder_name) VALUES "
+        "($1, 'telebirr', $3, 'Holder A'), ($2, 'telebirr', $3, 'Holder B')",
+        user_a,
+        user_b,
+        shared_ref,
+    )
+    await conn.execute(
+        "INSERT INTO payment_methods (user_id, kind, account_ref, holder_name) VALUES ($1, 'telebirr', $2, 'Solo Holder')",
+        solo_user,
+        f"09{next_telegram_id()}",
+    )
+
+    clusters = await queries.shared_payout_account_clusters(pool)
+    match = next((c for c in clusters if c["account_ref"] == shared_ref), None)
+    assert match is not None
+    assert match["user_count"] == 2
+    assert {u["user_id"] for u in match["users"]} == {user_a, user_b}
+    assert all(c["user_count"] > 1 for c in clusters)  # solo_user's ref never appears
+
+
+async def test_repeat_room_pairings_flags_a_lopsided_recurring_pair(pool, conn, card_pool):
+    # spec 8.4: "Winner and loser in the same room repeatedly, same pairs
+    # -> Collusion investigation." Three rounds where the same two users
+    # always play together and the same one always wins should surface as
+    # a pairing; a single shared round with a third user shouldn't clear
+    # the min_shared_rounds threshold at all.
+    room_id = await create_room(conn)
+    winner_id = await create_user(conn)
+    loser_id = await create_user(conn)
+    other_id = await create_user(conn)
+
+    async def _make_shared_round(seq: int, card_a: int, card_b: int, *, record_win: bool) -> None:
+        row = await conn.fetchrow(
+            "INSERT INTO rounds (room_id, seq, status, stake, house_cut_bps, server_seed_hash) "
+            "VALUES ($1, $2, 'done', 20.00, 2000, 'test-hash') RETURNING id",
+            room_id,
+            seq,
+        )
+        round_id = row["id"]
+        await conn.execute(
+            "INSERT INTO round_entries (round_id, card_no, user_id) VALUES ($1, $2, $3), ($1, $4, $5)",
+            round_id,
+            card_a,
+            winner_id,
+            card_b,
+            loser_id,
+        )
+        if record_win:
+            await conn.execute(
+                "INSERT INTO round_winners (round_id, user_id, card_no, pattern, won_on_call, amount) "
+                "VALUES ($1, $2, $3, 'row', 10, 32.00)",
+                round_id,
+                winner_id,
+                card_a,
+            )
+
+    for seq, (card_a, card_b) in enumerate([(1, 2), (3, 4), (5, 6)], start=1):
+        await _make_shared_round(seq, card_a, card_b, record_win=True)
+
+    single_round = await conn.fetchrow(
+        "INSERT INTO rounds (room_id, seq, status, stake, house_cut_bps, server_seed_hash) "
+        "VALUES ($1, 4, 'done', 20.00, 2000, 'test-hash') RETURNING id",
+        room_id,
+    )
+    await conn.execute(
+        "INSERT INTO round_entries (round_id, card_no, user_id) VALUES ($1, 7, $2), ($1, 8, $3)",
+        single_round["id"],
+        winner_id,
+        other_id,
+    )
+
+    pairings = await queries.repeat_room_pairings(pool, min_shared_rounds=3, since_days=30)
+    matches = [p for p in pairings if {p["user_a"], p["user_b"]} == {winner_id, loser_id}]
+    assert len(matches) == 1
+    pairing = matches[0]
+    assert pairing["shared_rounds"] == 3
+    winner_wins = pairing["user_a_wins"] if pairing["user_a"] == winner_id else pairing["user_b_wins"]
+    loser_wins = pairing["user_a_wins"] if pairing["user_a"] == loser_id else pairing["user_b_wins"]
+    assert winner_wins == 3
+    assert loser_wins == 0
+    assert not any({p["user_a"], p["user_b"]} == {winner_id, other_id} for p in pairings)
 
 
 async def test_void_round_admin_refunds_and_is_idempotent(pool, redis, card_pool, conn):

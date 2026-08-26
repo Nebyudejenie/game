@@ -243,6 +243,7 @@ async def api_create_withdrawal(
             auto_approve_limit=settings.auto_approve_withdraw_etb,
             kyc_threshold=settings.kyc_required_above_etb,
             chargeback_window_minutes=settings.withdraw_chargeback_window_minutes,
+            max_withdrawals_per_day=settings.max_withdrawals_per_day,
         )
     except withdrawals.WithdrawalRejected as exc:
         code = _WITHDRAWAL_ERROR_CODES.get(type(exc), "unknown_error")

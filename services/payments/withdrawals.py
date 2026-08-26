@@ -92,6 +92,7 @@ async def request_withdrawal(
     kyc_threshold: Decimal,
     chargeback_window_minutes: int,
     min_account_age_hours: float = 24.0,
+    max_withdrawals_per_day: int = 3,
 ) -> WithdrawalIntent:
     # One span for the whole request -- the withdrawal path spec section
     # 10.4 asks traced "end to end" starts here, not just at the point a
@@ -181,11 +182,25 @@ async def request_withdrawal(
                     "WHERE user_id = $1 AND direction = 'out' AND status = 'succeeded'",
                     user_id,
                 )
+                # spec 8.4: "Withdrawal velocity > 3/day -> Review". Counts
+                # every withdrawal request in the trailing 24h regardless of
+                # its outcome -- a burst of requests is the suspicious
+                # signal itself, not just the ones that happened to succeed.
+                # This request hasn't been inserted yet, so a count of
+                # max_withdrawals_per_day already-existing rows means this
+                # one would be the (max + 1)th.
+                recent_withdrawal_count = await conn.fetchval(
+                    "SELECT count(*) FROM payments "
+                    "WHERE user_id = $1 AND direction = 'out' "
+                    "AND created_at > now() - interval '24 hours'",
+                    user_id,
+                )
                 account_age = datetime.now(UTC) - user["created_at"]
                 auto_ok = (
                     amount <= auto_approve_limit
                     and account_age.total_seconds() > min_account_age_hours * 3600
                     and lifetime_in >= lifetime_out
+                    and recent_withdrawal_count < max_withdrawals_per_day
                 )
                 status = STATUS_APPROVED if auto_ok else STATUS_REVIEW
                 span.set_attribute("withdrawal.status", status)

@@ -872,3 +872,94 @@ async def reject_withdrawal_admin(
         pool, redis, user_id=user_id, key="notify.withdrawal_rejected", amount=str(amount), reason=reason
     )
     return True
+
+
+async def shared_payout_account_clusters(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+    """Risk screen, spec 8.4's first anti-fraud rule: "Same payout account
+    across multiple accounts -> Link accounts, flag cluster." Multiple
+    distinct users registering the same withdrawal destination
+    (`payment_methods.account_ref`, e.g. the same telebirr phone number)
+    is a real, live signal collectible from data this codebase already
+    has -- unlike device-fingerprint clustering (spec 8.4's other
+    account-linking rule), which has no writer anywhere in this codebase
+    at all: the Mini App never collects a device fingerprint in the first
+    place, and choosing how to (a client-side JS library, what data it's
+    allowed to touch under Ethiopian data-protection norms) is a real,
+    separate, not-yet-made product decision, not invented here. Live
+    query, same pattern as top_players_by_ltv/retention_cohorts -- no
+    materialized risk_flags table, no background scan job.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT
+          pm.kind,
+          pm.account_ref,
+          count(DISTINCT pm.user_id) AS user_count,
+          jsonb_agg(
+            jsonb_build_object('user_id', pm.user_id, 'display_name', u.display_name)
+            ORDER BY pm.user_id
+          ) AS users
+        FROM payment_methods pm
+        JOIN users u ON u.id = pm.user_id
+        GROUP BY pm.kind, pm.account_ref
+        HAVING count(DISTINCT pm.user_id) > 1
+        ORDER BY user_count DESC, pm.account_ref
+        """
+    )
+    return [{**dict(r), "users": json.loads(r["users"])} for r in rows]
+
+
+async def repeat_room_pairings(
+    pool: asyncpg.Pool, *, min_shared_rounds: int = 3, since_days: int = 30
+) -> list[dict[str, Any]]:
+    """Risk screen, spec 8.4's collusion rule: "Winner and loser in the
+    same room repeatedly, same pairs -> Collusion investigation." Reports
+    every pair of users who have shared a round at least
+    `min_shared_rounds` times in the last `since_days` days, alongside
+    how many of those shared rounds each one won -- a pair where one side
+    wins almost every time is the pattern worth an admin's attention.
+    This is deliberately a data screen, not an automatic verdict: the
+    spec's own word is "investigation," so the judgment call of what
+    counts as suspicious stays with the admin looking at the numbers, the
+    same way the risk score/holder-name-match gaps documented in
+    README.md are deliberately NOT auto-decided by this codebase either.
+
+    Scoped to a trailing window (not the whole history) because the
+    number of pairs in a round grows quadratically with player count
+    (up to ~4,950 pairs in a 100-player room) -- this runs on demand from
+    the admin console, not on any hot path, but an unbounded full-history
+    scan would still get slower every day the platform stays up.
+    """
+    rows = await pool.fetch(
+        """
+        WITH pairs AS (
+            SELECT e1.round_id, e1.user_id AS user_a, e2.user_id AS user_b
+            FROM round_entries e1
+            JOIN round_entries e2 ON e2.round_id = e1.round_id AND e2.user_id > e1.user_id
+            WHERE e1.joined_at > now() - make_interval(days => $2)
+        ),
+        pair_counts AS (
+            SELECT user_a, user_b, count(*) AS shared_rounds, array_agg(round_id) AS round_ids
+            FROM pairs
+            GROUP BY user_a, user_b
+            HAVING count(*) >= $1
+        )
+        SELECT
+          pc.user_a,
+          ua.display_name AS user_a_name,
+          pc.user_b,
+          ub.display_name AS user_b_name,
+          pc.shared_rounds,
+          (SELECT count(*) FROM round_winners w
+            WHERE w.user_id = pc.user_a AND w.round_id = ANY(pc.round_ids)) AS user_a_wins,
+          (SELECT count(*) FROM round_winners w
+            WHERE w.user_id = pc.user_b AND w.round_id = ANY(pc.round_ids)) AS user_b_wins
+        FROM pair_counts pc
+        JOIN users ua ON ua.id = pc.user_a
+        JOIN users ub ON ub.id = pc.user_b
+        ORDER BY pc.shared_rounds DESC
+        """,
+        min_shared_rounds,
+        since_days,
+    )
+    return [dict(r) for r in rows]

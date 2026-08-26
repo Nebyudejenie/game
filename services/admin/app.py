@@ -462,6 +462,27 @@ async def report_retention(
     return await queries.retention_cohorts(app.state.pool, weeks)
 
 
+# --- risk --------------------------------------------------------------
+
+
+@app.get("/risk/shared-payout-accounts")
+async def risk_shared_payout_accounts(
+    admin: Annotated[AdminSession, Depends(require("risk:view"))],
+) -> list[dict[str, Any]]:
+    return await queries.shared_payout_account_clusters(app.state.pool)
+
+
+@app.get("/risk/repeat-pairings")
+async def risk_repeat_pairings(
+    admin: Annotated[AdminSession, Depends(require("risk:view"))],
+    min_shared_rounds: int = 3,
+    since_days: int = 30,
+) -> list[dict[str, Any]]:
+    return await queries.repeat_room_pairings(
+        app.state.pool, min_shared_rounds=min_shared_rounds, since_days=since_days
+    )
+
+
 # --- audit log ---------------------------------------------------------
 
 

@@ -256,6 +256,49 @@ async def test_amount_above_auto_approve_limit_goes_to_review(pool, redis, conn)
     assert await _locked(conn, user_id) == Decimal("3000.00")
 
 
+async def test_withdrawal_velocity_over_the_daily_limit_goes_to_review(pool, redis, conn):
+    # spec 8.4's anti-fraud table: "Withdrawal velocity > 3/day -> Review".
+    # Simulates the user already having 3 withdrawal requests in the last
+    # 24h (any outcome -- 'review' here, specifically not 'succeeded', so
+    # this test isolates the velocity gate from the separate lifetime_in
+    # >= lifetime_out gate) -- the 4th, otherwise-ordinary small request
+    # must be forced to review even though its own amount is well under
+    # the auto-approve limit.
+    user_id = await create_funded_user(conn, Decimal("1000.00"))
+    for i in range(3):
+        await conn.execute(
+            "INSERT INTO payments (user_id, direction, provider, our_ref, amount, status) "
+            "VALUES ($1, 'out', 'chapa', $2, $3, 'review')",
+            user_id,
+            f"WD-test-velocity-{user_id}-{i}",
+            Decimal("50.00"),
+        )
+
+    intent = await _request(pool, redis, conn, user_id, Decimal("50.00"))
+    assert intent.status == withdrawals.STATUS_REVIEW
+
+    status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", intent.payment_id)
+    assert status == "review"
+
+
+async def test_withdrawal_velocity_only_counts_the_trailing_24_hours(pool, redis, conn):
+    # A withdrawal from 2 days ago shouldn't count toward today's limit --
+    # otherwise a normal, infrequent withdrawer would eventually get stuck
+    # in permanent review once their lifetime count crossed the threshold.
+    user_id = await create_funded_user(conn, Decimal("1000.00"))
+    for i in range(3):
+        await conn.execute(
+            "INSERT INTO payments (user_id, direction, provider, our_ref, amount, status, created_at) "
+            "VALUES ($1, 'out', 'chapa', $2, $3, 'review', now() - interval '2 days')",
+            user_id,
+            f"WD-test-velocity-old-{user_id}-{i}",
+            Decimal("50.00"),
+        )
+
+    intent = await _request(pool, redis, conn, user_id, Decimal("50.00"))
+    assert intent.status == withdrawals.STATUS_APPROVED
+
+
 async def test_withdrawal_locks_funds_immediately_so_a_later_stake_fails(pool, redis, conn, card_pool):
     room_id = await create_room(conn, stake=Decimal("100.00"), min_players=2)
     room = await load_room_config(pool, room_id)

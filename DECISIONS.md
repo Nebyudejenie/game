@@ -5,6 +5,85 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-26 — Risk screen backend (spec 8.4/6231) and the missing withdrawal-velocity gate
+
+Continuing the same project-completion audit that found the KYC gap
+below, spec 6231 lists a "Risk" admin nav item ("Collusion clusters,
+multi-account links, flagged withdrawals") and spec 8.4 lists six
+specific anti-fraud rules to encode -- against the actual codebase, zero
+of that existed: no `risk_flags` writer, no clustering query, and one of
+the six 8.4 rules ("Withdrawal velocity > 3/day -> Review") had no
+corresponding check anywhere in `withdrawals.py`'s own auto-approve
+logic, the same kind of real, live enforcement gap as the KYC finding
+below rather than just an unbuilt screen.
+
+**Withdrawal velocity gate (real bug, not a scope gap)**: added a
+`recent_withdrawal_count < max_withdrawals_per_day` (default 3, new
+`Settings.max_withdrawals_per_day`) condition to `request_withdrawal()`'s
+`auto_ok` computation in `services/payments/withdrawals.py`, counting
+every `direction = 'out'` payment row in the trailing 24 hours regardless
+of its own outcome -- a burst of requests is itself the suspicious
+signal, not just the ones that happened to succeed. Verified by the
+stash-revert-confirm-fail step this codebase always applies to an actual
+behavior fix: `test_withdrawal_velocity_over_the_daily_limit_goes_to_
+review` genuinely fails (`'approved' == 'review'`) against the unfixed
+file before the two-line `auto_ok` change, confirming the test is real
+and not accidentally passing regardless.
+
+**Risk-screen queries (new, read-only reports)**: two of 8.4's rules
+were buildable right now from data this codebase already collects, so
+they were, matching the exact "live SQL query, no materialized table, no
+background job" pattern `top_players_by_ltv()`/`retention_cohorts()`/
+`daily_ggr()` already established for every other admin report:
+- `shared_payout_account_clusters()` -- "Same payout account across
+  multiple accounts -> Link accounts, flag cluster." Groups
+  `payment_methods` by `account_ref`.
+- `repeat_room_pairings()` -- "Winner and loser in the same room
+  repeatedly, same pairs -> Collusion investigation." For every pair of
+  users who've shared a round at least `min_shared_rounds` times (default
+  3) in a trailing window (default 30 days, to keep the pairwise self
+  -join bounded -- a 100-player room already has ~4,950 pairs per round),
+  reports how many of those shared rounds each side won. Deliberately a
+  data screen, not an automatic verdict -- the spec's own word is
+  "investigation," so which pairs actually look suspicious stays an
+  admin's judgment call, the same deliberate stance already documented in
+  README.md for the risk-score and holder-name-match gaps.
+Both wired to `GET /risk/shared-payout-accounts` and `GET
+/risk/repeat-pairings`, gated by a new `risk:view` permission scoped to
+`{ops, finance, superadmin}` (the roles who'd actually act on what a risk
+screen shows), not `reports:view`'s broader read-only set.
+
+**Deliberately not built**: device-fingerprint clustering (8.4's other
+account-linking rule) and a `risk_flags` storage table. Fingerprinting
+has no writer anywhere in this codebase because nothing in the Mini App
+collects a device fingerprint in the first place -- which library, and
+what data it's allowed to touch under Ethiopian data-protection norms, is
+a real, separate, not-yet-made product decision, not invented here, the
+same category of deliberate deferral as the KYC document-collection
+method below. A stored `risk_flags` table (spec 4.5 sketches one) was
+skipped in favor of the live-query pattern above because nothing in this
+codebase ever writes to one yet, and adding it now would mean also
+building a background scan job and a flag-review workflow (mark
+reviewed/dismissed) for uncertain benefit over just querying live --
+revisit if/when an admin frontend actually exists to make a persistent,
+stateful queue worth having.
+
+**Verification**: two withdrawal tests (the velocity one above plus
+`test_withdrawal_velocity_only_counts_the_trailing_24_hours`, confirming
+a 2-day-old burst doesn't permanently wedge a normal user into review),
+two query-level tests (`test_shared_payout_account_clusters_finds_users_
+sharing_a_payout_destination`, `test_repeat_room_pairings_flags_a_
+lopsided_recurring_pair` -- the latter also proves a single shared round
+with a third user does *not* clear the threshold), and two RBAC tests
+over real HTTP (`test_rbac_support_cannot_view_risk_screen_over_http`,
+`test_rbac_ops_can_view_risk_screen_over_http`). Full clean-slate
+rebuild: `docker compose down -v` -> `up -d` -> `alembic upgrade head` ->
+`mypy` clean (63 source files) -> full default suite 745 passed (up from
+739), 13 deselected -> `-m load` 5 passed, clean this time (no host
+-contention flake) -> `-m chaos_infra` 1 passed -> `-m e2e` 7 passed.
+
+---
+
 ## 2026-08-26 — Admin action to set `users.kyc_level`, closing the gate's missing writer
 
 A project-completion audit against the original spec surfaced a real, live

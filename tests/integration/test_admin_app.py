@@ -132,6 +132,24 @@ async def test_rbac_finance_can_set_kyc_level_over_http(admin_server, pool, conn
     assert kyc_level == 2
 
 
+async def test_rbac_support_cannot_view_risk_screen_over_http(admin_server, pool):
+    headers = await _auth_headers(admin_server, pool, role="support")
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{admin_server}/risk/shared-payout-accounts", headers=headers)
+    assert response.status_code == 403
+
+
+async def test_rbac_ops_can_view_risk_screen_over_http(admin_server, pool):
+    headers = await _auth_headers(admin_server, pool, role="ops")
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{admin_server}/risk/shared-payout-accounts", headers=headers)
+    assert response.status_code == 200, response.text
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{admin_server}/risk/repeat-pairings", headers=headers)
+    assert response.status_code == 200, response.text
+
+
 async def test_audit_log_route_requires_superadmin(admin_server, pool):
     for role in ("support", "finance", "ops"):
         headers = await _auth_headers(admin_server, pool, role=role)

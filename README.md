@@ -12,17 +12,24 @@ withdrawals against Chapa, and the admin console's API (auth/RBAC/audit,
 balance adjustments, round voiding, reports, responsible-gaming limits)
 all work end to end against real infrastructure, with real tests. Real,
 known gaps -- not yet built, not silently missing -- see "What's actually
-implemented" below for the honest list: a KYC *verification* pipeline
-(the `kyc_level` threshold check on withdrawals exists, but nothing
-anywhere currently promotes a user past it -- see that section), an admin
-*web frontend* (today it's a JSON API only, per idea.md's own Prompt-0
-repository layout; §11's "separate web app" framing is a spec-internal
-inconsistency this hasn't resolved yet), the Risk screen and tax export,
-SantimPay/ArifPay adapters (blocked on unreachable docs, Chapa is the one
-real provider), and load/chaos testing at the spec's literal 10k-socket
-scale (this repo's own load tests run smaller, honestly documented in
-`DECISIONS.md`). CI/CD (GitHub Actions + a self-hosted-runner deploy) is
-also done -- see the CI/CD section further down.
+implemented" below for the honest list: a KYC *document-verification
+pipeline* (the `kyc_level` threshold check on withdrawals now has a real,
+audited admin action to promote/demote a user past it -- `POST
+/users/{id}/kyc` -- but no automated document-collection/verification
+provider behind that admin's own judgment call -- see that section), an
+admin *web frontend* (today it's a JSON API only, per idea.md's own
+Prompt-0 repository layout; §11's "separate web app" framing is a
+spec-internal inconsistency this hasn't resolved yet), the Risk screen's
+own frontend and tax export (the Risk screen's backend -- shared-payout
+-account clustering, repeat winner/loser room pairings, flagged
+withdrawals -- is real and tested, reachable at `GET
+/risk/shared-payout-accounts` and `GET /risk/repeat-pairings`, but has no
+UI yet; tax export has zero code either way), SantimPay/ArifPay adapters
+(blocked on unreachable docs, Chapa is the one real provider), and
+load/chaos testing at the spec's literal 10k-socket scale (this repo's
+own load tests run smaller, honestly documented in `DECISIONS.md`). CI/CD
+(GitHub Actions + a self-hosted-runner deploy) is also done -- see the
+CI/CD section further down.
 
 ## Repository layout
 

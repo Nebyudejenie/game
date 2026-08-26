@@ -26,6 +26,11 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     "audit:view": frozenset({"superadmin"}),
     "payments:view": frozenset({"support", "finance", "ops", "superadmin"}),
     "payments:approve": frozenset({"finance", "superadmin"}),
+    # Same roles as rounds:void, not reports:view -- reading the risk
+    # screen is an investigation tool for the roles who'd act on what it
+    # shows (ops handles collusion/room abuse, finance handles payout
+    # fraud), not a general reporting/analytics permission.
+    "risk:view": frozenset({"ops", "finance", "superadmin"}),
 }
 
 

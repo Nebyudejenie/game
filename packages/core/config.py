@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     # A succeeded deposit within this window blocks a withdrawal request --
     # the chargeback window on a reversible rail (spec 8.3).
     withdraw_chargeback_window_minutes: int = 30
+    # spec 8.4's anti-fraud table: "Withdrawal velocity > 3/day -> Review".
+    # The Nth request within a rolling 24h window that would exceed this
+    # count is forced to the admin review queue rather than auto-approved,
+    # regardless of amount or KYC level.
+    max_withdrawals_per_day: int = 3
 
     # Phase 7 -- comma-separated IPs; empty means unrestricted (dev-friendly
     # default). Set for production: admin console should only be reachable
