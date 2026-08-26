@@ -13,6 +13,11 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     "users:view": frozenset({"support", "finance", "ops", "superadmin"}),
     "users:adjust_balance": frozenset({"finance", "superadmin"}),
     "users:suspend": frozenset({"ops", "finance", "superadmin"}),
+    # Same roles as payments:approve, not users:suspend -- KYC level is a
+    # financial-compliance control (it gates withdrawal size), not a
+    # user-standing one, even though both end up as a field on the same
+    # users row.
+    "users:verify_kyc": frozenset({"finance", "superadmin"}),
     "rounds:view": frozenset({"support", "finance", "ops", "superadmin"}),
     "rounds:void": frozenset({"ops", "superadmin"}),
     "rooms:view": frozenset({"support", "finance", "ops", "superadmin"}),

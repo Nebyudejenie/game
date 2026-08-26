@@ -452,10 +452,16 @@ the same autouse-cleanup-fixture pattern.
 Session-time reminders and the results screen's reality check were
 initially deferred as Mini App frontend work (the same reasoning the
 deposit-amount picker UI was deferred in Phase 5) and have since been
-built — see "Mini App wallet completion" above. One gap remains open: the
-age-gate/KYC-level-2 identity verification has no real verification
-pipeline behind it anywhere in this codebase, the same open gap Phase 6
-already flagged for withdrawal holder-name matching. See `DECISIONS.md`.
+built — see "Mini App wallet completion" above. A narrower gap has since
+been closed: `users.kyc_level` (the field `withdrawals.py`'s own
+threshold gate reads) used to have no writer anywhere in the codebase —
+an admin action (`services/admin/queries.py::set_kyc_level`, RBAC-scoped
+to `finance`/`superadmin`, fully audited, promotions and demotions both
+supported) now provides one. What still doesn't exist is any real,
+automated document-collection/identity-verification pipeline behind that
+action — an admin promotes a user's level only after reviewing their
+documents through some out-of-band channel, and which channel that is
+remains a genuine, unmade product decision. See `DECISIONS.md`.
 
 **Admin console (Phase 7):**
 - **`services/admin/auth.py`** — a completely separate authentication path

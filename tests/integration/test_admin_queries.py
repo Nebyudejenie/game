@@ -362,6 +362,73 @@ async def test_set_user_status_refuses_to_reverse_a_real_self_exclusion(pool, co
         assert status == "self_excluded"
 
 
+async def test_set_kyc_level_writes_audit_log_with_before_and_after(pool, conn):
+    # A code review pass caught that users.kyc_level had a real consumer
+    # (withdrawals.py's own threshold gate) but no writer anywhere in the
+    # codebase at all -- this is that writer, the manual half of KYC
+    # verification (see set_kyc_level()'s own docstring for what stays a
+    # real, separate, not-yet-made product decision: the actual document
+    # -collection method).
+    admin_id, *_ = await create_test_admin(pool, role="finance")
+    user_id = await create_funded_user(conn)
+
+    await queries.set_kyc_level(
+        pool,
+        admin_id=admin_id,
+        user_id=user_id,
+        kyc_level=2,
+        reason="ID documents reviewed and verified",
+        ip_address="127.0.0.1",
+    )
+
+    kyc_level = await conn.fetchval("SELECT kyc_level FROM users WHERE id = $1", user_id)
+    assert kyc_level == 2
+
+    audit_row = await conn.fetchrow(
+        "SELECT before, after FROM admin_audit_log WHERE target_id = $1 ORDER BY id DESC LIMIT 1",
+        str(user_id),
+    )
+    before = json.loads(audit_row["before"])
+    after = json.loads(audit_row["after"])
+    assert before["kyc_level"] == 0
+    assert after["kyc_level"] == 2
+
+
+async def test_set_kyc_level_can_also_revoke_a_previously_granted_level(pool, conn):
+    # Promotions and demotions go through the same accountable path -- a
+    # level can be revoked (fraud discovered, documents later found
+    # invalid) exactly the same way it was granted, not just a one-way
+    # ratchet.
+    admin_id, *_ = await create_test_admin(pool, role="finance")
+    user_id = await create_funded_user(conn)
+    await queries.set_kyc_level(
+        pool, admin_id=admin_id, user_id=user_id, kyc_level=2,
+        reason="initial verification", ip_address="127.0.0.1",
+    )
+
+    await queries.set_kyc_level(
+        pool, admin_id=admin_id, user_id=user_id, kyc_level=0,
+        reason="documents found to be fraudulent", ip_address="127.0.0.1",
+    )
+
+    kyc_level = await conn.fetchval("SELECT kyc_level FROM users WHERE id = $1", user_id)
+    assert kyc_level == 0
+
+
+async def test_set_kyc_level_rejects_an_out_of_range_level(pool, conn):
+    admin_id, *_ = await create_test_admin(pool, role="finance")
+    user_id = await create_funded_user(conn)
+
+    with pytest.raises(queries.InvalidKycLevel):
+        await queries.set_kyc_level(
+            pool, admin_id=admin_id, user_id=user_id, kyc_level=3,
+            reason="not a real level", ip_address="127.0.0.1",
+        )
+
+    kyc_level = await conn.fetchval("SELECT kyc_level FROM users WHERE id = $1", user_id)
+    assert kyc_level == 0
+
+
 async def test_void_round_admin_refunds_and_is_idempotent(pool, redis, card_pool, conn):
     admin_id, *_ = await create_test_admin(pool)
     room_id = await create_room(conn, stake=Decimal("15.00"), min_players=5, lobby_seconds=1)

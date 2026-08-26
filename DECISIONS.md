@@ -5,6 +5,74 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-26 — Admin action to set `users.kyc_level`, closing the gate's missing writer
+
+A project-completion audit against the original spec surfaced a real, live
+gap rather than just an unbuilt feature: `users.kyc_level` (`smallint NOT
+NULL DEFAULT 0 CHECK (kyc_level BETWEEN 0 AND 2)`) already had a real
+consumer -- `services/payments/withdrawals.py`'s own `kyc_threshold` gate,
+which blocks large withdrawals above a threshold unless the requesting
+user's `kyc_level` clears it -- but no writer anywhere in the codebase.
+Grepping the whole tree turned up nothing that ever set the column except
+a raw `UPDATE users SET kyc_level = 2` living directly inside the one
+existing test that needed a level-2 user
+(`test_kyc_verified_user_can_withdraw_above_threshold`), standing in for
+a real code path that didn't exist. Any actual user who needed KYC to
+clear a large withdrawal had no path through the gate at all -- not even
+a slow, manual one.
+
+**What was built**: `services/admin/queries.py::set_kyc_level()`, matching
+the exact audited-mutation pattern every other admin action in this file
+already follows (`adjust_balance()`, `set_user_status()`,
+`void_round_admin()`): acquire a pooled connection, open a transaction,
+`SELECT ... FOR UPDATE` the current value, write the new one, record an
+`admin_audit_log` row with full before/after JSON, admin id, reason, and
+IP address. Wired to `POST /users/{user_id}/kyc` in `services/admin/
+app.py`, gated by a new `users:verify_kyc` permission in `services/admin/
+rbac.py` scoped to `{finance, superadmin}` -- the same pair as
+`payments:approve`, not `users:suspend`'s `{ops, finance, superadmin}`,
+because KYC level is a financial-compliance control (it gates withdrawal
+size) rather than a user-standing one, even though both end up as a field
+on the same `users` row. Promotions and demotions both go through this
+same function and the same audit trail, so a level can be revoked (fraud
+discovered, documents later found invalid) exactly as accountably as it
+was granted.
+
+**Deliberately not built**: any real document-collection or identity-
+verification pipeline behind this action. `set_kyc_level()`'s docstring
+is explicit that an admin is expected to have reviewed a user's identity
+documents through some out-of-band channel before calling it -- which
+channel that is (a manual support queue, a third-party KYC/eKYC
+provider, something else) is a genuine, unmade product decision, not an
+engineering one, and this turn deliberately scoped only the
+engineering-judgment slice of the gap (a real, audited path *through*
+the gate) rather than inventing a verification methodology no one has
+actually chosen. `README.md`'s KYC gap description was updated to match:
+the gap is now "no automated verification pipeline exists," not "no
+writer exists at all."
+
+**Verification**: three query-level tests
+(`test_set_kyc_level_writes_audit_log_with_before_and_after`,
+`test_set_kyc_level_can_also_revoke_a_previously_granted_level`,
+`test_set_kyc_level_rejects_an_out_of_range_level`), two HTTP-level RBAC
+tests (`test_rbac_support_cannot_set_kyc_level_over_http`,
+`test_rbac_finance_can_set_kyc_level_over_http`), and one true end-to-end
+test in `tests/integration/test_payments_withdrawals.py`
+(`test_admin_kyc_promotion_unblocks_a_previously_rejected_withdrawal`)
+proving the actual gap is closed: the same withdrawal request that raises
+`KycLevelTooLow` before an admin promotes the user's level, via the real
+`services.admin.queries.set_kyc_level()` call (not a raw SQL `UPDATE`
+standing in for it), succeeds afterward. Full clean-slate rebuild:
+`docker compose -f deploy/docker-compose.yml down -v` → `up -d` →
+`alembic upgrade head` → `mypy` clean (63 source files) → full default
+suite 739 passed (up from 733), 13 deselected → `-m load` one failure,
+`test_load_multiroom.py` at 301.3ms against a 300ms budget, the same
+well-documented shared-host-contention pattern seen repeatedly this
+session (confirmed unrelated: no gateway/fanout code was touched) →
+`-m chaos_infra` 1 passed → `-m e2e` 7 passed, fully clean.
+
+---
+
 ## 2026-08-26 — `_settle_with_winners()` publishes winner balance updates concurrently
 
 Two more catalogue findings closed this turn -- one investigated and found

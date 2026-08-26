@@ -372,6 +372,60 @@ async def set_user_status(
             )
 
 
+_VALID_KYC_LEVELS = frozenset({0, 1, 2})
+
+
+class InvalidKycLevel(Exception):
+    pass
+
+
+async def set_kyc_level(
+    pool: asyncpg.Pool,
+    *,
+    admin_id: int,
+    user_id: int,
+    kyc_level: int,
+    reason: str,
+    ip_address: str | None,
+) -> None:
+    """The manual half of KYC verification: an admin who has reviewed a
+    user's identity documents (through whatever out-of-band channel this
+    platform actually collects them through -- that verification method
+    itself is a real, separate, not-yet-made product decision, tracked in
+    DECISIONS.md, not invented here) records the outcome. Before this,
+    `users.kyc_level` had a real consumer (withdrawals.py's own threshold
+    gate) but no writer anywhere in the codebase -- a real, live gap a
+    code review pass caught: any user who genuinely needed KYC to clear a
+    large withdrawal had no path through the gate at all, not even a slow
+    manual one. Promotions and demotions both go through this same
+    function and the same audit trail -- a level can be revoked (fraud
+    discovered, documents later found invalid) exactly the same
+    accountable way it was granted.
+    """
+    if kyc_level not in _VALID_KYC_LEVELS:
+        raise InvalidKycLevel(f"kyc_level must be one of {sorted(_VALID_KYC_LEVELS)}, got {kyc_level!r}")
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            before = await conn.fetchval(
+                "SELECT kyc_level FROM users WHERE id = $1 FOR UPDATE", user_id
+            )
+            if before is None:
+                raise InvalidKycLevel(f"no such user: {user_id}")
+            await conn.execute("UPDATE users SET kyc_level = $1 WHERE id = $2", kyc_level, user_id)
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="users.set_kyc_level",
+                target_type="user",
+                target_id=str(user_id),
+                before={"kyc_level": before},
+                after={"kyc_level": kyc_level},
+                reason=reason,
+                ip_address=ip_address,
+            )
+
+
 async def list_rounds(pool: asyncpg.Pool, room_id: int | None = None, limit: int = 50) -> list[dict[str, Any]]:
     if room_id is not None:
         rows = await pool.fetch(

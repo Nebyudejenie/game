@@ -12,10 +12,12 @@ from decimal import Decimal
 import pytest
 
 from packages.core import ledger
+from services.admin import queries as admin_queries
 from services.engine.round_engine import RoundEngine, load_room_config
 from services.payments import payout_worker, withdrawals
 from services.payments.provider import PayoutResult
 from tests.integration.conftest import create_funded_user, create_room, create_user, recv_balance_update
+from tests.integration.test_admin_auth import create_test_admin
 
 MIN_WITHDRAW = Decimal("50.00")
 AUTO_APPROVE_LIMIT = Decimal("2000.00")
@@ -107,6 +109,37 @@ async def test_kyc_required_above_threshold(pool, redis, conn):
 async def test_kyc_verified_user_can_withdraw_above_threshold(pool, redis, conn):
     user_id = await create_funded_user(conn, Decimal("10000.00"))
     await conn.execute("UPDATE users SET kyc_level = 2 WHERE id = $1", user_id)
+    intent = await _request(pool, redis, conn, user_id, Decimal("6000.00"))
+    assert intent.our_ref.startswith("WD-")
+
+
+async def test_admin_kyc_promotion_unblocks_a_previously_rejected_withdrawal(pool, redis, conn):
+    # A code review pass caught that users.kyc_level had a real consumer
+    # (this exact threshold check) but no writer anywhere in the
+    # codebase -- a real, live gap, not just an unbuilt feature: any user
+    # who genuinely needed KYC to clear a large withdrawal had no path
+    # through the gate at all, not even a manual one. This is the actual
+    # proof the gap is closed: the same withdrawal request, rejected
+    # before an admin promotes this user's kyc_level, succeeds
+    # afterward -- through the real admin action
+    # (services.admin.queries.set_kyc_level), not a raw SQL UPDATE
+    # standing in for it the way the sibling test above still does for
+    # its own, narrower purpose.
+    user_id = await create_funded_user(conn, Decimal("10000.00"))
+
+    with pytest.raises(withdrawals.KycLevelTooLow):
+        await _request(pool, redis, conn, user_id, Decimal("6000.00"))
+
+    admin_id, *_ = await create_test_admin(pool, role="finance")
+    await admin_queries.set_kyc_level(
+        pool,
+        admin_id=admin_id,
+        user_id=user_id,
+        kyc_level=2,
+        reason="ID documents reviewed and verified",
+        ip_address="127.0.0.1",
+    )
+
     intent = await _request(pool, redis, conn, user_id, Decimal("6000.00"))
     assert intent.our_ref.startswith("WD-")
 

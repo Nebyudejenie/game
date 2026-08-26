@@ -100,6 +100,38 @@ async def test_rbac_finance_can_adjust_balance_over_http(admin_server, pool, con
     assert await ledger.balance(conn, cash.id) == Decimal("15.00")
 
 
+async def test_rbac_support_cannot_set_kyc_level_over_http(admin_server, pool, conn):
+    headers = await _auth_headers(admin_server, pool, role="support")
+    user_id = await create_funded_user(conn)
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{admin_server}/users/{user_id}/kyc",
+            headers=headers,
+            json={"kyc_level": 2, "reason": "should be blocked by rbac"},
+        )
+    assert response.status_code == 403
+
+    kyc_level = await conn.fetchval("SELECT kyc_level FROM users WHERE id = $1", user_id)
+    assert kyc_level == 0
+
+
+async def test_rbac_finance_can_set_kyc_level_over_http(admin_server, pool, conn):
+    headers = await _auth_headers(admin_server, pool, role="finance")
+    user_id = await create_funded_user(conn)
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{admin_server}/users/{user_id}/kyc",
+            headers=headers,
+            json={"kyc_level": 2, "reason": "ID documents reviewed and verified"},
+        )
+    assert response.status_code == 200, response.text
+
+    kyc_level = await conn.fetchval("SELECT kyc_level FROM users WHERE id = $1", user_id)
+    assert kyc_level == 2
+
+
 async def test_audit_log_route_requires_superadmin(admin_server, pool):
     for role in ("support", "finance", "ops"):
         headers = await _auth_headers(admin_server, pool, role=role)

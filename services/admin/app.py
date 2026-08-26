@@ -236,6 +236,33 @@ async def set_user_status(
     return {"status": "ok"}
 
 
+class SetKycLevelRequest(BaseModel):
+    kyc_level: int
+    reason: str
+
+
+@app.post("/users/{user_id}/kyc")
+async def set_kyc_level(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("users:verify_kyc"))],
+    user_id: int,
+    body: SetKycLevelRequest,
+) -> dict[str, str]:
+    _require_reason(body.reason)
+    try:
+        await queries.set_kyc_level(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            user_id=user_id,
+            kyc_level=body.kyc_level,
+            reason=body.reason,
+            ip_address=_client_ip(request),
+        )
+    except queries.InvalidKycLevel as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": "ok"}
+
+
 # --- rounds --------------------------------------------------------------
 
 
