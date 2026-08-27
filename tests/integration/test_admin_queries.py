@@ -790,6 +790,27 @@ async def test_dashboard_summary_reflects_real_state(pool, redis, card_pool, con
         await asyncio.wait_for(task, timeout=10)
 
 
+async def test_dashboard_summary_counts_withdrawals_awaiting_review(pool, conn):
+    # spec 6226's Dashboard row: "...alerts" -- an admin needs to see
+    # something needs attention without already knowing to click into
+    # the Payments screen first. Delta, not an absolute count, for the
+    # same reason stakes_today's own test uses one: this reads from the
+    # whole shared session's ever-growing payments table.
+    before = (await queries.dashboard_summary(pool))["pending_withdrawals_count"]
+
+    user_id = await create_funded_user(conn, Decimal("500.00"))
+    await conn.execute(
+        "INSERT INTO payments (user_id, direction, provider, our_ref, amount, status) "
+        "VALUES ($1, 'out', 'chapa', $2, $3, 'review')",
+        user_id,
+        f"WD-test-dashboard-alert-{user_id}",
+        Decimal("100.00"),
+    )
+
+    after = (await queries.dashboard_summary(pool))["pending_withdrawals_count"]
+    assert after - before == 1
+
+
 def test_ethiopia_tz_is_the_real_utc_plus_3_offset():
     # A regression guard against a typo'd IANA zone name silently
     # resolving to the wrong offset (or a future edit picking a DST

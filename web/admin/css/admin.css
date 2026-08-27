@@ -240,6 +240,17 @@ textarea {
   padding: 0.9rem 1rem;
 }
 
+/* spec 6226's Dashboard row calls for "alerts" -- applied when a stat
+   itself represents something needing attention (e.g. a nonzero pending
+   -withdrawals count), not a fixed subset of cards. */
+.stat-card-alert {
+  border-color: var(--warn);
+}
+
+.stat-card-alert .stat-value {
+  color: var(--warn);
+}
+
 .stat-label {
   font-size: 0.75rem;
   color: var(--text-dim);

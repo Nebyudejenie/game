@@ -27,6 +27,10 @@ export async function render(container) {
         <div class="stat-label">House revenue today</div>
         <div class="stat-value">${data.house_revenue_today} ETB</div>
       </div>
+      <div class="stat-card${data.pending_withdrawals_count > 0 ? " stat-card-alert" : ""}">
+        <div class="stat-label">Withdrawals awaiting review</div>
+        <div class="stat-value">${data.pending_withdrawals_count}</div>
+      </div>
     </div>
   `;
 }

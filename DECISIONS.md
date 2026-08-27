@@ -5,6 +5,47 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — Dashboard had no way to surface "something needs attention" without already knowing to check Payments
+
+Spec section 6226's own Dashboard row lists five things: "Live players,
+active rooms, today's GGR, deposits/withdrawals, alerts." The four
+stat cards already covered the first four; nothing implemented
+"alerts" -- an admin landing on the dashboard had no signal that
+withdrawals were piling up in review unless they already knew to click
+into the Payments screen first.
+
+**Fixed**: `dashboard_summary()` in `services/admin/queries.py` now
+also returns `pending_withdrawals_count`, the same
+`WHERE direction = 'out' AND status = 'review'` count
+`list_pending_withdrawals()` already uses. The dashboard screen renders
+it as a sixth stat card, styled with the existing `--warn` token
+(`.stat-card-alert`) only when the count is nonzero -- an alert that
+disappears when there's nothing to alert about, rather than a
+permanently-yellow card.
+
+**Verification**: `test_dashboard_summary_counts_withdrawals_awaiting_review`
+in `tests/integration/test_admin_queries.py`, using the file's own
+established before/after-delta pattern (`payments` is a shared,
+ever-growing table across the whole session's accumulated tests, so an
+absolute count isn't a valid assertion). Confirmed the test genuinely
+fails (`KeyError: 'pending_withdrawals_count'`) against the pre-fix
+file via the usual stash-revert step. Full clean-slate rebuild: `docker
+compose down -v` -> `up -d` -> `alembic upgrade head` (all 10
+migrations apply cleanly) -> `mypy` clean (66 source files) -> full
+`test_admin_queries.py` 30 passed (up from 29) -> full default suite
+762 passed (up from 761), 18 deselected -> `-m load` 2 failures
+(`test_gateway_fanout.py`, `test_load_multiroom.py`; confirmed via
+`uptime` showing load average 2.49-3.11 and unrelated
+`santim-commerce-*`/`spos-*` containers active, then reconfirmed by
+rerunning the same two tests in isolation and seeing latency get
+*worse* under continued contention, not better -- the same
+well-documented host-contention pattern, unrelated to this change,
+which touches only admin dashboard code) -> `-m chaos_infra` 2 passed
+-> `-m e2e` 11 passed, including the admin console's own dashboard-load
+test.
+
+---
+
 ## 2026-08-27 — `review_reason` reached the admin queue but never the trace; closed the same gap on the observability side
 
 A follow-on to the `review_reason` feature itself: the admin-facing

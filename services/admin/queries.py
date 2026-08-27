@@ -718,12 +718,21 @@ async def dashboard_summary(pool: asyncpg.Pool) -> dict[str, Any]:
         today,
     )
     assert row is not None
+    # spec 6226's own Dashboard row: "Live players, active rooms, today's
+    # GGR, deposits/withdrawals, alerts" -- an admin opening the
+    # dashboard had no way to see anything needs attention without
+    # already knowing to click into the Payments screen first. Same
+    # WHERE clause as list_pending_withdrawals().
+    pending_withdrawals_count = await pool.fetchval(
+        "SELECT count(*) FROM payments WHERE direction = 'out' AND status = 'review'"
+    )
     return {
         "active_rounds": active_rounds,
         "active_rooms": active_rooms,
         "stakes_today": str(row["stakes_today"]),
         "payouts_today": str(row["payouts_today"]),
         "house_revenue_today": str(row["house_revenue_today"]),
+        "pending_withdrawals_count": pending_withdrawals_count,
     }
 
 
