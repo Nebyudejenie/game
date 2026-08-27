@@ -5,6 +5,49 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — Admin session hardening check: CORS and TTL clean, log redaction had a real gap
+
+Continuing past yesterday's five-category sweep with the same
+discipline applied to admin authentication/session handling
+specifically: CORS configuration, session token expiration, and log
+redaction coverage.
+
+**CORS and session TTL: both clean, confirmed not assumed.**
+`grep -rn "CORSMiddleware"` across the whole codebase: no matches --
+no `CORSMiddleware` is registered anywhere, meaning the safe default
+applies (browsers enforce same-origin, no cross-origin site can read
+an admin response even with a stolen bearer token in hand, unless it
+can also read local storage directly). `services/admin/auth.py`'s
+`login()` sets a real Redis TTL on every session
+(`SESSION_TTL_SECONDS = 8 * 60 * 60  # one working shift`) and generates
+the token itself via `secrets.token_urlsafe(32)` -- 256 bits of real
+entropy, not a predictable value.
+
+**Log redaction had the real gap**: `packages/core/logging.py`'s own
+docstring promises phone numbers, tokens, and initData "must never
+reach a log line in clear text, in any service, no matter who adds a
+new log call later" -- but `_REDACTED_KEYS` never actually included
+`totp_code`, `totp_secret`, or `session_token`. Confirmed via grep that
+nothing currently logs any of the three as a structured field, so this
+isn't an active leak today -- but that's exactly the class of *future*
+mistake this allowlist exists to guard against, the same promise
+`password`/`token` already keep. Also added `authorization`, covering
+the raw `Bearer <token>` header value if anything ever logs a request's
+headers directly.
+
+**Fixed**: all four added to `_REDACTED_KEYS`. `test_admin_credentials_
+are_redacted` added to `tests/unit/test_logging.py`, matching the
+file's own established subprocess-based test pattern exactly (its own
+docstring explains why: `configure_logging()`'s level-filter freeze
+would otherwise leak across tests sharing one pytest process); confirmed
+to genuinely fail against the pre-fix file via the usual stash-revert
+step. Full clean-slate rebuild: `docker compose down -v` -> `up -d` ->
+`alembic upgrade head` -> `mypy` clean (66 source files) -> full default
+suite 758 passed (up from 757), 18 deselected -> `-m load` 5 passed,
+fully clean this run -> `-m chaos_infra` 2 passed -> `-m e2e` 11 passed.
+
+---
+
 ## 2026-08-27 — Path traversal on both static-file mounts: checked live, clean
 
 The last item in today's systematic web-security sweep (dependencies,

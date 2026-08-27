@@ -23,6 +23,16 @@ _REDACTED_KEYS = {
     "webhook_secret",
     "api_key",
     "password",
+    # A code-review pass caught these missing: nothing currently logs a
+    # TOTP code/secret or an admin session token as a structured field,
+    # confirmed by grep -- but that's exactly the class of mistake this
+    # allowlist exists to catch for a *future* log call this file's own
+    # docstring already promises to cover ("no matter who adds a new log
+    # call later"), the same way password/token already are.
+    "totp_code",
+    "totp_secret",
+    "session_token",
+    "authorization",
 }
 
 

@@ -69,6 +69,17 @@ def test_bot_token_and_webhook_secret_are_redacted() -> None:
     assert parsed["webhook_secret"] == "***REDACTED***"
 
 
+def test_admin_credentials_are_redacted() -> None:
+    # A code review pass caught these missing -- nothing currently logs
+    # any of them, but that's exactly the future-mistake this allowlist
+    # exists to guard against (see this file's own docstring), the same
+    # way password/token already were covered.
+    parsed = _log_one_line(totp_code="123456", totp_secret="JBSWY3DPEHPK3PXP", session_token="abc.def")
+    assert parsed["totp_code"] == "***REDACTED***"
+    assert parsed["totp_secret"] == "***REDACTED***"
+    assert parsed["session_token"] == "***REDACTED***"
+
+
 def test_redaction_is_case_insensitive() -> None:
     # structlog callers are free to spell a key however they like --
     # the redaction check itself must not silently rely on exact casing.
