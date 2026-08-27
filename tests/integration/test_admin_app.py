@@ -264,6 +264,40 @@ async def test_console_frontend_is_blocked_by_the_ip_allowlist(admin_server):
         admin_app.state.ip_allowlist = []
 
 
+async def test_fastapis_own_docs_routes_are_reachable_with_no_allowlist(admin_server):
+    async with httpx.AsyncClient() as client:
+        docs = await client.get(f"{admin_server}/docs")
+        openapi = await client.get(f"{admin_server}/openapi.json")
+        redoc = await client.get(f"{admin_server}/redoc")
+    assert docs.status_code == 200
+    assert openapi.status_code == 200
+    assert redoc.status_code == 200
+
+
+async def test_fastapis_own_docs_routes_are_blocked_by_the_ip_allowlist(admin_server):
+    # Regression: a code-review pass that actually enumerated app.routes
+    # (not just routes anyone had written by hand) found /docs,
+    # /openapi.json, and /redoc bypassing the allowlist entirely --
+    # FastAPI adds these automatically, so a search for a hand-written
+    # route missing the check (the way /metrics and /auth/login were
+    # each separately caught before) would never find them. They expose
+    # this real-money admin panel's entire API surface -- every route,
+    # every request/response field -- to anyone on the network. Same
+    # regression guard as the /metrics and /console tests above, for the
+    # same underlying middleware, now covering these too.
+    admin_app.state.ip_allowlist = ["10.0.0.1"]
+    try:
+        async with httpx.AsyncClient() as client:
+            docs = await client.get(f"{admin_server}/docs")
+            openapi = await client.get(f"{admin_server}/openapi.json")
+            redoc = await client.get(f"{admin_server}/redoc")
+        assert docs.status_code == 403
+        assert openapi.status_code == 403
+        assert redoc.status_code == 403
+    finally:
+        admin_app.state.ip_allowlist = []
+
+
 async def test_audit_log_is_immutable_at_the_database_level(pool):
     admin_id, *_ = await create_test_admin(pool)
     row = await pool.fetchrow(

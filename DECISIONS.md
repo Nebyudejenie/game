@@ -5,6 +5,51 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — `/docs`, `/redoc`, `/openapi.json` were bypassing the admin IP allowlist too
+
+Reconsidering the previous entry's deferred "two independent IP
+-allowlist enforcement mechanisms" finding rather than just leaving it
+noted: refactoring the mechanism itself stayed correctly off-limits (no
+demonstrated current bug, touches working security-critical code), but
+the underlying *concern* -- "a route can bypass the allowlist and
+nobody notices" -- was checkable directly, by actually enumerating
+`app.routes` instead of grepping for hand-written routes the way the
+`/metrics` and `/auth/login` fixes were each found before.
+
+That enumeration found three: FastAPI's own auto-added `/docs`
+(Swagger UI), `/redoc`, and `/openapi.json`. None of them show up in a
+search for routes anyone wrote by hand -- they don't exist as decorated
+functions in `services/admin/app.py` at all, `FastAPI()` adds them
+implicitly -- so the exact search pattern that caught the two earlier
+gaps would never have found these. Confirmed live, not assumed: with a
+real IP allowlist configured excluding the caller, `/dashboard` and
+`/metrics` correctly return 403 while `/docs`, `/openapi.json`, and
+`/redoc` all still returned 200 -- a real-money admin panel's entire API
+surface (every route, every request/response field) reachable by anyone
+on the network regardless of the allowlist spec 9.2 asks the whole
+panel to have.
+
+**Fixed**: extended the existing `_console_frontend_ip_allowlist`
+middleware (renamed `_unauthenticated_route_ip_allowlist`, since its
+scope is no longer just `/console`) to also cover these three paths
+(plus `/docs/oauth2-redirect`, the OAuth2 redirect helper FastAPI's docs
+UI itself can add). Same fix shape as the two earlier gaps -- extend the
+existing check to a path it didn't cover -- not a new mechanism.
+
+**Verification**: `test_fastapis_own_docs_routes_are_reachable_with_no_
+allowlist` and `test_fastapis_own_docs_routes_are_blocked_by_the_ip_
+allowlist` (the latter confirmed to genuinely fail -- 200, not 403 --
+against the pre-fix file via the usual stash-revert step). Full
+clean-slate rebuild: `docker compose down -v` -> `up -d` -> `alembic
+upgrade head` -> `mypy` clean (65 source files) -> full default suite
+753 passed (up from 751), 18 deselected -> `-m load` 1 failure
+(`test_gateway_fanout.py`'s stalled-reader test this time, the same
+well-documented host-contention pattern, confirmed via `uptime`/`docker
+ps`, unrelated to this turn) -> `-m chaos_infra` 2 passed -> `-m e2e` 11
+passed.
+
+---
+
 ## 2026-08-27 — A `/code-review high` pass over today's own work: three real findings fixed, three deliberately deferred
 
 With the explicit task list and every follow-on gap this session found

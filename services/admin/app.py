@@ -59,19 +59,34 @@ def _check_ip_allowlist(request: Request) -> None:
         raise HTTPException(status_code=403, detail="source IP not permitted")
 
 
+# Routes with no Depends() of their own to run the allowlist check
+# through, so it's enforced here as middleware instead. A code-review
+# pass that actually enumerated app.routes (not just the routes anyone
+# had written by hand) found /docs, /redoc, and /openapi.json here too --
+# FastAPI adds these automatically, so they'd never show up in a search
+# for a hand-written route missing the check the way /metrics and
+# /auth/login did in earlier passes, but they leak this real-money
+# panel's entire API surface (every route, every request/response
+# field) to anyone on the network regardless of the allowlist,
+# confirmed live: with a real allowlist configured, /dashboard and
+# /metrics correctly 403 an excluded IP while /docs/openapi.json/redoc
+# still returned 200.
+_UNAUTHENTICATED_DOC_PATHS = frozenset({"/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"})
+
+
 @app.middleware("http")
-async def _console_frontend_ip_allowlist(
+async def _unauthenticated_route_ip_allowlist(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]
 ) -> Response:
     # The frontend mounted below at /console is plain StaticFiles, which
     # (unlike every API route) can't run a Depends(current_admin) IP
-    # check -- and every other unauthenticated route in this file
+    # check either -- and every other unauthenticated route in this file
     # (/auth/login, /metrics) already learned the hard way, via a real
     # code review finding, that "no bearer token yet" is not license to
     # skip the allowlist spec section 9.2 asks the whole admin panel to
-    # have. This is the same check, just as middleware, since a static
-    # mount has no dependency-injection point of its own.
-    if request.url.path.startswith("/console") and app.state.ip_allowlist:
+    # have.
+    path = request.url.path
+    if (path.startswith("/console") or path in _UNAUTHENTICATED_DOC_PATHS) and app.state.ip_allowlist:
         if _client_ip(request) not in app.state.ip_allowlist:
             return Response(status_code=403, content="source IP not permitted")
     return await call_next(request)

@@ -550,7 +550,14 @@ the Mini App). See `DECISIONS.md`.
   screen's own fetch calls hitting this same API — verified with a real
   Playwright walkthrough (login, every screen, a real KYC-level action
   end to end through the UI, logout) against the real dev database, not
-  just curl.
+  just curl. That same middleware also covers FastAPI's own
+  auto-generated `/docs`, `/redoc`, and `/openapi.json` — a code-review
+  pass that actually enumerated `app.routes` (not just routes anyone had
+  written by hand) found these bypassing the allowlist entirely,
+  exposing this real-money panel's whole API surface to anyone on the
+  network. Same class of gap `/metrics` and `/auth/login` were each
+  separately caught with before, just never checked in a place nobody
+  writes by hand. See `DECISIONS.md`.
 - **Reports (spec section 11):** player LTV (net lifetime deposits minus
   withdrawals, both per-user on the user detail view and as a ranked
   leaderboard) and weekly signup-cohort retention (one set-based SQL
