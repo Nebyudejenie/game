@@ -47,6 +47,7 @@ class ConnectionHandler:
         self._bot_token = bot_token
 
         self._user_id: int | None = None
+        self._auto_mark_preference: bool = True
         self._joined_rooms: set[int] = set()
         self._cq = ConnectionQueue()
         self._writer_task: asyncio.Task[None] | None = None
@@ -100,6 +101,7 @@ class ConnectionHandler:
         )
         self._user_id = user_id
         metrics.gateway_connections.inc()
+        self._auto_mark_preference = await queries.get_auto_mark_preference(self._pool, user_id)
         balance = await user_balance_snapshot(self._pool, user_id)
         self._hub.subscribe_user(user_id, self._cq)
 
@@ -161,7 +163,10 @@ class ConnectionHandler:
                 frame.get("room_id"),
                 ack_name="take_card",
                 action="join",
-                payload={"card_no": frame.get("card_no"), "auto_mark": True},
+                payload={
+                    "card_no": frame.get("card_no"),
+                    "auto_mark": self._auto_mark_preference,
+                },
                 bucket=rate_limit.TAKE_CARD,
             )
         elif t == "drop_card":
@@ -169,11 +174,23 @@ class ConnectionHandler:
                 frame.get("room_id"), ack_name="drop_card", action="drop_card", payload={}
             )
         elif t == "set_auto":
-            await self._run_action(
-                frame.get("room_id"),
-                ack_name="set_auto",
-                action="set_auto",
-                payload={"auto": bool(frame.get("auto", True))},
+            # Mini App spec: "Persist the choice per user" -- round_entries
+            # .auto_mark (round-scoped, written by the engine) and this
+            # user-scoped default (written directly here, same as
+            # get_or_create_user_by_telegram_id's own direct writes) are
+            # updated together so the player's next take_card picks up
+            # whatever they last chose instead of resetting to AUTO on.
+            assert self._user_id is not None
+            auto = bool(frame.get("auto", True))
+            self._auto_mark_preference = auto
+            await asyncio.gather(
+                self._run_action(
+                    frame.get("room_id"),
+                    ack_name="set_auto",
+                    action="set_auto",
+                    payload={"auto": auto},
+                ),
+                queries.set_auto_mark_preference(self._pool, self._user_id, auto),
             )
         elif t == "claim":
             room_id = await self._room_id_for_round(frame.get("round_id"))

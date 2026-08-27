@@ -61,6 +61,19 @@ async def user_phone(pool: asyncpg.Pool, user_id: int) -> str | None:
     return decrypt_phone(bytes(blob)) if blob is not None else None
 
 
+async def get_auto_mark_preference(pool: asyncpg.Pool, user_id: int) -> bool:
+    value = await pool.fetchval(
+        "SELECT auto_mark_preference FROM users WHERE id = $1", user_id
+    )
+    return bool(value) if value is not None else True
+
+
+async def set_auto_mark_preference(pool: asyncpg.Pool, user_id: int, auto: bool) -> None:
+    await pool.execute(
+        "UPDATE users SET auto_mark_preference = $1 WHERE id = $2", auto, user_id
+    )
+
+
 async def user_history(pool: asyncpg.Pool, user_id: int, limit: int = 10) -> list[dict[str, Any]]:
     rows = await pool.fetch(
         """

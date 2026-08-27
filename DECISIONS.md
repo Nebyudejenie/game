@@ -5,6 +5,55 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — AUTO toggle reset to on every round; the Mini App spec says it must persist per user
+
+The Mini App UI spec (idea.md line 5267-5268) is explicit: "AUTO toggle: on
+= server marks and auto-claims. Off = the player taps cells and taps
+BINGO. **Persist the choice per user.**" `round_entries.auto_mark` already
+existed and `set_auto` already updated it correctly *for the current
+round* -- but `services/gateway/connection.py`'s `take_card` handler
+hardcoded `auto_mark: True` on every single join, so a player who
+explicitly turned AUTO off got reset to AUTO on the moment their next
+round started. The preference was never actually a per-user default,
+just a per-round one.
+
+**Fixed**: a new `users.auto_mark_preference boolean NOT NULL DEFAULT
+true` column (migration `6a040371439e`). `ConnectionHandler` reads it once
+at handshake into `self._auto_mark_preference` and uses that instead of a
+literal `True` for `take_card`'s payload; `set_auto` now writes it back to
+`users` (via `services/gateway/queries.py`'s new
+`set_auto_mark_preference`, a direct pool write -- consistent with
+`get_or_create_user_by_telegram_id`'s own existing direct write, since
+this is a user-profile field, not room/game state that needs to go
+through the room's single-writer engine process) at the same time it
+sends the `set_auto` command to the engine.
+
+**Verification**: `test_take_card_uses_the_players_persisted_auto_mark_preference`
+in `tests/integration/test_gateway_gameplay.py` -- a real two-connection,
+two-room WebSocket test: connection one joins room A, confirms the
+default is AUTO on, explicitly turns it off, and disconnects; a second,
+independent connection (proving this isn't just state kept in the first
+connection's own object) joins a *different* room B and takes a card
+without ever sending `set_auto`, and the round_entries row for that new
+round must still show `auto_mark = false`. Confirmed the test genuinely
+fails (`assert True is False`) against the pre-fix files via the usual
+stash-revert step. mypy clean (67 source files) throughout. Full
+clean-slate rebuild: `docker compose down -v` -> `up -d` -> `alembic
+upgrade head` (all 11 migrations apply cleanly) -> `mypy` clean -> full
+default suite 763 passed (up from 762), 18 deselected -> `-m load` 2
+failures (`test_gateway_fanout.py`, `test_load_multiroom.py`; `uptime`
+showed load average up to 2.52 with `spos-backend` still cycling through
+restarts throughout, the same well-documented host-contention pattern) ->
+`-m chaos_infra` 2 passed -> `-m e2e` 1 failure on first pass
+(`test_verify_draw_button_shows_a_verified_seed`, a 25s Playwright
+timeout), reran in isolation once load had eased (2.52 -> 1.89) and it
+passed in 12.4s, then reran the full `-m e2e` suite clean, 11 passed --
+confirming the same host-contention pattern, not a real regression, since
+this change touches only `take_card`/`set_auto` handling, nothing in the
+gameplay/draw-verification path this test exercises.
+
+---
+
 ## 2026-08-27 — Dashboard had no way to surface "something needs attention" without already knowing to check Payments
 
 Spec section 6226's own Dashboard row lists five things: "Live players,

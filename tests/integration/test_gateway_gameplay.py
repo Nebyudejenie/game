@@ -110,3 +110,88 @@ async def test_full_gameplay_over_websocket(gateway_server, pool, redis, card_po
     finally:
         await engine.stop()
         await asyncio.wait_for(task, timeout=15)
+
+
+async def test_take_card_uses_the_players_persisted_auto_mark_preference(
+    gateway_server, pool, redis, card_pool, conn
+):
+    # Mini App spec: "AUTO toggle ... Persist the choice per user." A
+    # player who turns AUTO off must get AUTO off again on their very next
+    # take_card, even in a different room and a brand-new WebSocket
+    # connection -- not just for the rest of the connection that set it.
+    room_a = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=1,
+        call_interval_ms=10, is_active=True,
+    )
+    room_b = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=1,
+        call_interval_ms=10, is_active=True,
+    )
+    engine_a = RoundEngine(pool, redis, await load_room_config(pool, room_a), card_pool)
+    engine_b = RoundEngine(pool, redis, await load_room_config(pool, room_b), card_pool)
+    task_a = asyncio.create_task(engine_a.run_forever())
+    task_b = asyncio.create_task(engine_b.run_forever())
+    try:
+        other_a = await create_funded_user(conn)
+        assert (await engine_a.join(other_a, 2)).ok
+        other_b = await create_funded_user(conn)
+        assert (await engine_b.join(other_b, 2)).ok
+
+        telegram_id = next_telegram_id()
+
+        async with websockets.connect(gateway_server) as ws:
+            await ws.send(json.dumps({"t": "auth", "init_data": build_init_data(telegram_id)}))
+            authed = json.loads(await ws.recv())
+            user_id = authed["user"]["id"]
+            await fund_user(conn, user_id, Decimal("100.00"))
+
+            await ws.send(json.dumps({"t": "join", "room_id": room_a}))
+            await recv_until(ws, "state_sync")
+            await ws.send(json.dumps({"t": "take_card", "room_id": room_a, "card_no": 1}))
+            ack = await recv_until(ws, "ack")
+            assert ack == {"t": "ack", "for": "take_card", "ok": True, "reason": None}
+
+            round_a_id = await pool.fetchval(
+                "SELECT id FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1", room_a
+            )
+            assert await pool.fetchval(
+                "SELECT auto_mark FROM round_entries WHERE round_id = $1 AND user_id = $2",
+                round_a_id,
+                user_id,
+            ) is True
+
+            await ws.send(json.dumps({"t": "set_auto", "room_id": room_a, "auto": False}))
+            set_auto_ack = await recv_until(ws, "ack")
+            assert set_auto_ack == {"t": "ack", "for": "set_auto", "ok": True, "reason": None}
+
+        assert await pool.fetchval(
+            "SELECT auto_mark_preference FROM users WHERE id = $1", user_id
+        ) is False
+
+        # A second, independent connection, joining a different room, with
+        # no set_auto sent in this session at all -- proof this is a real
+        # persisted default, not state kept in the first connection's own
+        # ConnectionHandler instance.
+        async with websockets.connect(gateway_server) as ws2:
+            await ws2.send(json.dumps({"t": "auth", "init_data": build_init_data(telegram_id)}))
+            await ws2.recv()  # authed
+
+            await ws2.send(json.dumps({"t": "join", "room_id": room_b}))
+            await recv_until(ws2, "state_sync")
+            await ws2.send(json.dumps({"t": "take_card", "room_id": room_b, "card_no": 1}))
+            ack2 = await recv_until(ws2, "ack")
+            assert ack2 == {"t": "ack", "for": "take_card", "ok": True, "reason": None}
+
+        round_b_id = await pool.fetchval(
+            "SELECT id FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1", room_b
+        )
+        assert await pool.fetchval(
+            "SELECT auto_mark FROM round_entries WHERE round_id = $1 AND user_id = $2",
+            round_b_id,
+            user_id,
+        ) is False
+    finally:
+        await engine_a.stop()
+        await engine_b.stop()
+        await asyncio.wait_for(task_a, timeout=15)
+        await asyncio.wait_for(task_b, timeout=15)
