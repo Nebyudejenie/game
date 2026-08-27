@@ -5,6 +5,53 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — The production image ran every service as root; fixed
+
+One more concrete, bounded infrastructure question, checked directly
+rather than assumed: does `Dockerfile` (the one shared image
+`deploy/docker-compose.prod.yml` runs all six real-money services from
+-- gateway, admin, payments, bot, engine-worker, payout-worker) drop
+privileges to a non-root user, or does it run as whatever the base
+image defaults to? No `USER` directive existed anywhere in it -- every
+one of the six services was running as root inside its own container.
+Standard, well-known container hardening gap: a future vulnerability in
+any of them (a dependency CVE, an unforeseen bug) would hand an
+attacker root inside the container instead of a deliberately
+unprivileged user, for no reason any of these services actually needs
+root.
+
+**Fixed**: `useradd --create-home --shell /usr/sbin/nologin jobingo`,
+`chown -R jobingo:jobingo /app`, then `USER jobingo` -- ordered after
+the `pip install` step (which genuinely needs root to write into the
+base image's system site-packages) and before anything else, so every
+later stage and every `command:` `docker-compose.prod.yml` sets per
+-service runs unprivileged.
+
+**Verified end to end, not just that the Dockerfile parses**: a real
+`docker build` (this session's own established discipline -- a
+Dockerfile change without a real build has caught real packaging bugs
+before and gets no less scrutiny here), then a real container run
+confirming `whoami`/`id`/`os.getuid()` all report the new `jobingo`
+user (uid 1000), not root -- and, the part that actually matters, a
+real `services/admin/app.py` instance started from this hardened image
+against this sandbox's real dev Postgres and Redis, reaching
+`Application startup complete` and answering `GET /healthz` with a
+genuine `{"status": "ok"}` (which itself requires a real `SELECT 1`
+against Postgres and a real Redis `PING` to succeed) -- proof the
+user/permission change doesn't quietly break the app's own ability to
+read its files or run, not just that the build step completed.
+
+Side observation from watching this real build run: it resolved
+noticeably newer versions of several dependencies than this session's
+own long-running `.venv` has installed (e.g. `fastapi==0.141.1` here
+vs. an older `>=0.110`-satisfying version locally, `cryptography==50.0.1`,
+`pydantic==2.13.4`) -- a live demonstration of the "Dependency
+vulnerability audit" entry's own lockfile observation elsewhere in this
+file, not a new finding, but a real one now confirmed rather than a
+hypothetical.
+
+---
+
 ## 2026-08-27 — Admin session hardening check: CORS and TTL clean, log redaction had a real gap
 
 Continuing past yesterday's five-category sweep with the same

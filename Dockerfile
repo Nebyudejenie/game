@@ -30,5 +30,19 @@ COPY . .
 # not.
 RUN pip install --no-cache-dir -e .
 
+# A real non-root user -- the base image's own default is root, which
+# means every one of this monorepo's six deployed services (a real
+# -money gambling platform: gateway, admin, payments, bot, engine
+# -worker, payout-worker) would otherwise run as root inside its
+# container for no reason it actually needs to. A future vulnerability
+# in any of them (a dependency CVE, an unforeseen bug) would then hand
+# an attacker root inside the container instead of a deliberately
+# unprivileged one -- standard container hardening, done after the pip
+# install above (which needs to write to the base image's site
+# -packages as root) and before the chown, so the app's own files are
+# actually owned by the user that runs them.
+RUN useradd --create-home --shell /usr/sbin/nologin jobingo && chown -R jobingo:jobingo /app
+USER jobingo
+
 # No default CMD -- deploy/docker-compose.prod.yml sets a real one per
 # service.
