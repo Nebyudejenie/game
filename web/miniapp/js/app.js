@@ -1,4 +1,4 @@
-import { initI18n, t, setLanguage } from "./i18n.js";
+import { initI18n, t, setLanguage, applyServerLanguage } from "./i18n.js";
 import { getState, setState, subscribe, serverNow } from "./state.js";
 import * as ws from "./ws.js";
 import * as haptics from "./haptics.js";
@@ -749,6 +749,10 @@ async function boot() {
     return;
   }
   setState({ user });
+  // The language_code hint drove the boot screen above; now that the
+  // server told us the real users.language, that value wins (spec 7.5).
+  await applyServerLanguage(user.language);
+  applyStaticTranslations();
   document.getElementById("balance-amount").textContent = `${user.balance} ETB`;
   showScreen("rooms");
   refreshRoomList();

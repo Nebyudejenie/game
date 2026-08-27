@@ -101,15 +101,25 @@ class ConnectionHandler:
         )
         self._user_id = user_id
         metrics.gateway_connections.inc()
-        self._auto_mark_preference = await queries.get_auto_mark_preference(self._pool, user_id)
-        balance = await user_balance_snapshot(self._pool, user_id)
+        # Independent reads, same reasoning as build_state_sync()'s own
+        # asyncio.gather: none of these three depend on each other's result.
+        self._auto_mark_preference, language, balance = await asyncio.gather(
+            queries.get_auto_mark_preference(self._pool, user_id),
+            queries.get_user_language(self._pool, user_id),
+            user_balance_snapshot(self._pool, user_id),
+        )
         self._hub.subscribe_user(user_id, self._cq)
 
         await self._ws.send_text(
             json.dumps(
                 {
                     "t": "authed",
-                    "user": {"id": user_id, "name": display_name, "balance": balance["cash"]},
+                    "user": {
+                        "id": user_id,
+                        "name": display_name,
+                        "balance": balance["cash"],
+                        "language": language,
+                    },
                     "server_time": int(time.time() * 1000),
                 }
             )

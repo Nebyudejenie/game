@@ -115,6 +115,38 @@ async def test_miniapp_loads_authenticates_and_shows_balance(gateway_server, bro
     await page.close()
 
 
+async def test_miniapp_language_uses_the_db_value_over_the_telegram_hint(
+    gateway_server, browser, pool, conn
+):
+    # Spec 7.5: "The Mini App reads language_code as a hint but the DB
+    # value wins." The stub always reports language_code "am"; after the
+    # user row exists we set users.language to "en" directly (the same
+    # thing the bot's own /language command would do) and reload -- a real
+    # UI string must come back in English, proving the server's value,
+    # not the client hint, decided what rendered.
+    telegram_id = next_telegram_id()
+    page, console_errors = await prepare_page(browser, telegram_id)
+
+    http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+    await page.goto(http_base + "/")
+    await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+
+    user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+    assert user_row is not None, "authed handshake did not create the user row"
+    await conn.execute("UPDATE users SET language = 'en' WHERE id = $1", user_row["id"])
+
+    await page.reload()
+    await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+
+    await page.click("#open-wallet-btn")
+    await page.wait_for_selector("#screen-wallet.active", timeout=5000)
+    wallet_title = await page.text_content('[data-i18n="wallet.title"]')
+    assert wallet_title == "Wallet", f"expected the DB's 'en' to win, got {wallet_title!r}"
+
+    assert console_errors == [], f"JS errors on load: {console_errors}"
+    await page.close()
+
+
 async def test_miniapp_full_gameplay_flow(gateway_server, browser, pool, redis, card_pool, conn):
     # is_active=True: the gateway's own room list (what the miniapp UI
     # browses) reads WHERE is_active = true, unlike every other test using

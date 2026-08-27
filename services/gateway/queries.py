@@ -61,6 +61,11 @@ async def user_phone(pool: asyncpg.Pool, user_id: int) -> str | None:
     return decrypt_phone(bytes(blob)) if blob is not None else None
 
 
+async def get_user_language(pool: asyncpg.Pool, user_id: int) -> str:
+    value = await pool.fetchval("SELECT language FROM users WHERE id = $1", user_id)
+    return str(value) if value is not None else "am"
+
+
 async def get_auto_mark_preference(pool: asyncpg.Pool, user_id: int) -> bool:
     value = await pool.fetchval(
         "SELECT auto_mark_preference FROM users WHERE id = $1", user_id

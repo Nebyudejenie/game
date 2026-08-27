@@ -5,6 +5,53 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — The Mini App's language hint always won; the spec says the DB value must
+
+Spec 7.5, verbatim: "The Mini App reads `Telegram.WebApp.initDataUnsafe
+.user.language_code` as a hint but the DB value wins." `users.language`
+(default `'am'`, settable via the bot's own `/language` command) already
+existed and was already the real source of truth on the bot side
+(`services/bot/handlers.py`'s `_language_for()` reads it for every
+message) -- but the Mini App's `boot()` only ever read the Telegram
+client's `language_code` hint and never consulted the database at all.
+A player who set their language to English through the bot would still
+see the Mini App entirely in Amharic, contradicting the one sentence the
+spec spends on this.
+
+**Fixed**: the gateway's `authed` handshake message now includes the
+real `users.language` value (a new `get_user_language()` in
+`services/gateway/queries.py`, fetched alongside the existing
+auto-mark-preference and balance reads via one `asyncio.gather`, same
+reasoning as `build_state_sync()`'s own concurrent reads -- three
+independent lookups, nothing to serialize). `web/miniapp/js/i18n.js`
+gained `applyServerLanguage()`, called once `boot()` in `app.js` has the
+real `authed.user.language`: it loads that language's catalog if needed
+and overrides whatever the client hint set, then `applyStaticTranslations()`
+re-runs so the already-rendered DOM picks up the change the same session,
+not just on the next cold start.
+
+**Verification**: `test_miniapp_language_uses_the_db_value_over_the_telegram_hint`
+in `tests/integration/test_miniapp_e2e.py` -- a real Chromium session via
+the existing Playwright harness. The Telegram stub always reports
+`language_code: "am"`; the test sets `users.language = 'en'` directly
+(the same effect the bot's `/language` command has) after the user row
+exists, reloads the page, opens the wallet screen, and asserts the
+visible `wallet.title` text reads "Wallet", not "የገንዘብ ቦርሳ" -- a real
+rendered string, not an internal state check. Confirmed the test
+genuinely fails against the pre-fix files via the usual stash-revert
+step (`'የገንዘብ ቦርሳ' == 'Wallet'` failed, i.e. Amharic rendered anyway).
+mypy clean (67 source files) throughout. Full clean-slate rebuild:
+`docker compose down -v` -> `up -d` -> `alembic upgrade head` (all 11
+migrations, unchanged by this entry) -> `mypy` clean -> full default
+suite 763 passed, 19 deselected (up from 18 -- one new e2e test) -> `-m
+load` 2 failures (`test_gateway_fanout.py`, `test_load_multiroom.py`;
+`uptime` showed load average 2.53 with `spos-backend` still cycling
+through restarts, the same well-documented host-contention pattern,
+unrelated to this change) -> `-m chaos_infra` 2 passed -> `-m e2e` 12
+passed, including the new test.
+
+---
+
 ## 2026-08-27 — AUTO toggle reset to on every round; the Mini App spec says it must persist per user
 
 The Mini App UI spec (idea.md line 5267-5268) is explicit: "AUTO toggle: on

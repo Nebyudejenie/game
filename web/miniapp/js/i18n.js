@@ -31,6 +31,17 @@ export function setLanguage(language) {
   if (SUPPORTED.includes(language)) currentLanguage = language;
 }
 
+// Spec 7.5: "The Mini App reads language_code as a hint but the DB value
+// wins." initI18n()/setLanguage() above apply the Telegram client hint
+// immediately at boot, before auth; this is called once the `authed`
+// frame's real users.language arrives, so the DB value can override that
+// hint the same session, not just on the next cold start.
+export async function applyServerLanguage(language) {
+  if (!SUPPORTED.includes(language) || language === currentLanguage) return;
+  await loadCatalog(language);
+  currentLanguage = language;
+}
+
 export function t(key, params) {
   const template =
     (catalogs[currentLanguage] && catalogs[currentLanguage][key]) ||
