@@ -5,6 +5,49 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — Mini App had no om/ti locale files at all, unlike the bot
+
+A follow-on to the previous entry: once the Mini App actually started
+reading `users.language`, a value of `"om"` or `"ti"` (both valid per the
+column's own CHECK constraint, and settable today via the bot's
+`/language` command) would have been silently ignored --
+`web/miniapp/js/i18n.js`'s `SUPPORTED` list only had `["am", "en"]`, so
+`applyServerLanguage()`'s own guard would just no-op and leave whatever
+the Telegram hint had already set. `services/bot/locales/` already has
+`om.json`/`ti.json` (spec 7.5 lists all four languages); the Mini App's
+`web/miniapp/locales/` only had two of the four.
+
+**Fixed**: `web/miniapp/locales/om.json` and `ti.json`, both `{}` --
+deliberate empty stubs, exactly mirroring the bot's own
+`om`/`ti` files (`services/bot/i18n.py`'s own docstring: "`om` and `ti`
+are stubbed and fall back to English, then Amharic, for any key they
+don't carry yet"). No translations were fabricated here; `t()`'s
+existing three-tier fallback chain (current language -> English ->
+Amharic) already does the right thing against an empty catalog, the same
+mechanism the bot's own tests (`test_om_falls_back_to_english_for_missing_keys`)
+already prove for that side. `SUPPORTED` in `i18n.js` now lists all four.
+
+**Verification**: `test_miniapp_language_om_is_accepted_and_falls_back_to_english`
+in `tests/integration/test_miniapp_e2e.py`, same real-Chromium pattern as
+the previous entry's test -- sets `users.language = 'om'`, reloads, and
+asserts the wallet-title text renders as the real English fallback
+("Wallet"), not the stale Amharic that a silently-ignored "om" would
+have left in place. Confirmed the test genuinely fails
+(`'የገንዘብ ቦርሳ' == 'Wallet'`) against the pre-fix `i18n.js` via the usual
+stash-revert step -- proof "om" really was being silently dropped before
+this, not just untested. No Python/mypy surface (pure JS + two new JSON
+files). Full clean-slate rebuild: `docker compose down -v` -> `up -d` ->
+`alembic upgrade head` (all 11 migrations, unchanged by this entry) ->
+`mypy` clean (67 source files) -> full default suite 763 passed, 20
+deselected (up from 19 -- one new e2e test) -> `-m load` 2 failures
+(`test_gateway_fanout.py`, `test_load_multiroom.py`; `uptime` showed
+load average 2.14 with `spos-backend` still cycling through restarts,
+the same well-documented host-contention pattern, unrelated to a
+locale-file change) -> `-m chaos_infra` 2 passed -> `-m e2e` 13 passed,
+including the new test.
+
+---
+
 ## 2026-08-27 — The Mini App's language hint always won; the spec says the DB value must
 
 Spec 7.5, verbatim: "The Mini App reads `Telegram.WebApp.initDataUnsafe

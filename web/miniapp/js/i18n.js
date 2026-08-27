@@ -2,8 +2,13 @@
 // services/bot/i18n.py's rules so the product reads consistently whether a
 // player is in the bot or the Mini App. Every user-facing string in this
 // app goes through t(), same discipline as the bot side.
+//
+// om/ti mirror services/bot/locales/om.json and ti.json: deliberate empty
+// stubs (spec 7.5 lists all four as supported), so every key falls through
+// t()'s own fallback chain to English, then Amharic, until real
+// translations exist -- not fabricated here.
 
-const SUPPORTED = ["am", "en"];
+const SUPPORTED = ["am", "en", "om", "ti"];
 const DEFAULT_LANGUAGE = "am";
 const FALLBACK_LANGUAGE = "en";
 
