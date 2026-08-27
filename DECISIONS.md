@@ -5,6 +5,39 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — The Mini App's own XSS exposure, checked with the same rigor: clean by design
+
+Yesterday's XSS sweep only covered `web/admin/`. The player-facing Mini
+App (`web/miniapp/`) is actually the higher-value target to have
+checked -- real players, not a handful of trusted admins -- and hadn't
+been looked at with this specific lens at all.
+
+Every `innerHTML` assignment traced, the same discipline as the admin
+sweep: `web/miniapp/js/app.js`/`render/card.js`/`render/board.js` have
+six sites total. Five are `= ""` (clearing content -- no injection
+surface at all). The one real template (`app.js`'s room-card renderer)
+interpolates only `stake`/`players`/`pot`/`status` -- numeric or fixed
+-enum values from admin-configured room state, never anything a player
+submits as free text.
+
+**The stronger finding: this frontend never renders any player's
+identity anywhere in the first place.** No `display_name` or
+`first_name` appears in any UI string -- confirmed by grep, not
+assumed -- winner announcements use only `user_id` (numeric) and
+`amount` (decimal), via `.textContent`, not `.innerHTML`. And every
+other place this codebase actually builds dynamic DOM content
+(`buildCardGrid()`, `render/card.js`, `render/board.js`,
+`loadHistory()`) uses `document.createElement()` +
+`.textContent = ...` -- the DOM-safe pattern that never parses its
+input as HTML at all, structurally immune to injection regardless of
+the string's content, not merely escaped correctly by convention the
+way the admin frontend's `escapeHtml()` calls are. A genuinely
+different, stronger design choice than the admin console's, and a real
+one confirmed by reading every call site, not inferred from "it's a
+small player-facing app so it's probably fine."
+
+---
+
 ## 2026-08-27 — The production image ran every service as root; fixed
 
 One more concrete, bounded infrastructure question, checked directly
