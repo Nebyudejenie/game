@@ -236,6 +236,17 @@ async def request_withdrawal(
                 status = STATUS_APPROVED if auto_ok else STATUS_REVIEW
                 review_reason = "; ".join(failed_checks) if failed_checks else None
                 span.set_attribute("withdrawal.status", status)
+                # A code-review pass caught that review_reason (added
+                # alongside the payments row itself, see DECISIONS.md) was
+                # never surfaced in the trace this span already carries --
+                # an on-call engineer looking at withdrawal.request in
+                # Jaeger/Tempo for a review-routed request had no way to
+                # see *why* without a separate database round trip, the
+                # same visibility gap already closed for the admin review
+                # queue itself. OTel attributes don't accept None, so this
+                # only sets it when there's an actual reason to show.
+                if review_reason is not None:
+                    span.set_attribute("withdrawal.review_reason", review_reason)
 
                 payment_row = await conn.fetchrow(
                     """

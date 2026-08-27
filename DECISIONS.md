@@ -5,6 +5,43 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — `review_reason` reached the admin queue but never the trace; closed the same gap on the observability side
+
+A follow-on to the `review_reason` feature itself: the admin-facing
+half (the payments row, `list_pending_withdrawals()`, the Payments
+screen's own column) was built and verified earlier today, but
+`withdrawal.request`'s own OpenTelemetry span -- spec 10.4's "deposit
+and payout paths end to end" -- never picked it up. An on-call engineer
+reading this span in Jaeger/Tempo for a review-routed request could see
+`withdrawal.status = "review"` but had no way to see *why* without a
+separate database lookup -- the same visibility gap already closed for
+the admin queue, just the observability side of it, not the admin-UI
+side.
+
+**Fixed**: `span.set_attribute("withdrawal.review_reason", review_reason)`
+right alongside the existing `withdrawal.status` attribute -- only when
+there's an actual reason to show, since OTel attributes don't accept
+`None` (the approved path correctly never sets it).
+
+**Verification**: two tests in `tests/integration/test_tracing.py`,
+matching that file's own established real-SDK-exporter pattern (a real
+`TracerProvider` + `InMemorySpanExporter`, real exported spans read
+back, not mocked) -- one confirming the *approved* path still correctly
+has no `review_reason` attribute at all (the negative case), one
+confirming the *review* path's span carries the real reason text.
+Confirmed the new positive-case test genuinely fails (`KeyError`, the
+attribute doesn't exist at all) against the pre-fix file via the usual
+stash-revert step. Full clean-slate rebuild: `docker compose down -v`
+-> `up -d` -> `alembic upgrade head` -> `mypy` clean (66 source files)
+-> full `test_tracing.py` 5 passed -> full default suite 761 passed (up
+from 760), 18 deselected -> `-m load` 2 failures
+(`test_gateway_fanout.py`, `test_load_multiroom.py`, the same
+well-documented host-contention pattern, confirmed via `uptime`/`docker
+ps`, unrelated to this turn) -> `-m chaos_infra` 2 passed -> `-m e2e` 11
+passed.
+
+---
+
 ## 2026-08-27 — A systematic N+1 sweep found two more sequential-publish loops; one candidate deliberately left alone
 
 A different angle from today's security sweep: every `for`/`async for`

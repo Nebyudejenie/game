@@ -150,6 +150,37 @@ async def test_request_withdrawal_span_records_the_real_status(pool, redis, conn
     span = next(s for s in _EXPORTER.get_finished_spans() if s.name == "withdrawal.request")
     assert dict(span.attributes)["withdrawal.status"] == intent.status == "approved"
     assert dict(span.attributes)["withdrawal.our_ref"] == intent.our_ref
+    # A code-review pass caught review_reason (the "which rule actually
+    # failed" field added to the payments row itself) never reaching the
+    # trace -- an on-call engineer reading this span in Jaeger/Tempo had
+    # no way to see why a review-routed request landed there without a
+    # separate database lookup. Nothing to show on the *approved* path
+    # (no rule failed), confirmed here as the negative case; the review
+    # -path positive case is the next test.
+    assert "withdrawal.review_reason" not in dict(span.attributes)
+
+
+async def test_request_withdrawal_span_records_the_review_reason_when_routed_to_review(pool, redis, conn):
+    user_id = await create_funded_user(conn, Decimal("10000.00"))
+    intent = await request_withdrawal(
+        pool,
+        redis,
+        _FakeProvider(),
+        user_id=user_id,
+        amount=Decimal("3000.00"),
+        method_kind="telebirr",
+        account_ref="0911000666",
+        holder_name="Tracing Test Holder Review",
+        min_withdraw=Decimal("10.00"),
+        auto_approve_limit=Decimal("2000.00"),
+        kyc_threshold=Decimal("5000.00"),
+        chargeback_window_minutes=30,
+        min_account_age_hours=0.0,
+    )
+
+    span = next(s for s in _EXPORTER.get_finished_spans() if s.name == "withdrawal.request")
+    assert dict(span.attributes)["withdrawal.status"] == intent.status == "review"
+    assert "auto-approve limit" in dict(span.attributes)["withdrawal.review_reason"]
 
 
 async def test_payout_dispatch_produces_real_nested_spans(pool, redis, conn):
