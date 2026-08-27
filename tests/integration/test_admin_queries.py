@@ -4,6 +4,7 @@ through the ledger (never a direct balance write) and leave an audit trail.
 
 import asyncio
 import json
+import uuid
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -241,6 +242,7 @@ async def test_adjust_balance_credits_via_ledger_and_writes_audit_log(pool, conn
         amount=Decimal("25.00"),
         reason="goodwill credit for a support ticket",
         ip_address="127.0.0.1",
+        request_id=str(uuid.uuid4()),
     )
     assert txn_id
 
@@ -278,10 +280,61 @@ async def test_adjust_balance_debit_cannot_overdraw(pool, conn):
             amount=Decimal("-50.00"),
             reason="correcting a duplicate credit",
             ip_address=None,
+            request_id=str(uuid.uuid4()),
         )
 
     cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
     assert await ledger.balance(conn, cash.id) == Decimal("10.00")
+
+
+async def test_adjust_balance_is_idempotent_on_a_repeated_request_id(pool, conn):
+    # An architecture audit caught that the idempotency key used to be
+    # built from admin_id/user_id/datetime.now() -- unique on every call
+    # by construction, so a double-click or a retried request created two
+    # separate real-money ledger transactions instead of being recognized
+    # as the same one. request_id (one per "Apply" click, generated
+    # client-side) is what closes that: calling with the same request_id
+    # twice must credit exactly once, not twice, and must return the same
+    # ledger_transaction_id both times rather than raising or creating a
+    # second row.
+    admin_id, *_ = await create_test_admin(pool)
+    user_id = await create_funded_user(conn, Decimal("10.00"))
+    request_id = str(uuid.uuid4())
+
+    first_txn_id = await queries.adjust_balance(
+        pool,
+        admin_id=admin_id,
+        user_id=user_id,
+        amount=Decimal("25.00"),
+        reason="goodwill credit for a support ticket",
+        ip_address="127.0.0.1",
+        request_id=request_id,
+    )
+    second_txn_id = await queries.adjust_balance(
+        pool,
+        admin_id=admin_id,
+        user_id=user_id,
+        amount=Decimal("25.00"),
+        reason="goodwill credit for a support ticket",
+        ip_address="127.0.0.1",
+        request_id=request_id,
+    )
+
+    assert second_txn_id == first_txn_id
+
+    cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
+    assert await ledger.balance(conn, cash.id) == Decimal("35.00")  # credited once, not twice
+
+    txn_count = await conn.fetchval(
+        "SELECT count(*) FROM ledger_transactions WHERE created_by = $1", f"admin:{admin_id}"
+    )
+    assert txn_count == 1
+
+    audit_count = await conn.fetchval(
+        "SELECT count(*) FROM admin_audit_log WHERE admin_id = $1 AND action = 'users.adjust_balance'",
+        admin_id,
+    )
+    assert audit_count == 1  # the replay must not also duplicate the audit trail
 
 
 async def test_set_user_status_writes_audit_log_with_before_and_after(pool, conn):

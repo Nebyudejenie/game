@@ -217,6 +217,11 @@ async def get_user_ledger(
 class AdjustBalanceRequest(BaseModel):
     amount: str
     reason: str
+    # One per "Apply" click, generated client-side (crypto.randomUUID() in
+    # web/admin/js/screens/users.js) -- becomes the ledger idempotency key.
+    # Required, not defaulted: a missing/blank value would silently reopen
+    # the double-submission gap this field exists to close.
+    request_id: str
 
 
 @app.post("/users/{user_id}/adjust")
@@ -227,6 +232,8 @@ async def adjust_balance(
     body: AdjustBalanceRequest,
 ) -> dict[str, Any]:
     _require_reason(body.reason)
+    if not body.request_id.strip():
+        raise HTTPException(status_code=422, detail="request_id is required")
     try:
         amount = Decimal(body.amount)
     except InvalidOperation as exc:
@@ -240,6 +247,7 @@ async def adjust_balance(
             amount=amount,
             reason=body.reason,
             ip_address=_client_ip(request),
+            request_id=body.request_id,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

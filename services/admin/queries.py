@@ -9,7 +9,7 @@ console included (spec section 26/34: "no hidden god mode").
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -285,14 +285,39 @@ async def adjust_balance(
     amount: Decimal,
     reason: str,
     ip_address: str | None,
+    request_id: str,
 ) -> int:
     """Credits (amount > 0) or debits (amount < 0) a user's cash balance,
     offset against the house_float account -- a real ledger transaction of
     kind 'adjustment', never a direct UPDATE. `reason` is mandatory (the
     caller enforces non-empty; this function just requires the argument).
+
+    `request_id` is a client-generated token, one per "Apply" click
+    (web/admin/js/screens/users.js), that becomes the ledger idempotency
+    key. An architecture audit caught that this used to be keyed on
+    admin_id/user_id/datetime.now() -- unique by construction on every
+    single call, which defeated ledger.post()'s own dedup entirely: a
+    double-click or a retried request created two separate real-money
+    ledger transactions instead of being recognized as the same one, the
+    one money-moving path in this codebase without that protection.
     """
+    idempotency_key = f"admin-adjust-{admin_id}-{user_id}-{request_id}"
     async with pool.acquire() as conn:
         async with conn.transaction():
+            # A genuine replay (double-click, retried request) -- the
+            # ledger side would already correctly dedup via ledger.post()'s
+            # own ON CONFLICT DO NOTHING, but this check is what stops
+            # adjust_balance() from ALSO writing a second, duplicate
+            # audit-log entry and re-incrementing the transactions-created
+            # metric for a transaction that was never actually created a
+            # second time.
+            existing_id = await conn.fetchval(
+                "SELECT id FROM ledger_transactions WHERE idempotency_key = $1",
+                idempotency_key,
+            )
+            if existing_id is not None:
+                return int(existing_id)
+
             cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
             house_float = await ledger.get_or_create_account(conn, None, "house_float")
             before_balance = await ledger.balance(conn, cash.id)
@@ -304,7 +329,7 @@ async def adjust_balance(
                     ledger.Entry(house_float.id, -amount),
                     ledger.Entry(cash.id, amount),
                 ],
-                idempotency_key=f"admin-adjust-{admin_id}-{user_id}-{datetime.now(UTC).timestamp()}",
+                idempotency_key=idempotency_key,
                 created_by=f"admin:{admin_id}",
                 memo=reason,
             )

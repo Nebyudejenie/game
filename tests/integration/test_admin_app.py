@@ -75,7 +75,7 @@ async def test_rbac_support_cannot_adjust_balance_over_http(admin_server, pool, 
         response = await client.post(
             f"{admin_server}/users/{user_id}/adjust",
             headers=headers,
-            json={"amount": "5.00", "reason": "should be blocked by rbac"},
+            json={"amount": "5.00", "reason": "should be blocked by rbac", "request_id": "test-req-1"},
         )
     assert response.status_code == 403
 
@@ -91,13 +91,49 @@ async def test_rbac_finance_can_adjust_balance_over_http(admin_server, pool, con
         response = await client.post(
             f"{admin_server}/users/{user_id}/adjust",
             headers=headers,
-            json={"amount": "5.00", "reason": "goodwill credit over http"},
+            json={"amount": "5.00", "reason": "goodwill credit over http", "request_id": "test-req-2"},
         )
     assert response.status_code == 200, response.text
     assert response.json()["ledger_transaction_id"]
 
     cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
     assert await ledger.balance(conn, cash.id) == Decimal("15.00")
+
+
+async def test_adjust_balance_over_http_is_idempotent_on_a_repeated_request_id(
+    admin_server, pool, conn
+):
+    # The real double-click/retry path: two separate HTTP requests
+    # carrying the same request_id (what a disabled-then-somehow-still-
+    # fired duplicate click, or a browser/network retry, would send)
+    # must credit exactly once.
+    headers = await _auth_headers(admin_server, pool, role="finance")
+    user_id = await create_funded_user(conn, Decimal("10.00"))
+    body = {"amount": "5.00", "reason": "goodwill credit over http", "request_id": "test-req-repeat"}
+
+    async with httpx.AsyncClient() as client:
+        first = await client.post(f"{admin_server}/users/{user_id}/adjust", headers=headers, json=body)
+        second = await client.post(f"{admin_server}/users/{user_id}/adjust", headers=headers, json=body)
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["ledger_transaction_id"] == second.json()["ledger_transaction_id"]
+
+    cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
+    assert await ledger.balance(conn, cash.id) == Decimal("15.00")  # credited once, not twice
+
+
+async def test_adjust_balance_over_http_rejects_a_missing_request_id(admin_server, pool, conn):
+    headers = await _auth_headers(admin_server, pool, role="finance")
+    user_id = await create_funded_user(conn, Decimal("10.00"))
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{admin_server}/users/{user_id}/adjust",
+            headers=headers,
+            json={"amount": "5.00", "reason": "missing request_id"},
+        )
+    assert response.status_code == 422
 
 
 async def test_rbac_support_cannot_set_kyc_level_over_http(admin_server, pool, conn):

@@ -20,6 +20,7 @@ from decimal import Decimal
 import pyotp
 import pytest
 
+from packages.core import ledger
 from tests.integration.conftest import create_funded_user
 from tests.integration.test_admin_auth import create_test_admin
 
@@ -89,6 +90,57 @@ async def test_admin_console_kyc_action_changes_real_database_state(admin_server
     updated = await conn.fetchval("SELECT kyc_level FROM users WHERE id = $1", user_id)
     assert updated == 2
 
+    await page.close()
+
+
+async def test_admin_console_adjust_balance_credits_a_real_user_over_a_real_browser(
+    admin_server, pool, conn, browser
+):
+    # Real-browser proof for the users.js adjust-balance form specifically
+    # (no prior e2e coverage existed for it at all): that crypto.randomUUID()
+    # is genuinely available and the request body it builds actually
+    # satisfies the backend's now-required request_id field, not just that
+    # the idempotency mechanism is correct in isolation (already proven at
+    # the API level in test_admin_app.py/test_admin_queries.py -- this test's
+    # job is the actual browser wiring, not re-proving that property).
+    admin_id, username, password, totp_secret = await create_test_admin(pool, role="finance")
+    user_id = await create_funded_user(conn, Decimal("10.00"))
+    row = await conn.fetchrow("SELECT display_name FROM users WHERE id = $1", user_id)
+
+    page = await browser.new_page(viewport={"width": 1280, "height": 900})
+    page_errors: list[str] = []
+    page.on("pageerror", lambda exc: page_errors.append(str(exc)))
+
+    await _login(page, admin_server, username, password, totp_secret)
+    await page.wait_for_selector(".stat-grid", timeout=10000)
+
+    await page.click('.nav-btn[data-screen="users"]')
+    await page.fill("#user-search-input", row["display_name"])
+    await page.click('#user-search-form button[type="submit"]')
+    await page.click(f'.clickable-row[data-user-id="{user_id}"]')
+    await page.wait_for_selector("#adjust-submit", timeout=10000)
+
+    await page.fill("#adjust-amount", "15.00")
+    await page.fill("#adjust-reason", "e2e test: goodwill credit")
+    await page.click("#adjust-submit")
+
+    await page.wait_for_selector("#toast.visible", timeout=5000)
+    # .field-value is shared by several fields (KYC level, Cash, Bonus,
+    # Locked, Net LTV, Last seen) with no distinguishing id/data attribute
+    # -- find the one whose sibling .field-label actually reads "Cash"
+    # rather than assuming DOM order.
+    await page.wait_for_function(
+        """() => {
+            const label = Array.from(document.querySelectorAll('.field-label'))
+                .find(el => el.textContent === 'Cash');
+            return label?.nextElementSibling?.textContent.includes('25.00');
+        }""",
+        timeout=5000,
+    )
+    cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
+    assert await ledger.balance(conn, cash.id) == Decimal("25.00")
+
+    assert page_errors == [], f"JS errors during adjust-balance flow: {page_errors}"
     await page.close()
 
 

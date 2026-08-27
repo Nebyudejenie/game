@@ -5,6 +5,73 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-28 — Four parallel architecture audits, and the first P0: admin `adjust_balance` wasn't actually idempotent
+
+A CTO-level directive asked for a full-platform audit before any major new
+work. Rather than a huge scope of new speculative product surfaces (agent
+networks, multi-game abstraction, VIP/loyalty, marketing) -- most of which
+would require inventing business parameters (commission rates, tier
+thresholds, four-eyes amounts) this project has consistently declined to
+fabricate -- this pass audited what already exists: auth/financial
+invariants, database/gaming-engine correctness, payments/reconciliation/
+ops, and the Mini App/admin frontend, via four parallel inspection-only
+agents. Gaming-engine and financial-invariant correctness both came back
+clean (no P0/P1s) -- a real, earned result given how much prior work went
+into them. Two genuine P0s and several P1s surfaced; this entry covers
+the first P0 fixed. The rest are tracked for follow-on entries.
+
+**The bug**: `services/admin/queries.py`'s `adjust_balance()` -- the one
+manual money-movement path in this codebase (spec: "no hidden god mode",
+so it goes through the ledger like everything else) -- built its
+idempotency key as `f"admin-adjust-{admin_id}-{user_id}-{datetime.now(UTC).timestamp()}"`.
+Full-precision wall-clock time makes every single call's key unique by
+construction, which structurally defeats `ledger.post()`'s own
+`ON CONFLICT (idempotency_key) DO NOTHING` dedup -- the exact mechanism
+every other money-moving path in this codebase (deposits keyed on
+`our_ref`, withdrawals keyed on `payment_id`) relies on. A double-click
+or a retried request on the admin console's "Apply" button created two
+separate real-money ledger transactions. The frontend didn't help either:
+no disable-on-submit, no client-side dedup token.
+
+**Fixed**: `web/admin/js/screens/users.js`'s adjust-balance handler now
+generates one `crypto.randomUUID()` per click and disables the submit
+button for the duration of the request (closes the literal double-click
+case at the source). `AdjustBalanceRequest` (`services/admin/app.py`)
+gained a required `request_id` field (422 if missing/blank -- silently
+defaulting it would quietly reopen the gap for any caller that omits
+it). `adjust_balance()` now builds its idempotency key from that
+client-supplied token instead of the timestamp, and -- since
+`ledger.post()`'s own dedup alone would still leave a *second* audit-log
+entry and a double-counted metric for a transaction that was never
+actually created twice -- checks `ledger_transactions` for the key
+itself first and returns the existing transaction id on a genuine
+replay, before ever re-locking accounts or writing to `admin_audit_log`.
+
+**Verification**: `test_adjust_balance_is_idempotent_on_a_repeated_request_id`
+(function-level) and two new HTTP-level tests in `test_admin_app.py` --
+one firing two real, separate HTTP requests with the same `request_id`
+and asserting they return the *same* `ledger_transaction_id` (not two),
+one asserting a missing `request_id` gets a clean 422. Confirmed all
+three genuinely fail against the pre-fix files via the usual
+stash-revert step -- the HTTP-level test's failure was the clearest
+proof of the real bug: two distinct transaction ids (2054, 2055) for
+what should have been one logical request. A new real-browser e2e test
+(`test_admin_console_adjust_balance_credits_a_real_user_over_a_real_browser`)
+closes the fact that this specific screen had zero prior Playwright
+coverage, confirming `crypto.randomUUID()` and the new required field
+actually work end to end, not just at the API layer. mypy clean (67
+source files). Full clean-slate rebuild: `docker compose down -v` ->
+`up -d` -> `alembic upgrade head` (all 11 migrations, unchanged -- no
+schema change needed) -> `mypy` clean -> full default suite 814 passed
+(up from 811), 21 deselected -> `-m load` 2 failures
+(`test_gateway_fanout.py`, `test_load_multiroom.py`; `uptime` showed
+load average 2.28 with `spos-backend` still cycling through restarts,
+the same well-documented host-contention pattern, unrelated to an
+admin-balance-adjustment change) -> `-m chaos_infra` 2 passed -> `-m
+e2e` 14 passed, including the new browser test.
+
+---
+
 ## 2026-08-28 — Closed the rest of `services/bot/handlers.py`'s coverage gap: 45% -> 98%
 
 A follow-on to the previous entry, which closed `cmd_withdraw` alone.

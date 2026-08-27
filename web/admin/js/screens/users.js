@@ -160,12 +160,23 @@ export async function render(container) {
         toast("Amount and reason are both required.", true);
         return;
       }
+      // Disabling on click closes the common double-click case outright;
+      // the fresh request_id per click is what the backend actually keys
+      // its idempotency check on, so a retried request (not just a literal
+      // double-click) still can't create a second real-money transaction.
+      const submitBtn = panel.querySelector("#adjust-submit");
+      submitBtn.disabled = true;
       try {
-        await api(`/users/${user.id}/adjust`, { method: "POST", body: { amount, reason } });
+        await api(`/users/${user.id}/adjust`, {
+          method: "POST",
+          body: { amount, reason, request_id: crypto.randomUUID() },
+        });
         toast("Balance adjusted.");
         loadDetail(user.id);
       } catch (err) {
         toast(err.detail || err.message, true);
+      } finally {
+        submitBtn.disabled = false;
       }
     });
 
