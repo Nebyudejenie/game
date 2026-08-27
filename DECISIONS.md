@@ -5,6 +5,63 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — A systematic XSS sweep found one real gap: `app.js`'s outer error fallback
+
+The web-security-checklist companion to the SQL-injection sweep above:
+every `innerHTML` assignment across all eight `web/admin/js/screens/*.js`
+files plus `app.js` and `ui.js`, checked for any dynamic string
+interpolated without `escapeHtml()`. Traced every hit back to its
+source, not just pattern-matched -- the fields worth actually worrying
+about are the ones a player or another admin can set arbitrarily
+(`display_name`, which is a Telegram `first_name`, confirmed player
+-controlled all the way back in `services/bot/registration.py`;
+`holder_name`, `account_ref`, `code`, `reason`, audit log before/after
+JSON), not the numeric IDs and server-computed decimal amounts that
+make up most of a hit list like this.
+
+**Result: thirteen of fourteen `innerHTML` sites with attacker
+-reachable content were already correctly escaped** -- confirmed
+field by field across `payments.js`, `risk.js`, `rooms.js`, `rounds.js`,
+`users.js`, `reports.js`, and `audit.js` (including the JSON audit-log
+rendering, which wraps the whole `JSON.stringify()` output in
+`escapeHtml()`, not just top-level fields). One genuine gap:
+**`app.js`'s outer `showScreen()` catch-all** -- the fallback reached
+only when a screen module throws something its own internal try/catch
+didn't already handle, exactly the kind of rarely-exercised path a
+sweep like this exists to catch, since the *common* paths being clean
+is precisely what makes a team stop checking. `err.message` (real
+backend-supplied text when the underlying error is an `ApiError` --
+its message is built from the response body's own `detail` field) was
+interpolated straight into `innerHTML` with no escaping at all. A
+crafted value an admin-facing route ever echoed back verbatim would
+have been a real, if narrow, admin-to-admin XSS path -- one authenticated
+admin's malicious input executing in a *different* admin's session.
+
+**Fixed**: routed through the same `renderError()` helper every other
+error path in this frontend already uses, rather than reinventing
+escaping inline a second time.
+
+**Verification, not assumption**: a real Playwright session imported
+the actual `web/admin/js/ui.js` module (not a reimplementation) and
+called `renderError()` directly with a genuine payload
+(`<img src=x onerror="window.__xss_fired = true">`). Confirmed: the
+container's `innerHTML` held the HTML-entity-escaped text, no real
+`<img>` element was ever created, and the `onerror` handler never
+fired. Full clean-slate rebuild: `docker compose down -v` -> `up -d` ->
+`alembic upgrade head` -> `mypy` clean (66 source files, unaffected by
+a JS-only change) -> full default suite 757 passed, 18 deselected
+(unchanged) -> `-m load` 2 failures (`test_gateway_fanout.py`,
+`test_load_multiroom.py`, the same well-documented host-contention
+pattern, confirmed via `uptime`/`docker ps` at load average ~2.2,
+unrelated to this turn) -> `-m chaos_infra` 2 passed -> `-m e2e` 1
+transient failure (`test_miniapp_full_gameplay_flow`, a Mini App test
+this turn never touched, timing out on a game-screen transition under
+contention), confirmed as the same pattern by passing cleanly alone;
+all four admin-console e2e tests -- the ones that actually cover this
+change -- passed on every run.
+
+---
+
 ## 2026-08-27 — A systematic SQL-injection sweep, and a real gap in the sweep itself
 
 A third production-readiness angle: every individual query this session

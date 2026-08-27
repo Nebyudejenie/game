@@ -1,4 +1,5 @@
 import { getToken, clearToken, api, ApiError } from "./api.js";
+import { renderError } from "./ui.js";
 import * as loginScreen from "./screens/login.js";
 import * as dashboardScreen from "./screens/dashboard.js";
 import * as usersScreen from "./screens/users.js";
@@ -54,7 +55,17 @@ async function showScreen(name) {
     } else if (err instanceof ApiError && err.status === 401) {
       // handled globally by the admin:unauthorized listener below
     } else {
-      contentEl.innerHTML = `<div class="error-banner">Failed to load: ${err.message}</div>`;
+      // A code-review pass caught this as the one unescaped innerHTML
+      // assignment in the whole admin frontend -- every per-screen
+      // catch already goes through renderError() (see its own comment
+      // in ui.js), but this outer safety net (only reached when a
+      // screen module throws something it didn't already handle
+      // itself) didn't. err.message can carry real backend-supplied
+      // text (ApiError's own message is built from the response body's
+      // `detail` field), so an unescaped admin-submitted value echoed
+      // back in an error message would have been a real, if narrow,
+      // admin-to-admin XSS path.
+      renderError(contentEl, err);
     }
   }
 }
