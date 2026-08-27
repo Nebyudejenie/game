@@ -172,29 +172,42 @@ async def request_withdrawal(
                         f"user {user_id} does not have {amount} of available cash"
                     ) from exc
 
-                lifetime_in = await conn.fetchval(
-                    "SELECT COALESCE(SUM(amount), 0) FROM payments "
-                    "WHERE user_id = $1 AND direction = 'in' AND status = 'succeeded'",
+                # A code review pass caught this as three near-identical
+                # scans over the same payments rows for the same user_id --
+                # one FILTER-based query, bucketing by kind/window in a
+                # single pass, gives the exact same three figures (same
+                # precedent as services/admin/queries.py's own
+                # dashboard_summary()) instead of three separate round
+                # trips, all held inside this function's own row-locked
+                # transaction on the user's account.
+                #
+                # recent_withdrawal_count: spec 8.4's "Withdrawal velocity
+                # > 3/day -> Review". Counts every withdrawal request in
+                # the trailing 24h regardless of its own outcome -- a burst
+                # of requests is the suspicious signal itself, not just the
+                # ones that happened to succeed. This request hasn't been
+                # inserted yet, so a count of max_withdrawals_per_day
+                # already-existing rows means this one would be the
+                # (max + 1)th.
+                totals = await conn.fetchrow(
+                    """
+                    SELECT
+                        COALESCE(SUM(amount) FILTER (WHERE direction = 'in' AND status = 'succeeded'), 0)
+                            AS lifetime_in,
+                        COALESCE(SUM(amount) FILTER (WHERE direction = 'out' AND status = 'succeeded'), 0)
+                            AS lifetime_out,
+                        count(*) FILTER (
+                            WHERE direction = 'out' AND created_at > now() - interval '24 hours'
+                        ) AS recent_withdrawal_count
+                    FROM payments
+                    WHERE user_id = $1
+                    """,
                     user_id,
                 )
-                lifetime_out = await conn.fetchval(
-                    "SELECT COALESCE(SUM(amount), 0) FROM payments "
-                    "WHERE user_id = $1 AND direction = 'out' AND status = 'succeeded'",
-                    user_id,
-                )
-                # spec 8.4: "Withdrawal velocity > 3/day -> Review". Counts
-                # every withdrawal request in the trailing 24h regardless of
-                # its outcome -- a burst of requests is the suspicious
-                # signal itself, not just the ones that happened to succeed.
-                # This request hasn't been inserted yet, so a count of
-                # max_withdrawals_per_day already-existing rows means this
-                # one would be the (max + 1)th.
-                recent_withdrawal_count = await conn.fetchval(
-                    "SELECT count(*) FROM payments "
-                    "WHERE user_id = $1 AND direction = 'out' "
-                    "AND created_at > now() - interval '24 hours'",
-                    user_id,
-                )
+                assert totals is not None
+                lifetime_in = totals["lifetime_in"]
+                lifetime_out = totals["lifetime_out"]
+                recent_withdrawal_count = totals["recent_withdrawal_count"]
                 account_age = datetime.now(UTC) - user["created_at"]
                 auto_ok = (
                     amount <= auto_approve_limit

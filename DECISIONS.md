@@ -5,6 +5,94 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — A `/code-review high` pass over today's own work: three real findings fixed, three deliberately deferred
+
+With the explicit task list and every follow-on gap this session found
+on its own now closed, the next safe task was a fresh `/code-review`
+pass -- first scoped to just the latest commit (found nothing but a
+cosmetic unused-variable nit matching this codebase's own established
+`_, username, password, totp_secret = ...`-style convention, not worth
+touching), then rerun scoped to the whole day's work (`HEAD~7..HEAD`:
+the KYC writer, risk-screen backend, admin frontend, age gate, gateway
+chaos test, and CD fix). Three independent bug-hunting angles came back
+with zero correctness findings -- everything already built today
+checked out as correctly implemented and correctly wired. The eight
+findings that did surface were efficiency, reuse, and architecture
+observations. Three were real and cheap enough to fix now; three were
+real but deliberately left alone, for reasons worth recording rather
+than silently skipping.
+
+**Fixed:**
+- **`repeat_room_pairings()`'s missing index** (migration
+  `d4dfad3a4fb2`). The function's own docstring claims its `since_days`
+  window keeps the query bounded as `round_entries` grows -- but
+  `round_entries` had no index on `joined_at` at all, only `PRIMARY KEY
+  (round_id, card_no)` and `UNIQUE (round_id, user_id)`, so every call
+  still forced a full sequential scan of a table that grows with every
+  stake ever made platform-wide. The claim in the docstring wasn't
+  actually true. Added `ix_round_entries_joined_at`.
+- **`request_withdrawal()`'s four sequential queries under a row lock**
+  consolidated to two. `recent_deposit` stays separate and early
+  (it can reject the whole request *before* `ledger.post()` ever
+  touches money -- deliberately not merged with the others, which only
+  ever affect auto-approve-vs-review routing after funds are already
+  locked either way). `lifetime_in`, `lifetime_out`, and the new
+  `recent_withdrawal_count` merged into one `FILTER`-based query, the
+  same pattern `services/admin/queries.py`'s own `dashboard_summary()`
+  already established for exactly this shape of "three near-identical
+  scans over the same rows." A pure, behavior-preserving refactor --
+  verified by the existing test suite passing identically before and
+  after, the same standard this session applies to every non-bug-fix
+  optimization, not the stash-revert-confirm-fail cycle a real fix gets.
+- **Three inconsistent copies of the same jsonb-as-string workaround**
+  (`list_rooms()`, `_room_audit_value()`, and `shared_payout_account_
+  clusters()` -- the last one missing the `isinstance` guard entirely,
+  a real latent bug waiting for the day a jsonb codec ever gets
+  registered on this pool) consolidated into one `_parse_jsonb()`
+  helper, safe to call unconditionally on an already-parsed value.
+
+**Deliberately deferred, not silently skipped:**
+- **Two independent IP-allowlist enforcement mechanisms** (the
+  `_console_frontend_ip_allowlist` middleware added for `/console`, and
+  the pre-existing per-route `_check_ip_allowlist()` calls) instead of
+  one unified check. Real architectural debt -- this exact class of bug
+  (a new unauthenticated route forgetting the check) has already
+  happened twice per this file's own comments -- but unifying it means
+  touching working, security-critical, already-well-tested code with no
+  demonstrated current bug, which this session's own standing
+  instruction is explicit about not doing without being asked. Left as
+  documented debt, not a stealth rewrite.
+- **No stored reason for why an auto-review outcome happened.** An
+  admin looking at the review queue can't tell whether the velocity
+  gate, the KYC threshold, or the lifetime-balance check was what
+  triggered it without manually re-deriving it. Real, but shaped like a
+  small feature addition (a new column, new write path) rather than a
+  bug fix -- left open rather than expanded into unrequested feature
+  work.
+- **The admin frontend's repeated error-banner/action-handler
+  boilerplate** (the same `try { ... } catch (err) { container.innerHTML
+  = ...err.detail...}` shape copy-pasted 8-13 times across `web/admin/
+  js/screens/*.js`, and three near-identical action handlers in
+  `users.js`). Real duplication, but cosmetic/maintainability, not a
+  correctness issue, and refactoring seven JS files touching every
+  admin screen would need the same real-browser re-verification pass
+  each screen already got once -- lower priority than the three fixes
+  above, left for a dedicated pass rather than done partially here.
+
+**Verification**: full clean-slate rebuild -- `docker compose down -v`
+-> `up -d` -> `alembic upgrade head` (new index migration applies
+cleanly) -> `mypy` clean (65 source files) -> the three affected test
+files run directly first (`test_payments_withdrawals.py`, `test_admin_
+queries.py`, `test_admin_app.py`, 63 passed, confirming the two
+behavior-preserving refactors produce identical results) -> full
+default suite 751 passed, 18 deselected (unchanged, as expected for
+behavior-preserving changes) -> `-m load` 1 failure
+(`test_gateway_fanout.py`, the same well-documented host-contention
+pattern, confirmed via `uptime`/`docker ps`, unrelated to this turn) ->
+`-m chaos_infra` 2 passed -> `-m e2e` 11 passed.
+
+---
+
 ## 2026-08-27 — Permanent real-browser coverage for the admin console frontend
 
 With every explicit boundary item from the status audit now genuinely

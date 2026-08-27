@@ -47,6 +47,19 @@ def _with_decrypted_phone(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+def _parse_jsonb(value: Any) -> Any:
+    """asyncpg returns a jsonb column as a raw JSON string unless a codec
+    is registered for it (none is, anywhere this pool is created) -- a
+    code review pass caught three independent, inconsistent copies of
+    this same guard in this file (list_rooms(), _room_audit_value(), and
+    shared_payout_account_clusters()), one of them missing the
+    isinstance guard entirely. One shared helper instead: safe to call
+    on a value that's already been parsed (returns it unchanged), so
+    every call site can use it unconditionally.
+    """
+    return json.loads(value) if isinstance(value, str) else value
+
+
 async def search_users(pool: asyncpg.Pool, query: str, limit: int = 20) -> list[dict[str, Any]]:
     # Phone matching is exact only (spec section 9.2: numbers are
     # encrypted at rest) -- a random-nonce ciphertext can't support
@@ -536,8 +549,7 @@ async def list_rooms(pool: asyncpg.Pool) -> list[dict[str, Any]]:
     out = []
     for r in rows:
         d = dict(r)
-        if isinstance(d["win_patterns"], str):
-            d["win_patterns"] = json.loads(d["win_patterns"])
+        d["win_patterns"] = _parse_jsonb(d["win_patterns"])
         out.append(d)
     return out
 
@@ -607,10 +619,9 @@ def _room_audit_value(row: asyncpg.Record, key: str) -> Any:
     """A code review pass caught that update_room_admin()'s audit
     before/after values ran every changed field through a blanket
     str(...), including win_patterns -- asyncpg returns a jsonb column as
-    a raw JSON string with no codec registered (the same reason
-    list_rooms() above does its own isinstance(..., str) + json.loads()),
-    so str()-ing it was a no-op that left a JSON string sitting as a
-    dict value, which audit.record()'s own json.dumps(before) then
+    a raw JSON string with no codec registered (see _parse_jsonb()
+    above), so str()-ing it was a no-op that left a JSON string sitting
+    as a dict value, which audit.record()'s own json.dumps(before) then
     double-encodes into an escaped string in the stored audit row --
     readable as ``"win_patterns": "[\\"row_0\\"]"`` instead of a clean
     nested array. Not a financial bug (the actual room update is
@@ -618,8 +629,8 @@ def _room_audit_value(row: asyncpg.Record, key: str) -> Any:
     anyone reviewing this specific field's change history.
     """
     value = row[key]
-    if key == "win_patterns" and isinstance(value, str):
-        return json.loads(value)
+    if key == "win_patterns":
+        return _parse_jsonb(value)
     return str(value)
 
 
@@ -906,7 +917,7 @@ async def shared_payout_account_clusters(pool: asyncpg.Pool) -> list[dict[str, A
         ORDER BY user_count DESC, pm.account_ref
         """
     )
-    return [{**dict(r), "users": json.loads(r["users"])} for r in rows]
+    return [{**dict(r), "users": _parse_jsonb(r["users"])} for r in rows]
 
 
 async def repeat_room_pairings(
