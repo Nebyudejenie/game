@@ -5,6 +5,44 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — Secret-scanning the full git history: one hit, investigated, confirmed intentional
+
+A second genuinely different production-readiness angle alongside the
+dependency audit above: `gitleaks` (downloaded to the scratchpad, not
+added to this repo or any CI step) against the entire commit history --
+all 77 commits, not just the working tree, since a secret committed and
+later removed is still a leaked secret.
+
+**One finding, investigated rather than either dismissed or
+"fixed" on reflex**: `.env.example`'s `PHONE_ENCRYPTION_KEY` value.
+Confirmed genuinely benign, not assumed: it's the exact same fixed
+value `tests/integration/conftest.py` sets directly for the entire test
+suite (`grep` confirmed, not recalled from memory), and
+`deploy/.env.prod.example`'s own `PHONE_ENCRYPTION_KEY` ships empty on
+purpose specifically because production needs a real, separately
+-generated key -- `packages/core/config.py` has no safe default for it
+at all. This is the deliberate "ships a real, working dev key so a
+fresh clone works with zero setup" pattern already documented in
+README.md, not an accidental leak of anything that ever touches real
+data.
+
+**Added**: `.gitleaksignore`, allowlisting this one specific finding by
+its exact fingerprint (tied to the commit that introduced it), with the
+reasoning above written directly into the file so a future scan doesn't
+have to re-investigate and re-conclude the same thing. Verified: a
+fresh `gitleaks git` pass against the full history now reports zero
+leaks (was one before the ignore file existed).
+
+**Not done**: wiring `gitleaks` into CI as a permanent, required check.
+Real value in doing so eventually, but that's a new required CI
+dependency and a new failure mode (a future genuine secret would now
+block a merge, which is the point) -- also a process change worth a
+deliberate choice, not a side effect of one ad-hoc audit run locally,
+the same reasoning the dependency-lockfile observation above was
+flagged rather than acted on.
+
+---
+
 ## 2026-08-27 — Dependency vulnerability audit: clean, recorded for real
 
 With every finding from today's own code-review pass resolved, this

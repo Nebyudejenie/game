@@ -1,0 +1,13 @@
+# services/admin/app.py 's own comments dispute would-be secrets that
+# are actually intentional, publicly-committed dev defaults -- same
+# spirit here, in gitleaks' own ignore format.
+#
+# .env.example's PHONE_ENCRYPTION_KEY is not a leaked production secret:
+# it's the same fixed value tests/integration/conftest.py sets directly
+# for the whole test suite, and deploy/.env.prod.example's own
+# PHONE_ENCRYPTION_KEY ships empty on purpose, requiring a real,
+# separately-generated key before production can start at all
+# (packages/core/config.py has no safe default for it either). Verified
+# by a real gitleaks pass over the full git history (2026-08-27), not
+# assumed -- see DECISIONS.md.
+d6f5c79d75c23e451661fd162cef499d216dea30:.env.example:generic-api-key:48
