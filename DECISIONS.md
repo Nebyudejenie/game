@@ -5,6 +5,52 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — A systematic SQL-injection sweep, and a real gap in the sweep itself
+
+A third production-readiness angle: every individual query this session
+has ever touched has been read directly, but never a single pass
+checking the *whole* codebase at once for the specific anti-pattern
+that actually matters here -- SQL text built by f-string/`%`-formatting
+instead of asyncpg's own `$1`-style parameters.
+
+**The check itself needed a second attempt.** The first grep
+(`(execute|fetch...)\(\s*f"`, single-line only) came back with zero
+matches and would have been reported as "clean" -- but it has a real
+blind spot: a multi-line call like
+```python
+await conn.execute(
+    f"UPDATE rooms SET {...} WHERE id = ${len(values)}",
+    *values,
+)
+```
+has the `f"` on a different line than the `execute(`, so a single-line
+pattern never sees it. Rerun without that constraint (a broad
+`^\s*f"` sweep across every source file, then manually reading every
+hit) actually found the two real f-string-into-SQL call sites this
+codebase has:
+
+- **`services/admin/queries.py`'s `update_room_admin()`** --
+  `f"{field} = ${i}"` built from `changes: dict[str, Any]`'s own keys.
+  Genuinely safe: `set(changes) - _UPDATABLE_ROOM_FIELDS` (a fixed,
+  hardcoded set of nine real column names) raises `ValueError` for any
+  key outside it *before* the f-string ever runs -- the interpolated
+  `field` can only ever be one of those nine literal strings by the
+  time it's reached, the standard, correct way to handle "identifiers
+  can't be parameterized" since `$1` only ever binds values.
+- **`packages/core/responsible_gaming.py`'s `get_or_create_limits()`**
+  -- `f"SELECT {columns} FROM ..."` where `columns` is a single fixed
+  literal string defined right above it, reused across three near
+  -identical queries purely to avoid repeating the same list three
+  times. Never varies with any input at all.
+
+Both confirmed safe by tracing where the interpolated value actually
+comes from, not by pattern-matching alone. No SQL injection vector
+found anywhere in this codebase -- a real, verified negative result,
+not an assumption from "it's always used `$1` everywhere I've happened
+to look."
+
+---
+
 ## 2026-08-27 — Secret-scanning the full git history: one hit, investigated, confirmed intentional
 
 A second genuinely different production-readiness angle alongside the
