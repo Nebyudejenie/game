@@ -5,6 +5,69 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — A systematic N+1 sweep found two more sequential-publish loops; one candidate deliberately left alone
+
+A different angle from today's security sweep: every `for`/`async for`
+loop in `packages/` and `services/` containing a database call, found
+via a script scanning every source file rather than spot-checking
+functions that happened to look suspicious. Eight candidates surfaced;
+most were false positives from the script's own crude loop-boundary
+detection (matched a comment, or a query call after the loop rather
+than inside it) or genuinely necessary sequential work, investigated
+individually rather than assumed either way:
+
+**Two real, fixed**: `services/engine/round_engine.py` had *two*
+separate refund-then-publish loops -- the lobby-underfilled path (spec
+3.3's LOBBY→refund transition) and the exhausted-no-winner path (75
+calls, nobody claimed) -- each ending with a plain sequential
+`for ... await ledger.publish_balance_update(...)`, the exact same bug
+already fixed for `_settle_with_winners()`'s winner payouts earlier
+today, just two sibling code paths that fix didn't reach. Same fix:
+`asyncio.gather()`, since each publish is independent (its own pool
+connection, its own Redis channel) and runs only after `refund_round()`'s
+own transaction has already committed.
+
+**A real bug in the first test written to prove this, caught by
+watching it fail with real numbers**: the first draft measured elapsed
+time from a fixed point at the very start of the test, before the
+room's own `lobby_seconds` wait had even elapsed -- so the assertion
+was really testing "did the whole lobby countdown take under 0.3s,"
+not "were the two publishes concurrent," and failed even with the fix
+correctly in place. Rewritten to measure `entered_at[user_b] -
+entered_at[user_a]` -- when each publish call itself *began*, the
+actual property `asyncio.gather()` changes -- immune to whatever
+unrelated time comes before it. Both new tests (mirroring `test_
+settlement_publishes_winner_balance_updates_concurrently`'s own
+established technique) confirmed to genuinely fail against the
+pre-fix file via the usual stash-revert step once corrected.
+
+**Investigated and found necessary, not fixed**: `refunds.py`'s
+per-entrant `ledger.post()` loop and `round_engine.py`'s per-winner
+`round_winners` INSERT loop both run on the *same* shared connection
+inside one already-open transaction (unlike the publish loops above,
+which each acquire their own connection from the pool) -- Postgres
+connections don't support concurrent operations, and more importantly
+each needs to stay inside the same atomic transaction as the payout/
+refund it belongs to for correctness (all-or-nothing on a crash), so
+sequential here isn't a bug, it's a requirement.
+
+**Declined**: `ledger.post()`'s own three internal loops (account
+locking, entry inserts, balance updates) -- a real, hot-path pattern,
+but this is the single most correctness-critical function in the
+system, with careful fixed-order row locking specifically to avoid
+deadlocks. The realistic gain is modest (most transactions touch only
+2 accounts) and the risk of a subtle financial bug from restructuring
+it is not, the same reasoning the IP-allowlist-mechanism duplication
+was left alone rather than unified without a demonstrated current bug.
+
+**Verification**: full clean-slate rebuild -- `docker compose down -v`
+-> `up -d` -> `alembic upgrade head` -> `mypy` clean (66 source files)
+-> full `test_round_engine.py` 19 passed -> full default suite 760
+passed (up from 758), 18 deselected -> `-m load` 5 passed, fully clean
+-> `-m chaos_infra` 2 passed -> `-m e2e` 11 passed.
+
+---
+
 ## 2026-08-27 — The Mini App's own XSS exposure, checked with the same rigor: clean by design
 
 Yesterday's XSS sweep only covered `web/admin/`. The player-facing Mini

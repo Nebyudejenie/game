@@ -520,8 +520,19 @@ class RoundEngine:
             assert round_id is not None
             refunded_user_ids = list(self._entries)
             await refunds.refund_round(self._pool, round_id, reason="lobby_underfilled")
-            for refunded_user_id in refunded_user_ids:
-                await ledger.publish_balance_update(self._pool, self._redis, refunded_user_id)
+            # A code-review pass caught this as the same plain sequential
+            # for/await already fixed in _settle_with_winners() below --
+            # each publish is independent (its own pool connection, its
+            # own Redis channel) and runs only after refund_round()'s own
+            # transaction has already committed, so sequential ordering
+            # here buys nothing but delay for a room with several
+            # entrants refunded at once. Concurrent, same pattern.
+            await asyncio.gather(
+                *(
+                    ledger.publish_balance_update(self._pool, self._redis, refunded_user_id)
+                    for refunded_user_id in refunded_user_ids
+                )
+            )
             self._reset_to_idle()
 
     async def _transition_to_running(self) -> None:
@@ -590,8 +601,16 @@ class RoundEngine:
             assert self._server_seed is not None
             refunded_user_ids = list(self._entries)
             await refunds.refund_round(self._pool, round_id, reason="exhausted_no_winner")
-            for refunded_user_id in refunded_user_ids:
-                await ledger.publish_balance_update(self._pool, self._redis, refunded_user_id)
+            # Same fix as the lobby-underfilled refund path above -- a
+            # code-review pass caught both of this file's refund-then
+            # -publish loops as the same plain sequential for/await
+            # already fixed for _settle_with_winners()'s winner payouts.
+            await asyncio.gather(
+                *(
+                    ledger.publish_balance_update(self._pool, self._redis, refunded_user_id)
+                    for refunded_user_id in refunded_user_ids
+                )
+            )
             await self._pool.execute(
                 "UPDATE rounds SET server_seed = $2 WHERE id = $1", round_id, self._server_seed
             )

@@ -555,6 +555,51 @@ async def test_exhausted_no_winner_refund_pushes_a_live_balance_update(pool, red
         await asyncio.wait_for(task, timeout=15)
 
 
+async def test_exhausted_no_winner_refund_publishes_balance_updates_concurrently(
+    pool, redis, card_pool, conn, monkeypatch
+):
+    # Same fix, same proof technique as
+    # test_lobby_underfilled_refund_publishes_balance_updates_concurrently
+    # above, for this file's other refund-then-publish loop.
+    room_id = await create_room(
+        conn, stake=Decimal("15.00"), min_players=2, call_interval_ms=2, win_patterns=[],
+    )
+    engine = await make_engine(pool, redis, card_pool, room_id)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        user_a = await create_funded_user(conn, Decimal("100.00"))
+        user_b = await create_funded_user(conn, Decimal("100.00"))
+        await engine.join(user_a, 1)
+        await engine.join(user_b, 2)
+
+        real_publish = ledger.publish_balance_update
+        entered_at: dict[int, float] = {}
+        published_at: dict[int, float] = {}
+
+        async def instrumented_publish(pool_, redis_, user_id):
+            entered_at[user_id] = asyncio.get_running_loop().time()
+            if user_id == user_a:
+                await asyncio.sleep(0.5)
+            result = await real_publish(pool_, redis_, user_id)
+            published_at[user_id] = asyncio.get_running_loop().time()
+            return result
+
+        monkeypatch.setattr(round_engine.ledger, "publish_balance_update", instrumented_publish)
+
+        await wait_until(lambda: engine.status == "idle", timeout=15)
+
+        assert user_a in entered_at and user_b in entered_at
+        assert published_at[user_a] - entered_at[user_a] >= 0.5, "user_a's own artificial delay didn't apply"
+        entry_gap = abs(entered_at[user_b] - entered_at[user_a])
+        assert entry_gap < 0.3, (
+            f"user_b's publish call started {entry_gap:.2f}s after user_a's -- "
+            "stalled behind it instead of starting concurrently"
+        )
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
 async def test_lobby_underfilled_all_refunded_room_returns_to_idle(pool, redis, card_pool, conn):
     room_id = await create_room(conn, stake=Decimal("10.00"), min_players=5, lobby_seconds=1)
     engine = await make_engine(pool, redis, card_pool, room_id)
@@ -596,6 +641,66 @@ async def test_lobby_underfilled_refund_pushes_a_live_balance_update(pool, redis
     finally:
         await engine.stop()
         await asyncio.wait_for(task, timeout=10)
+
+
+async def test_lobby_underfilled_refund_publishes_balance_updates_concurrently(
+    pool, redis, card_pool, conn, monkeypatch
+):
+    # A code-review pass caught this as the same plain sequential
+    # for/await loop already fixed for _settle_with_winners() (see
+    # test_settlement_publishes_winner_balance_updates_concurrently
+    # above, same technique mirrored here) -- a lobby that fills with
+    # several entrants and then times out under min_players used to
+    # serialize their refund balance-update pushes one after another.
+    room_id = await create_room(conn, stake=Decimal("10.00"), min_players=5, lobby_seconds=1)
+    engine = await make_engine(pool, redis, card_pool, room_id)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        user_a = await create_funded_user(conn, Decimal("50.00"))
+        user_b = await create_funded_user(conn, Decimal("50.00"))
+        assert (await engine.join(user_a, 1)).ok
+        assert (await engine.join(user_b, 2)).ok
+
+        real_publish = ledger.publish_balance_update
+        entered_at: dict[int, float] = {}
+        published_at: dict[int, float] = {}
+
+        async def instrumented_publish(pool_, redis_, user_id):
+            entered_at[user_id] = asyncio.get_running_loop().time()
+            if user_id == user_a:
+                await asyncio.sleep(0.5)
+            result = await real_publish(pool_, redis_, user_id)
+            published_at[user_id] = asyncio.get_running_loop().time()
+            return result
+
+        monkeypatch.setattr(round_engine.ledger, "publish_balance_update", instrumented_publish)
+
+        await wait_until(lambda: engine.status == "idle", timeout=15)
+
+        assert user_a in entered_at and user_b in entered_at
+        assert published_at[user_a] - entered_at[user_a] >= 0.5, "user_a's own artificial delay didn't apply"
+        # The property that actually distinguishes concurrent from
+        # sequential: *when each call started*, not how long its own
+        # work took. asyncio.gather() schedules both coroutines together,
+        # so both entered_at timestamps land close together regardless of
+        # how slow user_a's own publish is. Sequential (the old bug)
+        # can't even call instrumented_publish(user_b) until user_a's own
+        # await -- including its artificial 0.5s sleep -- fully resolves,
+        # so entered_at[user_b] would land ~0.5s after entered_at[user_a].
+        # Measured this way rather than against a fixed test-start
+        # baseline on purpose: this test's first draft measured against
+        # test start and failed on real numbers, not because the fix was
+        # wrong, but because the lobby_seconds=1 wait before the engine
+        # even calls refund_round() swamped that baseline with unrelated
+        # time having nothing to do with publish concurrency.
+        entry_gap = abs(entered_at[user_b] - entered_at[user_a])
+        assert entry_gap < 0.3, (
+            f"user_b's publish call started {entry_gap:.2f}s after user_a's -- "
+            "stalled behind it instead of starting concurrently"
+        )
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
 
 
 async def test_join_and_drop_card_push_live_balance_updates(pool, redis, card_pool, conn):
