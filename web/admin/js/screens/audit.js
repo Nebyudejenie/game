@@ -1,4 +1,5 @@
 import { api, escapeHtml, fmtDate, parseMaybeJson } from "../api.js";
+import { renderError } from "../ui.js";
 
 export const label = "Audit log";
 
@@ -39,6 +40,6 @@ ${escapeHtml(JSON.stringify(parseMaybeJson(r.after)))}</pre>
       </table>
     `;
   } catch (err) {
-    resultEl.innerHTML = `<p class="error-banner">${escapeHtml(err.detail || err.message)}</p>`;
+    renderError(resultEl, err);
   }
 }

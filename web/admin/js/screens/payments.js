@@ -1,5 +1,5 @@
 import { api, escapeHtml, fmtDate } from "../api.js";
-import { toast } from "../ui.js";
+import { renderError, toast } from "../ui.js";
 
 export const label = "Payments";
 
@@ -74,6 +74,6 @@ export async function render(container) {
   try {
     await reload();
   } catch (err) {
-    listEl.innerHTML = `<p class="error-banner">${escapeHtml(err.detail || err.message)}</p>`;
+    renderError(listEl, err);
   }
 }

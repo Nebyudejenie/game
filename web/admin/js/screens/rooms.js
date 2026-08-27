@@ -1,5 +1,5 @@
 import { api, escapeHtml } from "../api.js";
-import { toast } from "../ui.js";
+import { renderError, toast } from "../ui.js";
 
 export const label = "Rooms";
 
@@ -44,7 +44,7 @@ export async function render(container) {
       const rooms = await api("/rooms");
       renderList(rooms);
     } catch (err) {
-      listEl.innerHTML = `<p class="error-banner">${escapeHtml(err.detail || err.message)}</p>`;
+      renderError(listEl, err);
     }
   }
 

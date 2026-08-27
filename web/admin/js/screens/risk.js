@@ -1,4 +1,5 @@
 import { api, escapeHtml } from "../api.js";
+import { renderError } from "../ui.js";
 
 export const label = "Risk";
 
@@ -45,7 +46,7 @@ export async function render(container) {
         </table>
       `;
     } catch (err) {
-      clustersEl.innerHTML = `<p class="error-banner">${escapeHtml(err.detail || err.message)}</p>`;
+      renderError(clustersEl, err);
     }
   }
 
@@ -71,7 +72,7 @@ export async function render(container) {
         </table>
       `;
     } catch (err) {
-      pairingsEl.innerHTML = `<p class="error-banner">${escapeHtml(err.detail || err.message)}</p>`;
+      renderError(pairingsEl, err);
     }
   }
 

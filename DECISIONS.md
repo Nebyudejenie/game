@@ -5,6 +5,59 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — The last deferred code-review finding: admin frontend error-handling duplication
+
+The third and final item deferred three entries below, closed the same
+way the other two turned out to be safe once actually attempted: the
+exact string `<p class="error-banner">${escapeHtml(err.detail ||
+err.message)}</p>` was copy-pasted into 13 separate `catch` blocks
+across `payments.js`, `rooms.js`, `rounds.js`, `reports.js`, `risk.js`,
+`audit.js`, and `users.js` -- confirmed by grep, not estimated. Deferred
+originally because refactoring seven files touching every admin screen
+seemed to need the same real-browser re-verification each screen got
+once already; by the time this was revisited, `test_admin_console_e2e.
+py` existed and covers exactly that regression risk for the screens it
+touches, and this session had already re-verified the rest by hand
+twice today (the KYC action, the RBAC-denial message).
+
+**What was built**: one `renderError(container, err)` helper added to
+`web/admin/js/ui.js` (already the shared home for `toast()`), replacing
+all 13 call sites with a single-line call. Nothing about *what* renders
+changed -- still the real backend error detail, not a generic message,
+exactly as risk.js's own comment already documents that choice for.
+
+**Verification**: real, not just "the diff looks equivalent." `mypy`
+doesn't cover JS at all, so this leaned on the browser directly: the
+existing `test_admin_console_rbac_denial_shows_a_real_message_not_a_
+blank_screen` e2e test still passes (covers risk.js's path end to end),
+plus a live Playwright session logged in as `support` and visited
+reports/audit/risk (all three correctly denied) confirming each
+rendered the exact right, specific error text
+(`"role 'support' lacks 'reports:view'"` etc.) with zero page errors,
+then visited users/payments/rounds/rooms (all four permitted for
+`support`) confirming they still load cleanly with zero JS errors --
+covering every one of the seven touched files, not just the one with
+existing automated coverage. Full clean-slate rebuild: `docker compose
+down -v` -> `up -d` -> `alembic upgrade head` -> `mypy` clean (66 source
+files, unaffected by a JS-only change) -> full default suite 757
+passed, 18 deselected (unchanged, as expected) -> `-m load` 2 failures
+(`test_gateway_fanout.py`, `test_load_multiroom.py`, the same
+well-documented host-contention pattern, confirmed via `uptime`/`docker
+ps`, unrelated to this turn) -> `-m chaos_infra` 2 passed -> `-m e2e` 1
+transient failure on the first run (`test_miniapp_full_gameplay_flow` --
+a Mini App test, a completely separate frontend this turn never
+touched, timing out on a game-screen transition under contention),
+confirmed as the same pattern by passing cleanly both alone and on a
+full rerun; the four admin-console e2e tests this change actually
+touches passed on every run, including two extra repeats run
+specifically for this change.
+
+With all three code-review findings from two entries below now
+resolved (not just the three "fixed immediately" the first time), this
+closes out today's `/code-review` follow-through entirely.
+
+---
+
 ## 2026-08-27 — Withdrawal review reason: reconsidering an earlier "deferred, feature-shaped" call
 
 The code-review pass two entries below deferred "no stored reason for

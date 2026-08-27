@@ -1,4 +1,5 @@
 import { api, escapeHtml } from "../api.js";
+import { renderError } from "../ui.js";
 
 export const label = "Reports";
 
@@ -41,7 +42,7 @@ export async function render(container) {
         </div>
       `;
     } catch (err) {
-      ggrResult.innerHTML = `<p class="error-banner">${escapeHtml(err.detail || err.message)}</p>`;
+      renderError(ggrResult, err);
     }
   }
 
@@ -73,7 +74,7 @@ export async function render(container) {
         </table>
       `;
     } catch (err) {
-      ltvResult.innerHTML = `<p class="error-banner">${escapeHtml(err.detail || err.message)}</p>`;
+      renderError(ltvResult, err);
     }
   }
 
@@ -109,7 +110,7 @@ export async function render(container) {
         </table>
       `;
     } catch (err) {
-      retentionResult.innerHTML = `<p class="error-banner">${escapeHtml(err.detail || err.message)}</p>`;
+      renderError(retentionResult, err);
     }
   }
 

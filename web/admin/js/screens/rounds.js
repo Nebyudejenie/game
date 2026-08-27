@@ -1,5 +1,5 @@
 import { api, escapeHtml, fmtDate } from "../api.js";
-import { toast } from "../ui.js";
+import { renderError, toast } from "../ui.js";
 
 export const label = "Rounds";
 
@@ -33,7 +33,7 @@ export async function render(container) {
       const rounds = await api(path);
       renderList(rounds);
     } catch (err) {
-      listEl.innerHTML = `<p class="error-banner">${escapeHtml(err.detail || err.message)}</p>`;
+      renderError(listEl, err);
     }
   }
 
@@ -71,7 +71,7 @@ export async function render(container) {
       detailEl.innerHTML = renderDetail(roundId, detail);
       wireDetail(roundId);
     } catch (err) {
-      detailEl.innerHTML = `<p class="error-banner">${escapeHtml(err.detail || err.message)}</p>`;
+      renderError(detailEl, err);
     }
   }
 
@@ -126,7 +126,7 @@ export async function render(container) {
         const fairness = await api(`/rounds/${roundId}/fairness`);
         resultEl.innerHTML = `<pre class="code-block">${escapeHtml(JSON.stringify(fairness, null, 2))}</pre>`;
       } catch (err) {
-        resultEl.innerHTML = `<p class="error-banner">${escapeHtml(err.detail || err.message)}</p>`;
+        renderError(resultEl, err);
       }
     });
 

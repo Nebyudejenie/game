@@ -1,5 +1,5 @@
 import { api, escapeHtml, fmtDate } from "../api.js";
-import { toast } from "../ui.js";
+import { renderError, toast } from "../ui.js";
 
 export const label = "Users";
 
@@ -32,7 +32,7 @@ export async function render(container) {
       const users = await api(`/users?q=${encodeURIComponent(q)}`);
       renderResults(users);
     } catch (err) {
-      resultsEl.innerHTML = `<p class="error-banner">${escapeHtml(err.detail || err.message)}</p>`;
+      renderError(resultsEl, err);
     }
   });
 
@@ -75,7 +75,7 @@ export async function render(container) {
       detailEl.innerHTML = renderDetail(user, ledger);
       wireActions(user);
     } catch (err) {
-      detailEl.innerHTML = `<p class="error-banner">${escapeHtml(err.detail || err.message)}</p>`;
+      renderError(detailEl, err);
     }
   }
 
