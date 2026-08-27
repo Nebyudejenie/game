@@ -5,6 +5,38 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — Dependency vulnerability audit: clean, recorded for real
+
+With every finding from today's own code-review pass resolved, this
+was a genuinely different angle rather than another pass over the same
+diff: `pip-audit` (installed ephemerally into `.venv`, not added to
+`pyproject.toml` -- a diagnostic run, not a new project dependency;
+uninstalled again afterward, confirmed the environment was unaffected
+via `mypy` and a full test collection) against every dependency this
+project actually installs, cross-referenced against the OSV/PyPA
+advisory database.
+
+**Result: no known vulnerabilities in any of it.** Worth recording as a
+real, dated data point (a real-money system's dependency posture is
+exactly the kind of thing that should have a checked-on date attached,
+not just an assumption), not worth pretending is more interesting than
+it is -- nothing to fix here.
+
+**One real, separate observation surfaced by reading `pyproject.toml`
+while doing this, not fixed**: every dependency uses a bare minimum
+version (`fastapi>=0.110`, `cryptography>=43`, etc.) with no upper
+bound and no lockfile (`pip-compile`/`uv.lock`/equivalent) pinning exact
+resolved versions. `pip install -e ".[dev]"` -- what both `ci.yml` and
+the `Dockerfile` actually run -- can therefore resolve a different
+dependency set today than it did yesterday, with no code change on this
+project's own side. Not touched here: introducing a lockfile is a real
+dependency-management workflow decision (which tool, how strict, how CI
+regenerates it) worth a deliberate choice, not something to bolt on as
+a side effect of an unrelated audit -- flagged, not invented a solution
+for.
+
+---
+
 ## 2026-08-27 — The last deferred code-review finding: admin frontend error-handling duplication
 
 The third and final item deferred three entries below, closed the same
