@@ -195,3 +195,86 @@ async def test_take_card_uses_the_players_persisted_auto_mark_preference(
         await engine_b.stop()
         await asyncio.wait_for(task_a, timeout=15)
         await asyncio.wait_for(task_b, timeout=15)
+
+
+async def test_claim_is_rate_limited_after_three_false_claims_in_one_session(
+    gateway_server, pool, redis, card_pool, conn
+):
+    # Spec 3.4: "three false claims in a session triggers a soft
+    # rate-limit." A pattern needs at least 4-5 specific numbers marked on
+    # this specific card, so firing all four claims immediately once the
+    # round is "running" (before more than a couple of calls, if any, can
+    # possibly have landed) makes "no_pattern" the only realistic outcome
+    # every time -- no need for an artificially long call_interval_ms,
+    # which would only make engine.stop()'s teardown below hang (stop()
+    # can't interrupt a round that's already calling; run_forever()'s
+    # outer loop only checks it between rounds, see round_engine.py's own
+    # stop()/run_forever()).
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=1,
+        call_interval_ms=15, is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        other_player = await create_funded_user(conn)
+
+        telegram_id = next_telegram_id()
+        async with websockets.connect(gateway_server) as ws:
+            await ws.send(json.dumps({"t": "auth", "init_data": build_init_data(telegram_id)}))
+            authed = json.loads(await ws.recv())
+            user_id = authed["user"]["id"]
+            await fund_user(conn, user_id, Decimal("100.00"))
+
+            await ws.send(json.dumps({"t": "join", "room_id": room_id}))
+            await recv_until(ws, "state_sync")
+
+            round_id = None
+            # round_engine.py's own per-round lockout already blocks a
+            # second claim attempt within the same round (the second one
+            # would come back "locked_out", not "no_pattern") -- reaching
+            # three counted false claims genuinely takes three separate
+            # rounds, one manual false claim each, exactly the cross-round
+            # escalation spec 3.4 describes.
+            #
+            # Nobody ever wins these rounds (the false claim is deliberate,
+            # and other_player never claims), so each one calls all 75
+            # numbers before settling voided -- broadcasting ~75 unread
+            # "call" frames into this connection's own receive buffer
+            # between rounds, since wait_until() below polls engine.status
+            # directly rather than draining the socket. recv_until()'s
+            # default 50-attempt cap was tuned for a single round with no
+            # backlog; a higher budget here is what actually drains that
+            # accumulated backlog on round 2 and 3, not a flaky timeout --
+            # confirmed by the first draft of this test failing exactly
+            # this way (~60% of runs, "never saw a 'ack' message after 50
+            # frames") with the default before this was raised.
+            for attempt in range(3):
+                assert (await engine.join(other_player, 2)).ok
+                await ws.send(json.dumps({"t": "take_card", "room_id": room_id, "card_no": 1}))
+                await recv_until(ws, "ack", attempts=300)
+
+                await wait_until(lambda: engine.status == "running", timeout=10)
+                round_id = engine.round_id
+                assert round_id is not None
+
+                await ws.send(json.dumps({"t": "claim", "round_id": round_id}))
+                result = await recv_until(ws, "claim_result", attempts=300)
+                assert result == {"t": "claim_result", "valid": False, "reason": "no_pattern"}, (
+                    f"attempt {attempt}: {result}"
+                )
+
+                await wait_until(lambda: engine.status == "idle", timeout=15)
+
+            # The 4th claim in this connection must never even reach the
+            # engine -- rejected locally as rate_limited, not as another
+            # claim_result -- even against a round_id from an already-
+            # finished round, since the check fires before any round
+            # lookup at all.
+            await ws.send(json.dumps({"t": "claim", "round_id": round_id}))
+            blocked = await recv_until(ws, "error", attempts=300)
+            assert blocked["code"] == "rate_limited"
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)

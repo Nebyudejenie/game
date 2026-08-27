@@ -5,6 +5,90 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — Three false claims now soft-rate-limit the rest of that session, closing the last item from the earlier spec sweep
+
+Spec 3.4's own false-claims paragraph: "a manual claim that fails
+validation costs the player nothing financially but locks their BINGO
+button for the rest of that round. This stops spam-tapping. Log it;
+three false claims in a session triggers a soft rate-limit." The
+per-round lockout (`RoundEngine._locked_out`) and the logging
+(`claim_attempts`) already existed; the cross-round "three in a session"
+escalation didn't -- a player who mis-claimed once every round, round
+after round, was never slowed down beyond that single round's own
+lockout.
+
+**The two things spec doesn't define, and how they were resolved
+without inventing a business parameter**: "session" has no existing
+definition anywhere in this codebase (no login-session table, no JWT
+session) -- the only session-shaped concept a realtime WS game actually
+has is the connection itself (`ConnectionHandler`'s own docstring: "One
+instance per WebSocket"), so that's what this uses; it resets on
+reconnect, the same way the round-level lockout resets on the next
+round. "Soft rate-limit" has no given duration or bucket shape -- rather
+than invent one (the same reasoning that already declined to invent a
+withdrawal rate-limit *threshold* earlier this session), this mirrors
+spec's own phrasing for the round-level case one scope up: "the rest of
+that round" becomes "the rest of that session" for the escalated form,
+needing no numeric parameter beyond the literal "three" spec already
+gives. Unlike that declined withdrawal case, spec here unambiguously
+does call for a limit -- only the throttle's exact shape was open, the
+same kind of gap the already-accepted `ADMIN_LOGIN` rate-limit judgment
+call (`packages/core/rate_limit.py`) resolved the same way.
+
+**Fixed**: `services/gateway/connection.py` gained
+`FALSE_CLAIM_SESSION_LIMIT = 3` and a per-connection
+`_false_claim_count`. `_run_action()` increments it only on
+`reason == "no_pattern"` -- the exact same scope `RoundEngine.claim()`
+uses for its own round-level lockout, so a `locked_out`/`not_in_round`/
+etc. rejection (already fully contained by that mechanism) doesn't
+double-count. The `claim` dispatch branch checks the count *before* any
+round lookup at all; once it's reached, every further claim in this
+connection gets `{"t": "error", "code": "rate_limited"}` immediately,
+never reaching the engine.
+
+**Verification**: `test_claim_is_rate_limited_after_three_false_claims_in_one_session`
+in `tests/integration/test_gateway_gameplay.py` -- a real WebSocket
+session across three separate rounds (the per-round lockout means a
+second claim in the *same* round comes back `locked_out`, not
+`no_pattern`, so reaching three counted false claims genuinely takes
+three rounds), each with one deliberate false claim at call_index 0
+(a pattern needs several specific numbers marked, so no calls yet makes
+`no_pattern` the only possible outcome), then a 4th claim proven to be
+rejected locally rather than reaching the engine at all.
+
+The first draft of this test was genuinely flaky (~60% failure rate
+across repeated runs, `"never saw a 'ack' message after 50 frames"`) --
+diagnosed, not dismissed: since nobody ever wins these deliberately-
+false-claim rounds, each one calls all 75 numbers before voiding,
+broadcasting ~75 unread `call` frames into the connection's own receive
+buffer between rounds (`wait_until()` polls `engine.status` directly, it
+doesn't drain the socket), and `recv_until()`'s default 50-attempt cap
+-- tuned for a single round with no backlog -- couldn't drain that
+accumulation by round 2. Fixed by raising `attempts` to 300 for this
+test's own recv calls; confirmed stable across 6 consecutive runs after
+the fix, where the unmodified version had already failed 3 of 5. Also
+confirmed the underlying fix genuinely matters, independent of that
+flake: reverted just `connection.py` and reran 3 times, each a clean,
+reproducible `TimeoutError` waiting for the `rate_limited` error that
+never arrives without it (the 4th claim ends up going all the way to
+the engine instead).
+
+mypy clean (67 source files) throughout. Full clean-slate rebuild:
+`docker compose down -v` -> `up -d` -> `alembic upgrade head` (all 11
+migrations, unchanged by this entry) -> `mypy` clean -> full default
+suite 764 passed (up from 763), 20 deselected -> `-m load` 2 failures
+(`test_gateway_fanout.py`, `test_load_multiroom.py`; `uptime` showed
+load average 1.86 with `spos-backend` still cycling through restarts
+throughout this entire session, the same well-documented
+host-contention pattern, unrelated to a claim-dispatch change) -> `-m
+chaos_infra` 2 passed -> `-m e2e` 13 passed.
+
+This closes the last of the five gaps found in the earlier Mini-App
+spec-compliance sweep (language DB-wins, om/ti stubs, AUTO persistence,
+the WS-compression investigation, and now this).
+
+---
+
 ## 2026-08-27 — permessage-deflate investigated: already on by default, the exact 512-byte rule isn't safely achievable with this stack
 
 Spec 6.4's fan-out efficiency rules: "Compress with `permessage-deflate`

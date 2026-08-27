@@ -29,6 +29,14 @@ from services.gateway.fanout import ConnectionQueue, FanoutHub
 
 AUTH_TIMEOUT_SECONDS = 5.0
 GOING_AWAY_RECONNECT_CODE = 1012  # "service restart" -- reconnect now, don't back off
+# Spec 3.4, verbatim: "three false claims in a session triggers a soft
+# rate-limit." The trigger count is the one number spec actually gives;
+# the exact throttle shape isn't specified, so this mirrors spec's own
+# language for the (already-implemented) round-level lockout -- "locks
+# their BINGO button for the rest of that round" -- one scope level up:
+# the button locks for the rest of this connection instead of inventing
+# an arbitrary cooldown duration or refill rate.
+FALSE_CLAIM_SESSION_LIMIT = 3
 
 
 class ConnectionHandler:
@@ -48,6 +56,7 @@ class ConnectionHandler:
 
         self._user_id: int | None = None
         self._auto_mark_preference: bool = True
+        self._false_claim_count: int = 0
         self._joined_rooms: set[int] = set()
         self._cq = ConnectionQueue()
         self._writer_task: asyncio.Task[None] | None = None
@@ -203,6 +212,13 @@ class ConnectionHandler:
                 queries.set_auto_mark_preference(self._pool, self._user_id, auto),
             )
         elif t == "claim":
+            if self._false_claim_count >= FALSE_CLAIM_SESSION_LIMIT:
+                await self._send_error(
+                    "rate_limited",
+                    "Too many false claims this session.",
+                    "በዚህ ክፍለ ጊዜ ውስጥ በጣም ብዙ የተሳሳቱ የቢንጎ ጥያቄዎች ነበሩ።",
+                )
+                return
             room_id = await self._room_id_for_round(frame.get("round_id"))
             if room_id is None:
                 await self._send_error("bad_round_id", "Unknown round.", "ያልታወቀ ዙር።")
@@ -288,6 +304,13 @@ class ConnectionHandler:
                 return
 
             if action == "claim":
+                # "no_pattern" specifically, matching RoundEngine.claim()'s
+                # own scope for the round-level lockout it already applies
+                # (self._locked_out) -- a rejection like "not_in_round" or
+                # "round_already_settled" isn't a spam-tapped false BINGO
+                # claim, so it shouldn't count toward this session escalation.
+                if not result.ok and result.reason == "no_pattern":
+                    self._false_claim_count += 1
                 await self._ws.send_text(
                     json.dumps({"t": "claim_result", "valid": result.ok, "reason": result.reason})
                 )
