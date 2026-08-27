@@ -5,6 +5,63 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-28 — Closed the rest of `services/bot/handlers.py`'s coverage gap: 45% -> 98%
+
+A follow-on to the previous entry, which closed `cmd_withdraw` alone.
+The remaining commands (`cmd_deposit`'s own rejection branches,
+`cmd_play`, `cmd_history`, `cmd_invite`, `cmd_rules`, `cmd_support`,
+`cmd_language`, `cmd_change_username`, `cmd_limits`'s loss-cap branch,
+and two real registration-failure paths in `on_contact`) were each
+thin-to-nonexistent. None of these individually carried `cmd_withdraw`'s
+urgency, but together they were the largest remaining coverage gap in
+the codebase, and several are directly spec/responsible-gaming
+significant (`cmd_deposit` moves real money same as withdraw;
+`cmd_limits`'s SET_LOSS branch is the loss-cap half of the responsible-
+gaming feature -- only its SET_DEPOSIT sibling had any test at all).
+
+**Added, not changed**: 37 new tests, no production code touched, same
+"real preconditions where reachable, mock the collaborator for exception
+-> message mapping where the business rules are already tested
+elsewhere" discipline as the `cmd_withdraw` entry. Two genuine
+registration-failure paths in `on_contact` had never been exercised at
+all: `InvalidPhone` (a contact-shared number `normalize_ethiopian_phone`
+can't parse) and `PhoneAlreadyRegistered` (a real `UniqueViolationError`
+from a second Telegram account sharing the exact same phone number --
+driven through two real, sequential registrations, not a mocked
+exception, since the constraint itself is the thing worth proving
+still fires end to end). `cmd_start`'s "already registered" branch
+(`welcome.back`) had also never been exercised -- every existing test
+only ever hit the new-user path.
+
+Four branches stayed genuinely out of reach, not overlooked: `cmd_play`/
+`cmd_invite`/`cmd_deposit`/`cmd_withdraw` each have one branch gated on
+a `Settings` field (`miniapp_url`, `telegram_bot_username`,
+`chapa_api_key`/`public_base_url`) that's fixed for the whole shared,
+session-scoped `bot_setup` fixture -- `services.bot.handlers.router` can
+only ever attach to one `Dispatcher` for its lifetime, so a second
+`Settings` value would need a second Dispatcher this file's own
+architecture can't build. Each is called out inline in its test's
+comment rather than left silently uncovered.
+
+**Verification**: full `test_bot_handlers.py` 62 passed (up from 25 at
+the start of this entry, 15 before the `cmd_withdraw` entry). An
+ephemeral `pytest-cov` run (installed for this investigation only,
+uninstalled again before the rebuild below, never added as a
+dependency) confirmed `services/bot/handlers.py` at 98% -- the
+remaining 2% being exactly those four settings-gated branches. mypy
+clean (67 source files). Full clean-slate rebuild: `docker compose down
+-v` -> `up -d` -> `alembic upgrade head` (all 11 migrations, unchanged)
+-> `mypy` clean -> full default suite 811 passed (up from 774), 20
+deselected -> `-m load` 1 failure (`test_load_multiroom.py`; `uptime`
+showed load average 1.19 but `spos-backend` still cycling through
+restarts throughout this entire session's every single verification
+pass, the same well-documented host-contention pattern; rerun in
+isolation and still failed, 383.8ms this time, confirming it's the
+pattern and not a fluke, unrelated to a bot-test-only change) -> `-m
+chaos_infra` 2 passed -> `-m e2e` 13 passed.
+
+---
+
 ## 2026-08-27 — `cmd_withdraw`, the bot's real-money withdrawal command, had almost no test coverage
 
 An ephemeral `pytest-cov` run (installed just for this investigation,
