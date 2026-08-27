@@ -5,6 +5,58 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — permessage-deflate investigated: already on by default, the exact 512-byte rule isn't safely achievable with this stack
+
+Spec 6.4's fan-out efficiency rules: "Compress with `permessage-deflate`
+only above 512 bytes; below that it costs more CPU than it saves." A
+grep across `deploy/`, `services/`, and `pyproject.toml` found no
+explicit WebSocket compression configuration anywhere -- looked at first
+like a real, unaddressed gap.
+
+**What investigation found**: `uvicorn[standard]` (already a dependency)
+selects the `websockets` library for its WS implementation, and both
+`uvicorn.Config`'s `ws_per_message_deflate` parameter and the
+`--ws-per-message-deflate` CLI flag already default to `True` -- meaning
+permessage-deflate is already negotiated and active on every WebSocket
+connection this gateway serves today, in both the test harness
+(`tests/integration/conftest.py`'s bare `uvicorn.Config(gateway_app, ...)`)
+and production (`deploy/docker-compose.prod.yml`'s bare `uvicorn
+services.gateway.app:app ...`), with nothing in this codebase ever
+having turned it off. So the premise "compression was never configured"
+was wrong; what's actually missing is only the size-based carve-out.
+
+Read `websockets`' own `PerMessageDeflate.encode()` (in the installed
+17.0.1 package) directly: it zlib-compresses every non-control frame
+unconditionally once the extension is negotiated for a connection --
+there is no per-message size check, and the library exposes no hook to
+add one. Achieving the spec's literal ">512 bytes only" rule would mean
+either (a) monkey-patching/vendoring a fork of that extension's frame
+encoder, or (b) disabling protocol-level permessage-deflate entirely and
+hand-rolling a custom per-message compression envelope on both the
+Python gateway and the Mini App's JS WebSocket client -- a real
+architectural change touching every message on the connection, not a
+config flag.
+
+**Declined**: the realistic cost of the current always-on behavior is
+compressing already-tiny `call` messages (a few dozen bytes: one number
+and a letter) at microsecond zlib cost -- the spec's own stated concern
+("costs more CPU than it saves") is real but small, while the larger
+`state_sync` reconnect payloads (the actual bandwidth win the rule
+exists for) are already being compressed correctly. Forcing the exact
+byte threshold would mean hand-modifying a well-tested third-party
+WebSocket protocol library's frame-compression internals on a
+real-money platform where a subtle framing bug breaks gameplay for
+every connected player -- the same "investigated and found necessary,
+not fixed" reasoning already applied to `ledger.post()`'s internal
+loops and the refund/settlement loops that must stay sequential:
+correctness risk that outweighs a minor, already-negotiated-away
+efficiency gain.
+
+No code changed; this is a documented investigation, not a fix -- no
+verification cycle applies.
+
+---
+
 ## 2026-08-27 — Mini App had no om/ti locale files at all, unlike the bot
 
 A follow-on to the previous entry: once the Mini App actually started
