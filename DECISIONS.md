@@ -5,6 +5,29 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — Path traversal on both static-file mounts: checked live, clean
+
+The last item in today's systematic web-security sweep (dependencies,
+git-history secrets, SQL injection, XSS, now this): both `StaticFiles`
+mounts this codebase has (`/console` in `services/admin/app.py`,
+`/` in `services/gateway/app.py`) tested directly against a running
+instance, not assumed safe because Starlette's `StaticFiles` is a
+well-known library. `curl` against `/console/../../../../etc/passwd`,
+its URL-encoded (`%2f`) form, and the double-encoded (`%2e%2e`) form, on
+both mounts: every attempt returned `404`, while a legitimate file on
+each mount (`index.html`) returned `200` in the same session, confirming
+the 404s were the traversal protection actually working, not an
+unrelated routing problem masking the real test.
+
+With this, today's security sweep across the five most relevant OWASP
+-adjacent categories for this codebase is complete: dependency CVEs
+(clean), committed secrets (one confirmed-benign hit, allowlisted), SQL
+injection (clean, two f-string call sites traced and verified safe),
+XSS (one real gap found and fixed), path traversal (clean). Four clean
+results and one real, fixed finding -- not a rubber-stamp pass.
+
+---
+
 ## 2026-08-27 — A systematic XSS sweep found one real gap: `app.js`'s outer error fallback
 
 The web-security-checklist companion to the SQL-injection sweep above:
