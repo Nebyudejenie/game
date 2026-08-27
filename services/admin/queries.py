@@ -751,7 +751,7 @@ async def list_pending_withdrawals(pool: asyncpg.Pool) -> list[dict[str, Any]]:
     rows = await pool.fetch(
         """
         SELECT p.id, p.user_id, u.display_name, p.our_ref, p.amount, p.status, p.created_at,
-               pm.kind AS method_kind, pm.account_ref, pm.holder_name
+               p.review_reason, pm.kind AS method_kind, pm.account_ref, pm.holder_name
         FROM payments p
         JOIN users u ON u.id = p.user_id
         LEFT JOIN payment_methods pm ON pm.id = p.method_id

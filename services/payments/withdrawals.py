@@ -209,20 +209,40 @@ async def request_withdrawal(
                 lifetime_out = totals["lifetime_out"]
                 recent_withdrawal_count = totals["recent_withdrawal_count"]
                 account_age = datetime.now(UTC) - user["created_at"]
-                auto_ok = (
-                    amount <= auto_approve_limit
-                    and account_age.total_seconds() > min_account_age_hours * 3600
-                    and lifetime_in >= lifetime_out
-                    and recent_withdrawal_count < max_withdrawals_per_day
-                )
+                # A code review pass caught that the four rules below only
+                # ever collapsed to one bare boolean -- an admin working
+                # the review queue had no way to tell *why* a given
+                # request landed there without manually re-deriving it by
+                # re-querying every related table by hand. Each failing
+                # rule is recorded in review_reason instead, built from
+                # the exact same values auto_ok itself is computed from,
+                # not a second, separately-invented explanation.
+                failed_checks: list[str] = []
+                if amount > auto_approve_limit:
+                    failed_checks.append(f"amount {amount} exceeds auto-approve limit {auto_approve_limit}")
+                if account_age.total_seconds() <= min_account_age_hours * 3600:
+                    failed_checks.append(f"account age below {min_account_age_hours:g}h minimum")
+                if lifetime_in < lifetime_out:
+                    failed_checks.append(
+                        f"lifetime withdrawals ({lifetime_out}) exceed lifetime deposits ({lifetime_in})"
+                    )
+                if recent_withdrawal_count >= max_withdrawals_per_day:
+                    failed_checks.append(
+                        f"{recent_withdrawal_count} withdrawals in the last 24h "
+                        f"(max {max_withdrawals_per_day})"
+                    )
+
+                auto_ok = not failed_checks
                 status = STATUS_APPROVED if auto_ok else STATUS_REVIEW
+                review_reason = "; ".join(failed_checks) if failed_checks else None
                 span.set_attribute("withdrawal.status", status)
 
                 payment_row = await conn.fetchrow(
                     """
                     INSERT INTO payments
-                        (user_id, direction, provider, our_ref, amount, status, method_id, ledger_txn_id)
-                    VALUES ($1, 'out', $2, $3, $4, $5, $6, $7)
+                        (user_id, direction, provider, our_ref, amount, status, method_id,
+                         ledger_txn_id, review_reason)
+                    VALUES ($1, 'out', $2, $3, $4, $5, $6, $7, $8)
                     RETURNING id
                     """,
                     user_id,
@@ -232,6 +252,7 @@ async def request_withdrawal(
                     status,
                     method_id,
                     txn.id,
+                    review_reason,
                 )
                 assert payment_row is not None
                 payment_id: int = payment_row["id"]

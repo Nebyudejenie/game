@@ -5,6 +5,56 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — Withdrawal review reason: reconsidering an earlier "deferred, feature-shaped" call
+
+The code-review pass two entries below deferred "no stored reason for
+an auto-review outcome" as feature-shaped -- a new column, a new write
+path, more scope than a fix. On reconsideration that was too
+conservative a read: nothing about it requires inventing business
+policy. `request_withdrawal()`'s `auto_ok` already computes every value
+needed (amount vs. limit, account age, lifetime in/out, recent
+withdrawal count) -- the gap was never missing logic, only that the
+four-way boolean AND threw away *which* condition actually failed the
+moment it collapsed to a single `True`/`False`. Surfacing that is
+observability work on a decision the system already makes, the same
+category as this session's other audit-trail fixes (the KYC action's
+before/after JSON, the jsonb-parsing consolidation), not a new feature.
+
+**What was built**: `payments.review_reason` (migration `98b822eaa241`,
+nullable text, dedicated rather than reusing the existing
+`failure_reason` column -- that one is consistently used only for the
+terminal `rejected`/`failed` states elsewhere in this codebase, a
+different lifecycle stage than "pending review"; reusing it would lose
+the original review reason the moment an admin later rejects the same
+payment). `request_withdrawal()` now builds a list of every failing
+check in plain language and joins them into one string, stored
+alongside the `review` status. `list_pending_withdrawals()` and
+`web/admin/js/screens/payments.js` (a new "Why in review" column) both
+surface it -- verified with a real Playwright screenshot against a live
+admin session, not just the API-level tests: four real review-status
+rows created through the actual gate showed the actual, correct reasons
+("amount 3000.00 exceeds auto-approve limit 2000.00", "3 withdrawals in
+the last 24h (max 3)", "lifetime withdrawals (100.00) exceed lifetime
+deposits (0)"), while pre-migration rows from earlier in this session's
+own testing correctly showed "—" rather than a fabricated retroactive
+reason.
+
+**Verification**: four new tests in `test_payments_withdrawals.py`, one
+per failing rule plus a null-check for the auto-approved path, three of
+which confirmed to genuinely fail against the pre-change file via the
+usual stash-revert step (the null-check correctly still passed, since
+that path is unchanged); one extended assertion in the existing
+`test_list_pending_withdrawals_shows_review_items`. Full clean-slate
+rebuild: `docker compose down -v` -> `up -d` -> `alembic upgrade head`
+-> `mypy` clean (66 source files) -> full default suite 757 passed (up
+from 753), 18 deselected -> `-m load` 1 failure
+(`test_gateway_fanout.py`, the same well-documented host-contention
+pattern, confirmed via `uptime`/`docker ps` at load average ~2.8,
+unrelated to this turn) -> `-m chaos_infra` 2 passed -> `-m e2e` 11
+passed.
+
+---
+
 ## 2026-08-27 — `/docs`, `/redoc`, `/openapi.json` were bypassing the admin IP allowlist too
 
 Reconsidering the previous entry's deferred "two independent IP

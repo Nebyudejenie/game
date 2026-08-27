@@ -68,7 +68,12 @@ async def test_list_pending_withdrawals_shows_review_items(pool, redis, conn):
     payment_id, our_ref = await _review_withdrawal(pool, redis, conn, user_id, Decimal("100.00"))
 
     rows = await queries.list_pending_withdrawals(pool)
-    assert any(r["id"] == payment_id and r["our_ref"] == our_ref for r in rows)
+    match = next((r for r in rows if r["id"] == payment_id and r["our_ref"] == our_ref), None)
+    assert match is not None
+    # _review_withdrawal forces review via auto_approve_limit=0.00 -- the
+    # admin queue must show *why*, not just that it's sitting there.
+    assert match["review_reason"] is not None
+    assert "auto-approve limit" in match["review_reason"]
 
 
 async def test_list_stuck_processing_payouts_surfaces_an_unresolved_transfer(pool, redis, conn):

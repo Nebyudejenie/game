@@ -256,6 +256,66 @@ async def test_amount_above_auto_approve_limit_goes_to_review(pool, redis, conn)
     assert await _locked(conn, user_id) == Decimal("3000.00")
 
 
+async def test_review_reason_names_the_amount_ceiling_when_that_is_why(pool, redis, conn):
+    # A code review pass caught that auto_ok collapsed four independent
+    # rules to one bare boolean, giving an admin no way to tell *why* a
+    # request landed in review without manually re-deriving it. This is
+    # the proof review_reason names the actual rule that failed, not
+    # just a generic "review" status.
+    user_id = await create_funded_user(conn, Decimal("10000.00"))
+    intent = await _request(pool, redis, conn, user_id, Decimal("3000.00"))
+
+    reason = await conn.fetchval("SELECT review_reason FROM payments WHERE id = $1", intent.payment_id)
+    assert reason is not None
+    assert "auto-approve limit" in reason
+
+
+async def test_review_reason_names_the_velocity_gate_when_that_is_why(pool, redis, conn):
+    user_id = await create_funded_user(conn, Decimal("1000.00"))
+    for i in range(3):
+        await conn.execute(
+            "INSERT INTO payments (user_id, direction, provider, our_ref, amount, status) "
+            "VALUES ($1, 'out', 'chapa', $2, $3, 'review')",
+            user_id,
+            f"WD-test-reason-velocity-{user_id}-{i}",
+            Decimal("50.00"),
+        )
+
+    intent = await _request(pool, redis, conn, user_id, Decimal("50.00"))
+
+    reason = await conn.fetchval("SELECT review_reason FROM payments WHERE id = $1", intent.payment_id)
+    assert reason is not None
+    assert "24h" in reason
+
+
+async def test_review_reason_names_the_lifetime_balance_check_when_that_is_why(pool, redis, conn):
+    user_id = await create_funded_user(conn, Decimal("1000.00"))
+    # A real succeeded withdrawal with no matching deposit on record --
+    # lifetime_out (100) now exceeds lifetime_in (0) for this user.
+    await conn.execute(
+        "INSERT INTO payments (user_id, direction, provider, our_ref, amount, status) "
+        "VALUES ($1, 'out', 'chapa', $2, $3, 'succeeded')",
+        user_id,
+        f"WD-test-reason-lifetime-{user_id}",
+        Decimal("100.00"),
+    )
+
+    intent = await _request(pool, redis, conn, user_id, Decimal("50.00"))
+
+    reason = await conn.fetchval("SELECT review_reason FROM payments WHERE id = $1", intent.payment_id)
+    assert reason is not None
+    assert "lifetime" in reason
+
+
+async def test_review_reason_is_null_when_auto_approved(pool, redis, conn):
+    user_id = await create_funded_user(conn, Decimal("1000.00"))
+    intent = await _request(pool, redis, conn, user_id, Decimal("100.00"))
+    assert intent.status == withdrawals.STATUS_APPROVED
+
+    reason = await conn.fetchval("SELECT review_reason FROM payments WHERE id = $1", intent.payment_id)
+    assert reason is None
+
+
 async def test_withdrawal_velocity_over_the_daily_limit_goes_to_review(pool, redis, conn):
     # spec 8.4's anti-fraud table: "Withdrawal velocity > 3/day -> Review".
     # Simulates the user already having 3 withdrawal requests in the last

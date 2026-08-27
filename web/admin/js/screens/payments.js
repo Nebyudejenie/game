@@ -25,7 +25,7 @@ export async function render(container) {
         <thead>
           <tr>
             <th>Ref</th><th>User</th><th>Amount</th><th>Method</th><th>Destination</th>
-            <th>Requested</th><th>Actions</th>
+            <th>Why in review</th><th>Requested</th><th>Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -36,6 +36,7 @@ export async function render(container) {
               <td>${w.amount} ETB</td>
               <td>${escapeHtml(w.method_kind || "—")}</td>
               <td>${escapeHtml(w.account_ref || "—")} / ${escapeHtml(w.holder_name || "—")}</td>
+              <td>${escapeHtml(w.review_reason || "—")}</td>
               <td>${fmtDate(w.created_at)}</td>
               <td>
                 <button class="btn btn-success btn-sm approve-btn">Approve</button>

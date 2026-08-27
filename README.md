@@ -414,7 +414,12 @@ move through any of this.
   enqueues the real payout job), `reject_withdrawal_admin`
   (ledger-reversed, audit-logged) — both safe no-ops if the payment isn't
   in `review` any more. New RBAC permissions `payments:view` and
-  `payments:approve`.
+  `payments:approve`. `payments.review_reason` (a code-review addition)
+  records *which* of the four auto-approve rules actually failed, built
+  from the same values `auto_ok` itself is computed from — an admin
+  working the queue (`web/admin/`'s Payments screen shows it as its own
+  column) no longer has to manually re-derive why a given request landed
+  there. See `DECISIONS.md`.
 - **`services/bot/handlers.py`**'s `/withdraw <amount> <telebirr number>
   <full name>` works end to end — real validation errors, real
   auto-approve-vs-review outcome reported back to the player.
