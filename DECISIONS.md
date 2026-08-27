@@ -5,6 +5,60 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-27 — `cmd_withdraw`, the bot's real-money withdrawal command, had almost no test coverage
+
+An ephemeral `pytest-cov` run (installed just for this investigation,
+not added as a project dependency, uninstalled again immediately after)
+found `services/bot/handlers.py` at 45% coverage -- the lowest of any
+non-entrypoint module in the codebase. Looking at exactly which lines
+were missing rather than just the percentage: `cmd_withdraw` (the bot's
+`/withdraw` command, real money leaving the platform) was covered on
+only 5 of its 64 statements -- essentially every branch past the
+argument-count check was completely untested, including all five of
+`withdrawals.request_withdrawal()`'s own rejection exceptions and both
+success-status messages. `cmd_play`, `cmd_history`, `cmd_invite`,
+`cmd_rules`, `cmd_support`, `cmd_language`, and `cmd_change_username`
+were similarly close to entirely uncovered, but none of those move
+money -- `cmd_withdraw` was the one genuine gap worth closing first.
+
+**Added, not changed**: ten new tests in `tests/integration/test_bot_handlers.py`,
+no production code touched. Registration/argument-parsing branches
+(`not_registered`, missing arguments, invalid amount) are driven through
+real preconditions, matching this file's own established style. The
+five rejection exceptions and the two success-status messages are
+tested by monkeypatching `services.bot.handlers.withdrawals
+.request_withdrawal` directly -- the same "mock the collaborator, test
+this unit's own logic" boundary `test_deposit_command_rate_limited_after
+_five_in_a_row` already draws for `ChapaProvider`, since
+`request_withdrawal()`'s actual business rules already have 19 dedicated
+tests in `test_payments_withdrawals.py`; re-deriving each exact
+precondition (KYC threshold, chargeback window, etc.) through the bot
+layer would just be duplicated setup for a question already answered
+elsewhere. One real, fully unmocked end-to-end test proves the wiring
+itself -- argument parsing, the `redis: Redis` dependency resolving via
+aiogram's real DI, a real `payments` row landing with the right amount --
+and along the way caught a wrong assumption in its own first draft: a
+freshly-registered test account can only ever get `STATUS_REVIEW` (
+`request_withdrawal()`'s min-account-age rule fails for any account
+seconds old, independent of amount), so the test's own expectation of
+"approved" was fixed to match that real, correct behavior rather than
+forcing an artificially aged test account just to see the other branch.
+
+**Verification**: full `test_bot_handlers.py` 25 passed (up from 15).
+No stash-revert step -- this is test-only, no production code changed,
+matching how `packages/core/rate_limit.py`'s and `logging.py`'s own
+zero-coverage closures earlier this session were verified. mypy clean
+(67 source files). Full clean-slate rebuild: `docker compose down -v`
+-> `up -d` -> `alembic upgrade head` (all 11 migrations, unchanged) ->
+`mypy` clean -> full default suite 774 passed (up from 764), 20
+deselected -> `-m load` 2 failures (`test_gateway_fanout.py`,
+`test_load_multiroom.py`; `uptime` showed load average 1.91 with
+`spos-backend` unhealthy/cycling, the same well-documented
+host-contention pattern, unrelated to a bot-test-only change) -> `-m
+chaos_infra` 2 passed -> `-m e2e` 13 passed.
+
+---
+
 ## 2026-08-27 — Three false claims now soft-rate-limit the rest of that session, closing the last item from the earlier spec sweep
 
 Spec 3.4's own false-claims paragraph: "a manual claim that fails

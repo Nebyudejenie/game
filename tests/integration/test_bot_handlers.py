@@ -367,6 +367,166 @@ async def test_deposit_command_rate_limited_after_five_in_a_row(pool, bot_ctx, m
     assert "wait a bit" in session.sent[0].text or "ትንሽ ቆይተው" in session.sent[0].text
 
 
+async def test_withdraw_command_rejects_unregistered_user(bot_ctx):
+    dp, bot, session = bot_ctx
+    telegram_id = next_telegram_id()
+    await dp.feed_update(bot, make_text_update(telegram_id, "/withdraw 100 0911223344 Abebe Kebede"))
+    await _settle()
+    assert len(session.sent) == 1
+    assert "register first" in session.sent[0].text or "ይመዝገቡ" in session.sent[0].text
+
+
+async def test_withdraw_command_requires_three_arguments(bot_ctx):
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+
+    await dp.feed_update(bot, make_text_update(telegram_id, "/withdraw 100"))
+    await _settle()
+    assert len(session.sent) == 1
+    assert "Usage:" in session.sent[0].text or "አጠቃቀም" in session.sent[0].text
+
+
+async def test_withdraw_command_rejects_invalid_amount(bot_ctx):
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+
+    await dp.feed_update(bot, make_text_update(telegram_id, "/withdraw abc 0911223344 Abebe Kebede"))
+    await _settle()
+    assert len(session.sent) == 1
+    assert "valid amount" in session.sent[0].text or "ትክክለኛ መጠን" in session.sent[0].text
+
+
+async def test_withdraw_command_succeeds_and_creates_a_real_request(pool, conn, bot_ctx):
+    # A real, unmocked call all the way through withdrawals.request_withdrawal()
+    # -- proves cmd_withdraw's own argument parsing (amount/account_ref/holder_name
+    # split) and its `redis: Redis` dependency both wire correctly through
+    # aiogram's real DI, and that a real payments row lands with the right
+    # amount and status. fund_user() credits the ledger directly with no
+    # accompanying payments row, so this can't accidentally trip
+    # RecentReversibleDeposit (it only looks at the payments table).
+    #
+    # Expects "review", not "approved": request_withdrawal()'s own
+    # min-account-age rule always fails for a user registered seconds ago,
+    # regardless of amount -- that's the real, correct outcome for a fresh
+    # account, not a reason to force an artificially old one just to see
+    # the other branch (already covered directly in
+    # test_payments_withdrawals.py; this test's own job is proving
+    # cmd_withdraw's wiring, not re-deriving the auto-approve rules).
+    from tests.integration.conftest import fund_user
+
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+    user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+    await fund_user(conn, user_row["id"], Decimal("500.00"))
+
+    await dp.feed_update(
+        bot, make_text_update(telegram_id, "/withdraw 100 0911223344 Abebe Kebede")
+    )
+    await _settle()
+
+    assert len(session.sent) == 1
+    assert "under review" in session.sent[0].text or "እየተገመገመ" in session.sent[0].text
+
+    payment = await pool.fetchrow(
+        "SELECT amount, status, direction FROM payments WHERE user_id = $1", user_row["id"]
+    )
+    assert payment is not None
+    assert payment["direction"] == "out"
+    assert payment["amount"] == Decimal("100.00")
+    assert payment["status"] == "review"
+
+
+async def _withdraw_hitting(monkeypatch, dp, bot, session, telegram_id, exc_cls) -> str:
+    async def _raise(*args, **kwargs):
+        raise exc_cls("boom")
+
+    monkeypatch.setattr("services.bot.handlers.withdrawals.request_withdrawal", _raise)
+    session.sent.clear()
+    await dp.feed_update(bot, make_text_update(telegram_id, "/withdraw 100 0911223344 Abebe Kebede"))
+    await _settle()
+    assert len(session.sent) == 1
+    return session.sent[0].text
+
+
+async def test_withdraw_command_reports_approved_status(bot_ctx, monkeypatch):
+    # The real end-to-end test above can only ever observe "review" (a
+    # brand-new account always fails request_withdrawal()'s min-account-age
+    # rule) -- this covers cmd_withdraw's other message-selection branch
+    # directly, the same "mock the collaborator, test this unit's own
+    # dispatch logic" reasoning as the rejection-mapping tests below.
+    from services.payments import withdrawals
+
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+
+    async def _approve(*args, **kwargs):
+        return withdrawals.WithdrawalIntent(
+            payment_id=1, our_ref="test-ref", status=withdrawals.STATUS_APPROVED
+        )
+
+    monkeypatch.setattr("services.bot.handlers.withdrawals.request_withdrawal", _approve)
+    await dp.feed_update(bot, make_text_update(telegram_id, "/withdraw 100 0911223344 Abebe Kebede"))
+    await _settle()
+
+    assert len(session.sent) == 1
+    assert "approved" in session.sent[0].text or "ጸድቋል" in session.sent[0].text
+
+
+async def test_withdraw_command_reports_below_minimum(bot_ctx, monkeypatch):
+    from services.payments import withdrawals
+
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+    text = await _withdraw_hitting(
+        monkeypatch, dp, bot, session, telegram_id, withdrawals.BelowMinimumWithdrawal
+    )
+    assert "minimum withdrawal" in text or "ዝቅተኛው ወጪ" in text
+
+
+async def test_withdraw_command_reports_insufficient_balance(bot_ctx, monkeypatch):
+    from services.payments import withdrawals
+
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+    text = await _withdraw_hitting(
+        monkeypatch, dp, bot, session, telegram_id, withdrawals.InsufficientAvailableBalance
+    )
+    assert "Insufficient balance" in text or "በቂ ቀሪ ሂሳብ" in text
+
+
+async def test_withdraw_command_reports_kyc_required(bot_ctx, monkeypatch):
+    from services.payments import withdrawals
+
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+    text = await _withdraw_hitting(
+        monkeypatch, dp, bot, session, telegram_id, withdrawals.KycLevelTooLow
+    )
+    assert "identity verification" in text or "የማንነት ማረጋገጫ" in text
+
+
+async def test_withdraw_command_reports_recent_deposit(bot_ctx, monkeypatch):
+    from services.payments import withdrawals
+
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+    text = await _withdraw_hitting(
+        monkeypatch, dp, bot, session, telegram_id, withdrawals.RecentReversibleDeposit
+    )
+    assert "after a deposit" in text or "ገቢ ካደረጉ" in text
+
+
+async def test_withdraw_command_reports_unknown_withdrawer_as_generic_error(bot_ctx, monkeypatch):
+    from services.payments import withdrawals
+
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+    text = await _withdraw_hitting(
+        monkeypatch, dp, bot, session, telegram_id, withdrawals.UnknownWithdrawer
+    )
+    assert "Something went wrong" in text or "የሆነ ስህተት" in text
+
+
 async def test_limits_deposit_sets_the_cap_instantly_on_first_use(pool, bot_ctx):
     dp, bot, session = bot_ctx
     telegram_id = await _register(dp, bot, session)
