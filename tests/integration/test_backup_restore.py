@@ -15,6 +15,7 @@ connection, so it needs no chaos_infra-style isolation.
 """
 
 import asyncio
+import os
 import subprocess
 from decimal import Decimal
 from pathlib import Path
@@ -110,3 +111,21 @@ async def test_restore_refuses_a_missing_backup_file(tmp_path):
     stdout, stderr = await proc.communicate()
     assert proc.returncode != 0
     assert "not found" in (stdout + stderr).decode()
+
+
+async def test_backup_honors_a_compose_file_override(tmp_path):
+    # An architecture audit caught both scripts hardcoding docker-compose
+    # .yml (the dev stack) with no way to point at production at all --
+    # this proves COMPOSE_FILE is actually read, not silently ignored, by
+    # pointing it at a real, deliberately-nonexistent file and confirming
+    # the script fails trying to use it (docker compose's own real exit
+    # code and error, not a mocked one) rather than quietly falling back
+    # to the dev compose file and succeeding anyway.
+    env = {**os.environ, "COMPOSE_FILE": str(tmp_path / "does-not-exist.yml")}
+    proc = await asyncio.create_subprocess_exec(
+        str(DEPLOY_DIR / "backup.sh"), "jobingo",
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+    )
+    stdout, stderr = await proc.communicate()
+    assert proc.returncode != 0
+    assert "does-not-exist.yml" in (stdout + stderr).decode()

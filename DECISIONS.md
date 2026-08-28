@@ -5,6 +5,53 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-28 — `deploy/backup.sh`/`restore.sh` had no working path to production at all
+
+Another P1 from the four-audit pass. Both scripts hardcoded
+`COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"` -- the dev stack, project
+name `jobingo` -- and `-U jobingo` for the Postgres user. Production uses
+a separate compose file (`docker-compose.prod.yml`, a different project
+name) with a configurable `POSTGRES_USER`/`POSTGRES_PASSWORD`. Running
+either script as-is against the real Proxmox deployment would try to
+`docker compose exec` a container that compose file never defines --
+there was no working, documented backup path for the actual production
+database anywhere in this repo. `tests/integration/test_backup_restore.py`'s
+own real drill only ever proved the mechanism works against dev Postgres,
+never that it's usable in prod.
+
+**Fixed**: both scripts now read `COMPOSE_FILE`/`POSTGRES_USER` from the
+environment, defaulting to the dev stack (`docker-compose.yml`,
+`jobingo`) so every existing invocation -- including the real drill test
+-- keeps working unchanged. Pointing at production is now
+`COMPOSE_FILE=deploy/docker-compose.prod.yml POSTGRES_USER=... deploy/backup.sh`,
+no code change required. Scheduling (cron/systemd timer) remains a
+deliberate deployment-time decision, same as every other worker
+entrypoint in this codebase -- this closes the "can't even target prod"
+gap, not the separate "nobody invokes it periodically" one.
+
+**Verification**: a new `test_backup_honors_a_compose_file_override`
+proves the env var is actually read, not silently ignored -- pointing
+`COMPOSE_FILE` at a real, deliberately nonexistent file and confirming
+the script fails trying to use it (Docker Compose's own real exit code
+and error text), rather than quietly falling back to the dev file and
+succeeding anyway. Confirmed the test genuinely fails against the
+pre-fix scripts via the usual stash-revert step (`returncode == 0` --
+the override was silently ignored, exactly the bug). Full
+`test_backup_restore.py` (3 passed) confirms the pre-existing real
+backup/restore drill still passes unchanged with the new defaults. mypy
+clean (67 source files -- no Python production code touched, bash
+scripts + one test file). Full clean-slate rebuild: `docker compose down
+-v` -> `up -d` -> `alembic upgrade head` (all 11 migrations, unchanged)
+-> `mypy` clean -> full default suite 819 passed (up from 818), 21
+deselected -> `-m load` 1 failure (`test_gateway_fanout.py` this time,
+not its usual sibling; `uptime` showed load average 3.27 -- the highest
+observed all session -- with `spos-backend` still cycling through health
+checks, the same well-documented host-contention pattern, unrelated to
+a deploy-script-only change) -> `-m chaos_infra` 2 passed -> `-m e2e` 14
+passed.
+
+---
+
 ## 2026-08-28 — First P1 from the four-audit pass: a deactivated admin's live session kept working
 
 `services/admin/auth.py`'s own module docstring has always claimed
