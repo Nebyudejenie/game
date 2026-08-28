@@ -80,6 +80,11 @@ house_revenue_total = Gauge(
     "house_revenue_total", "Live house_revenue account balance (ETB)"
 )
 
+payment_reconciliation_mismatch_count = Gauge(
+    "payment_reconciliation_mismatch_count",
+    "Deposits whose provider status/amount disagreed with our own payments row on the last reconciliation pass",
+)
+
 # --- reconcile_job -----------------------------------------------------
 
 # A one-shot batch job (packages/core/reconcile_job.py), not a scraped

@@ -53,7 +53,7 @@ from packages.core.logging import configure_logging
 from packages.core.notifications import notify_user
 from packages.core.redis_conn import get_redis
 from services.payments.chapa import ChapaProvider
-from services.payments.deposits import poll_pending_deposits
+from services.payments.deposits import poll_pending_deposits, run_provider_reconciliation
 from services.payments.provider import PaymentProvider
 from services.payments.withdrawals import PAYOUT_STREAM, sweep_stuck_approved_payouts
 
@@ -359,6 +359,11 @@ async def run_forever(
 
 DEPOSIT_POLL_INTERVAL_SECONDS = 30
 WITHDRAWAL_SWEEP_INTERVAL_SECONDS = 60
+# "Hourly" per services.payments.deposits.reconcile()'s own docstring,
+# quoting spec -- this is what actually runs it; see
+# run_provider_reconciliation()'s own docstring for why it lives here
+# rather than as an external cron job like packages/core/reconcile_job.py.
+PROVIDER_RECONCILE_INTERVAL_SECONDS = 3600
 METRICS_PORT = 8005
 
 
@@ -380,15 +385,18 @@ async def _run_periodic_sweep(
 
 async def main_async() -> None:
     """Real production entrypoint: the payout stream consumer (this
-    module's own run_forever(), the primary job) alongside the two other
-    "safe to run on a timer" payments reconciliation sweeps that need a
-    periodic invoker somewhere -- deposits.py's poll_pending_deposits()
-    (a webhook that never arrives) and withdrawals.py's
-    sweep_stuck_approved_payouts() (an enqueue that never landed, since
-    that XADD runs after the DB commit, not inside it). All three share
-    one process/provider rather than three separate ones since none of
-    them individually justifies its own container, and all three are
-    already designed to be safe under concurrent, independent invocation.
+    module's own run_forever(), the primary job) alongside three other
+    "safe to run on a timer" payments sweeps that need a periodic invoker
+    somewhere -- deposits.py's poll_pending_deposits() (a webhook that
+    never arrives), withdrawals.py's sweep_stuck_approved_payouts() (an
+    enqueue that never landed, since that XADD runs after the DB commit,
+    not inside it), and deposits.py's run_provider_reconciliation() (spec's
+    own hourly Chapa-vs-our-records check, previously built and tested but
+    never actually invoked from anywhere -- an architecture audit caught
+    this). All four share one process/provider rather than separate ones
+    since none of them individually justifies its own container, and all
+    are already designed to be safe under concurrent, independent
+    invocation.
     """
     settings = get_settings()
     configure_logging(settings.log_level)
@@ -418,6 +426,13 @@ async def main_async() -> None:
                 "sweep_stuck_approved_payouts",
                 WITHDRAWAL_SWEEP_INTERVAL_SECONDS,
                 lambda: sweep_stuck_approved_payouts(pool, redis),
+            )
+        ),
+        asyncio.create_task(
+            _run_periodic_sweep(
+                "run_provider_reconciliation",
+                PROVIDER_RECONCILE_INTERVAL_SECONDS,
+                lambda: run_provider_reconciliation(pool, provider),
             )
         ),
     ]

@@ -15,20 +15,29 @@ groups:
   - name: jo-bingo
     rules:
       - alert: LedgerReconciliationMismatch
-        # Known gap, honestly flagged rather than faked: reconcile_job.py
-        # (packages/core/reconcile_job.py) is a one-shot CLI job with no
-        # long-running /metrics endpoint of its own, so this metric isn't
-        # actually pushed anywhere yet -- a real deployment needs it to
-        # push to a Prometheus Pushgateway after each run (the standard
-        # pattern for batch jobs) before this rule can ever fire. The rule
-        # is written against the metric name that integration should use,
-        # so wiring it later is "add the push call", not "invent the
-        # alert". See DECISIONS.md.
+        # reconcile_job.py (packages/core/reconcile_job.py) is a one-shot
+        # CLI job with no long-running /metrics endpoint of its own, so it
+        # pushes this metric to a Prometheus Pushgateway after each run
+        # instead (job="reconcile_job") -- confirmed wired end to end, see
+        # DECISIONS.md 2026-08-24. Scheduling reconcile_job.py itself
+        # (cron/systemd-timer/k8s CronJob) remains a real deployment-time
+        # decision, same as every other worker entrypoint in this codebase.
         expr: ledger_reconciliation_mismatch_count > 0
         labels:
           severity: page
         annotations:
           summary: "Ledger reconciliation found a cached-balance / ledger-entries mismatch"
+
+      - alert: PaymentReconciliationMismatch
+        # payout_worker.py runs services.payments.deposits
+        # .run_provider_reconciliation() hourly (a real, wired periodic
+        # sweep on that already-running process -- see DECISIONS.md), so
+        # this fires from a real, live-scraped gauge, not a pushed one.
+        expr: payment_reconciliation_mismatch_count > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "A deposit's provider status/amount disagreed with our own records on the last reconciliation pass"
 
       - alert: PayoutQueueDepthHigh
         expr: payout_queue_depth > 50

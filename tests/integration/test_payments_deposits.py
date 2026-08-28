@@ -11,6 +11,7 @@ test in this suite makes a live call to Telegram's servers either.
 
 import asyncio
 import json
+import uuid
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -379,3 +380,90 @@ async def test_a_still_pending_poll_does_not_touch_the_payment_or_the_metric(poo
         metrics.deposit_outcomes_total.labels(outcome="credited")._value.get() == credited_before + 1
     )
     assert metrics.deposit_outcomes_total.labels(outcome="not_succeeded")._value.get() == not_succeeded_before
+
+
+async def test_run_provider_reconciliation_flags_a_real_status_disagreement(pool, conn):
+    # An architecture audit found reconcile() fully built and unit-tested
+    # but never actually called from anywhere in production -- this is the
+    # real, runnable wiring (payout_worker.py's main_async() runs it
+    # hourly): a payment we show as 'succeeded' that the provider's own
+    # fetch_status() now disagrees with must come back as a real mismatch.
+    #
+    # This scans the *whole* shared payments table within the time window
+    # (the real, production query -- not scoped to this test's own rows),
+    # so other tests' still-open 'succeeded' chapa payments are legitimately
+    # also flagged by a fresh FakePaymentProvider with no statuses entry for
+    # them (that IS the correct behavior: a real provider would actually
+    # know, this fake one just doesn't). Assertions below find this test's
+    # own our_ref among whatever else comes back, rather than asserting an
+    # exact list -- the same "delta, not absolute count" reasoning already
+    # used elsewhere in this codebase for shared, ever-growing tables.
+    provider = FakePaymentProvider()
+    user_id = await create_user(conn)
+    our_ref = f"DEP-recon-mismatch-{uuid.uuid4()}"
+    await conn.execute(
+        "INSERT INTO payments (user_id, direction, provider, our_ref, amount, status) "
+        "VALUES ($1, 'in', 'chapa', $2, 100.00, 'succeeded')",
+        user_id,
+        our_ref,
+    )
+    provider.statuses[our_ref] = StatusResult(
+        status="failed", amount=Decimal("100.00"), provider_ref=our_ref, raw={}
+    )
+
+    mismatches = await deposits.run_provider_reconciliation(pool, provider)
+
+    by_ref = {m.our_ref: m for m in mismatches}
+    assert our_ref in by_ref
+    assert by_ref[our_ref].reason == "status_disagreement"
+
+    from packages.core import metrics
+
+    assert metrics.payment_reconciliation_mismatch_count._value.get() == len(mismatches)
+
+
+async def test_run_provider_reconciliation_finds_nothing_for_a_payment_the_provider_confirms(pool, conn):
+    # Same shared-table caveat as above: this asserts the one payment this
+    # test actually controls doesn't appear as a mismatch, not that the
+    # whole result set is empty (other tests' still-unverified 'succeeded'
+    # payments legitimately do show up here too).
+    provider = FakePaymentProvider()
+    user_id = await create_user(conn)
+    our_ref = f"DEP-recon-clean-{uuid.uuid4()}"
+    await conn.execute(
+        "INSERT INTO payments (user_id, direction, provider, our_ref, amount, status) "
+        "VALUES ($1, 'in', 'chapa', $2, 75.00, 'succeeded')",
+        user_id,
+        our_ref,
+    )
+    provider.statuses[our_ref] = StatusResult(
+        status="succeeded", amount=Decimal("75.00"), provider_ref=our_ref, raw={}
+    )
+
+    mismatches = await deposits.run_provider_reconciliation(pool, provider)
+
+    assert our_ref not in {m.our_ref for m in mismatches}
+
+
+async def test_run_provider_reconciliation_ignores_payments_outside_the_time_window(pool, conn):
+    # A payment updated well before the since_hours window (an old,
+    # already-settled deposit) must not be re-checked on every single
+    # hourly pass forever -- only payments genuinely recent enough that a
+    # provider-side correction is still plausible. If this our_ref were
+    # checked, fetch_status()'s default ("pending", no amount) would make
+    # reconcile() flag missing_from_provider_report -- its absence from the
+    # result is what proves it was excluded by the query, not that it
+    # happened to agree.
+    provider = FakePaymentProvider()
+    user_id = await create_user(conn)
+    our_ref = f"DEP-recon-stale-{uuid.uuid4()}"
+    await conn.execute(
+        "INSERT INTO payments (user_id, direction, provider, our_ref, amount, status, updated_at) "
+        "VALUES ($1, 'in', 'chapa', $2, 100.00, 'succeeded', now() - interval '3 hours')",
+        user_id,
+        our_ref,
+    )
+
+    mismatches = await deposits.run_provider_reconciliation(pool, provider, since_hours=2)
+
+    assert our_ref not in {m.our_ref for m in mismatches}

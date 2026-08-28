@@ -450,3 +450,81 @@ def reconcile(
             )
 
     return mismatches
+
+
+async def run_provider_reconciliation(
+    pool: asyncpg.Pool, provider: PaymentProvider, *, since_hours: int = 2
+) -> list[ReconciliationMismatch]:
+    """The real, runnable wiring reconcile() itself was always missing --
+    an architecture audit found the pure comparison above fully built and
+    tested (tests/unit/test_payment_reconciliation.py) but never called
+    from anywhere in production: no job, no route, no scheduled sweep. This
+    is that job's real logic (payout_worker.py's main_async() runs it on a
+    timer, the same "share the one already-running process" pattern as
+    poll_pending_deposits() and sweep_stuck_approved_payouts()).
+
+    Built from provider.fetch_status() -- the same real, already-documented,
+    already-tested single-transaction GET /v1/transaction/verify/{tx_ref}
+    poll_pending_deposits() already calls -- once per payment being
+    reconciled, deliberately NOT a bulk settlement-report endpoint: Chapa's
+    own docs (developer.chapa.co/docs/apis) are currently stuck in a real,
+    confirmed HTTP redirect loop, so there's no way to verify one exists or
+    what it would return, and guessing at an undocumented endpoint is
+    exactly the kind of unverified integration this project has always
+    refused to fabricate. This means the "missing_from_our_records" case
+    below (a provider-side transaction we never logged at all -- both the
+    webhook AND poll_pending_deposits somehow missing it) structurally
+    can't be caught by this specific implementation, since it only ever
+    checks our_refs we already know about; a real bulk report would be
+    needed to catch that one case. Everything else reconcile() can detect
+    -- a status or amount disagreement on a payment we DO have -- this
+    catches for real.
+
+    since_hours=2: this job runs hourly (this module's own reconcile()
+    docstring, quoting spec) -- one full cycle of margin against a late
+    run, not a re-check of every deposit ever made. An operational timing
+    choice, the same category as poll_pending_deposits()'s own
+    older_than_seconds=30 and sweep_stuck_approved_payouts()'s
+    older_than_seconds=60 already make in this codebase, not a business
+    parameter.
+    """
+    rows = await pool.fetch(
+        "SELECT our_ref, amount, status FROM payments WHERE direction = 'in' "
+        "AND provider = $1 AND updated_at > now() - make_interval(hours => $2)",
+        provider.name,
+        since_hours,
+    )
+    our_payments: list[dict[str, object]] = [dict(row) for row in rows]
+
+    provider_report: list[SettlementRecord] = []
+    for row in rows:
+        result = await provider.fetch_status(row["our_ref"])
+        if result.amount is None:
+            # Chapa doesn't recognize this our_ref at all (its own
+            # fetch_status() returns this for a 404) -- leaving it out of
+            # provider_report is what lets reconcile()'s own "no provider
+            # row" branch flag it correctly, but only when our own side
+            # thinks it succeeded; not yet knowing about a payment we
+            # ourselves still show as pending/failed isn't a mismatch.
+            continue
+        provider_report.append(
+            SettlementRecord(our_ref=row["our_ref"], amount=result.amount, status=result.status)
+        )
+
+    mismatches = reconcile(our_payments, provider_report)
+    metrics.payment_reconciliation_mismatch_count.set(len(mismatches))
+    if mismatches:
+        logger.error(
+            "payment_reconciliation_mismatch",
+            mismatch_count=len(mismatches),
+            mismatches=[
+                {
+                    "our_ref": m.our_ref,
+                    "reason": m.reason,
+                    "our_status": m.our_status,
+                    "provider_status": m.provider_status,
+                }
+                for m in mismatches
+            ],
+        )
+    return mismatches

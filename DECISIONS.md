@@ -5,6 +5,93 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-28 — The second P0: Chapa-vs-our-records reconciliation existed, was tested, and was never called from anywhere
+
+The second of two P0s the four-audit pass found. `services/payments/deposits.py`'s
+`reconcile()` -- the pure comparison spec's payments reconciliation
+requirement calls for, matching provider settlement data against our own
+`payments` rows -- was fully built and had eight passing unit tests
+(`tests/unit/test_payment_reconciliation.py`). But nothing in this
+codebase ever called it: no job, no route, no scheduled sweep, confirmed
+by grepping for call sites and finding none outside its own tests. In
+production, nothing has ever detected a real case where Chapa's own
+records disagreed with ours.
+
+**Why it stayed unbuilt**: the function's own docstring says "the hourly
+job this runs inside just has to fetch both lists and call this" -- but
+there was no way to fetch a provider settlement report. `ChapaProvider`
+has no bulk "list transactions" method, and Chapa's own API
+documentation (developer.chapa.co/docs/apis) is currently stuck in a
+real, confirmed HTTP redirect loop (`curl -sIL` shows `/docs/apis`
+redirecting to `/docs/apis` forever) -- verified live, not assumed, the
+same diligence this project has always required before calling
+something unreachable. Guessing at an undocumented bulk endpoint would
+have been exactly the "fake integration" this project has consistently
+refused to build.
+
+**Fixed, honestly scoped**: `run_provider_reconciliation()` builds
+`reconcile()`'s two inputs from something real instead -- the same
+already-documented, already-tested single-transaction
+`GET /v1/transaction/verify/{tx_ref}` (`ChapaProvider.fetch_status()`)
+that `poll_pending_deposits()` already calls, once per payment being
+reconciled (payments updated in the last `since_hours=2` -- an
+operational timing choice mirroring `poll_pending_deposits()`'s own
+`older_than_seconds=30` and `sweep_stuck_approved_payouts()`'s `=60`,
+not a business parameter). This is a real, honest partial fix, not a
+claimed-complete one: it can catch a status or amount disagreement on
+any payment we already know about, but structurally cannot catch a
+provider-side transaction we never logged at all (both the webhook and
+the poll fallback missing the same one) -- that specific case needs a
+real bulk settlement report, which stays blocked on Chapa's docs outage,
+documented rather than faked.
+
+Wired into `payout_worker.py`'s `main_async()` as a third periodic
+sweep alongside the two that already live there (`poll_pending_deposits`,
+`sweep_stuck_approved_payouts`) -- the same "share the one
+already-running process" pattern, so this actually runs automatically
+in production every hour rather than needing new deployment-time cron
+wiring, unlike `packages/core/reconcile_job.py`'s deliberately-external
+scheduling. A new `payment_reconciliation_mismatch_count` gauge (scraped
+live from that process's existing `/metrics`, not pushed -- it already
+has one, unlike the one-shot CLI job) backs a new
+`PaymentReconciliationMismatch` Prometheus alert rule. Also fixed a
+stale comment on the neighboring `LedgerReconciliationMismatch` rule
+that the audit caught: it still claimed that metric "isn't actually
+pushed anywhere yet," which was fixed back on 2026-08-24.
+
+**Verification**: three new integration tests
+(`test_run_provider_reconciliation_*` in `test_payments_deposits.py`)
+using the file's existing `FakePaymentProvider`. First draft asserted
+exact mismatch-list equality and failed immediately against real
+data -- the shared, long-lived test database has many other tests'
+still-"succeeded"-but-unverified-by-a-fresh-fake-provider chapa
+payments in the same time window, which the real production query
+*correctly* also flags (a real provider would actually know their
+status; the fake one just doesn't). Not a bug in the fix -- fixed the
+assertions to check this test's own `our_ref` specifically, the same
+"delta, not absolute count" reasoning already used elsewhere in this
+codebase for shared, ever-growing tables, rather than assuming the
+first version's failure meant the code was wrong. Confirmed all three
+genuinely fail against the pre-fix files via the usual stash-revert
+step (`AttributeError: module has no attribute 'run_provider_reconciliation'`).
+`deploy/prometheus/alerts.yml` validated for real: `promtool check
+rules` inside the actual `prom/prometheus` image, "SUCCESS: 6 rules
+found" (5 existing + the new one). `main_async()`'s own wiring has no
+dedicated test (neither do its two pre-existing sibling sweeps -- an
+existing, not new, gap), so verified directly instead: real import,
+confirmed a real coroutine function wiring exactly three
+`_run_periodic_sweep()` calls including the new one. mypy clean (67
+source files). Full clean-slate rebuild: `docker compose down -v` ->
+`up -d` -> `alembic upgrade head` (all 11 migrations, unchanged) ->
+`mypy` clean -> full default suite 817 passed (up from 814), 21
+deselected -> `-m load` 1 failure (`test_load_multiroom.py`, 314ms vs
+the 300ms budget; `uptime` showed `spos-backend` still cycling through
+health checks, the same well-documented host-contention pattern,
+unrelated to a payments-reconciliation change) -> `-m chaos_infra` 2
+passed -> `-m e2e` 14 passed.
+
+---
+
 ## 2026-08-28 — Four parallel architecture audits, and the first P0: admin `adjust_balance` wasn't actually idempotent
 
 A CTO-level directive asked for a full-platform audit before any major new
