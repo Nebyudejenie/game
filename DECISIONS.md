@@ -5,6 +5,75 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-28 — Nightly ledger reconciliation had no deploy-time way to actually run
+
+With the four-agent audit's whole gap map closed, went back to spec
+section 14's own Definition of Done checklist (as
+`[[feedback-autonomous-engineering-judgment]]` already establishes as
+the next place to look once a checklist closes) and re-verified each
+item against real, current code/tests rather than trusting memory of
+having built it. Most items check out (win-pattern unit tests, the
+100-concurrent-duplicate-webhook test, the engine-crash chaos test with
+80 real staked players, the Verify Draw fairness flow, responsible-
+gaming tests, the backup/restore drill, and a manual audit of the Mini
+App's own JS turned up no hardcoded strings bypassing `t(...)`, matching
+`test_bot_no_hardcoded_strings.py`'s existing structural guarantee for
+the bot side). Two items are honestly not closeable here: 10k sustained
+sockets (already documented in a prior chaos-test entry as scaled down
+for this sandbox) and "zero drift over 30 days" / "a restore performed
+in the last 30 days" -- both are production operating facts that need a
+real deployment and real elapsed calendar time, not something buildable
+in advance.
+
+One genuine, previously-undocumented gap surfaced: `packages/core
+/reconcile_job.py` (the nightly ledger-reconciliation CLI, built
+earlier this session) has never had an actual way to run in production
+-- `deploy/docker-compose.prod.yml` wires every other background
+process (`engine-worker`, `payout-worker`, `bot`, etc.) into a real
+service, but this one was left as "invoke it yourself with the right
+env," with no cron/systemd-timer/CronJob artifact and no compose entry
+at all. `.github/workflows/cd.yml`'s own setup notes make clear the
+runner's real checkout path on the Proxmox server is only known once
+someone actually registers it -- genuinely not something this repo can
+know in advance, so hardcoding an absolute path into a systemd unit
+would have been exactly the kind of invented, unverifiable deployment
+detail this session avoids. What isn't deployment-topology-dependent,
+though, is giving the job a proper compose entry point.
+
+**Fixed**: a `reconcile-job` service in `docker-compose.prod.yml`, same
+one-shot shape as the existing `migrate` service (same shared image,
+same env, `restart: "no"`), but `profiles: ["reconcile"]`-gated (the
+same gating `deploy/docker-compose.yml` already uses for
+pushgateway/grafana) so it's invisible to a plain `up -d` and never
+accidentally runs once per deploy the way `migrate` correctly does --
+`docker compose run` ignores profile restrictions, so
+`docker compose -f docker-compose.prod.yml run --rm reconcile-job` is
+now the one blessed, already-wired invocation any cron line or systemd
+timer just needs to call, once the server's real path is known (the
+same one-time, can't-be-committed-in-advance step the CD workflow's own
+runner-registration note already calls out). README.md's "Nightly
+ledger reconciliation" section documents the concrete command and an
+example crontab line.
+
+**Verification**: a new test,
+`test_prod_compose_reconcile_job_is_valid_and_profile_gated` in
+`tests/integration/test_backup_restore.py`, shells out to the real
+`docker compose config` (the exact tool a deploy actually uses, not
+hand-parsed YAML) twice -- once confirming `reconcile-job` is absent
+from the plain service list, once with `--profile reconcile` confirming
+it's present and resolves validly -- against a scratch `deploy/.env`
+the test writes and always removes afterward (backing up and restoring
+any real one first, though none exists in this dev sandbox). Confirmed
+the test genuinely fails against the pre-fix compose file (`git stash`
+reproduced the real assertion failure: `reconcile-job` simply absent
+from `--profile reconcile`'s own service list, not a false pass). Full
+suite: mypy clean, `pytest tests/` 821 passed, `-m chaos_infra` 2
+passed, `-m e2e` 19 passed. `-m load`'s `test_gateway_fanout.py`/
+`test_load_multiroom.py` again failed under the same genuine host
+contention documented throughout this session -- unrelated to this
+change (a deploy-tooling and test-only change, no gateway code
+touched).
+
 ## 2026-08-28 — Deposit return flow could show "success" before any money moved (spec 2.6)
 
 The last P2 from the four-agent architecture audit's frontend findings.

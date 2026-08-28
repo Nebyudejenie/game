@@ -608,6 +608,17 @@ whoever happened to be connected at the exact second the round ended. See
   exit. If `PUSHGATEWAY_URL` is set, the mismatch count is also pushed to
   a real Prometheus Pushgateway (`job="reconcile_job"`) — a push failure
   is logged but never changes this job's own exit code. See `DECISIONS.md`.
+- **In production**, run it via `deploy/docker-compose.prod.yml`'s
+  `reconcile-job` service (same shared image, same env, no separate
+  setup): `docker compose -f docker-compose.prod.yml run --rm
+  reconcile-job`. It's `profiles: ["reconcile"]`-gated so a plain
+  `up -d` never runs it — schedule the exact command above from
+  whatever the deploy server actually has (a crontab line, e.g.
+  `0 3 * * * cd /path/to/deploy && docker compose -f
+  docker-compose.prod.yml run --rm reconcile-job`, or a systemd timer)
+  once that server's real checkout path is known — the same one-time,
+  can't-be-committed-in-advance step the CD workflow's own runner
+  registration already requires (see `.github/workflows/cd.yml`).
 
 **Backup and restore:**
 - **`deploy/backup.sh`** — real `pg_dump -F custom` against the

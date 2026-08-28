@@ -129,3 +129,41 @@ async def test_backup_honors_a_compose_file_override(tmp_path):
     stdout, stderr = await proc.communicate()
     assert proc.returncode != 0
     assert "does-not-exist.yml" in (stdout + stderr).decode()
+
+
+async def test_prod_compose_reconcile_job_is_valid_and_profile_gated():
+    # Spec section 14's definition of done needs the ledger reconciliation
+    # job "verified nightly" -- deploy/docker-compose.prod.yml now has a
+    # reconcile-job service for that (README.md's "Nightly ledger
+    # reconciliation" section), gated behind profiles: ["reconcile"] so a
+    # plain `up -d` never runs it once per deploy the way migrate
+    # correctly does. This is real `docker compose config` output, the
+    # exact tool a deploy actually uses -- not just eyeballing the YAML --
+    # proving both that the service definition is genuinely valid and
+    # that the profile gate genuinely works, not just that it looks right.
+    env_path = DEPLOY_DIR / ".env"
+    backup_path = env_path.with_suffix(".env.bak-test")
+    had_existing_env = env_path.exists()
+    if had_existing_env:
+        env_path.rename(backup_path)
+    try:
+        # Only what config validation actually needs: POSTGRES_PASSWORD
+        # and PHONE_ENCRYPTION_KEY have no default in the compose file
+        # (deliberately -- see .env.prod.example), so config resolution
+        # fails without *some* value for them.
+        env_path.write_text("POSTGRES_PASSWORD=test-dummy\nPHONE_ENCRYPTION_KEY=" + "0" * 64 + "\n")
+
+        default_services = await _run(
+            "docker", "compose", "-f", str(DEPLOY_DIR / "docker-compose.prod.yml"), "config", "--services",
+        )
+        assert "reconcile-job" not in default_services.split()
+
+        gated_services = await _run(
+            "docker", "compose", "-f", str(DEPLOY_DIR / "docker-compose.prod.yml"),
+            "--profile", "reconcile", "config", "--services",
+        )
+        assert "reconcile-job" in gated_services.split()
+    finally:
+        env_path.unlink(missing_ok=True)
+        if had_existing_env:
+            backup_path.rename(env_path)

@@ -127,6 +127,28 @@ services:
       - "8005:8005"
     command: ["python", "-m", "services.payments.payout_worker"]
 
+  # One-shot, same shape as migrate above -- spec section 14's definition
+  # of done needs this "verified nightly", but nothing runs it on a
+  # schedule yet. profiles: ["reconcile"] (the same gating
+  # deploy/docker-compose.yml already uses for pushgateway/grafana) keeps
+  # it out of a plain `up -d`, so it never accidentally runs once per
+  # deploy the way migrate correctly does -- `docker compose run` ignores
+  # profile restrictions, so cron/systemd-timer/k8s CronJob can all still
+  # invoke it directly: `docker compose -f docker-compose.prod.yml run
+  # --rm reconcile-job`. See README.md's "Nightly ledger reconciliation"
+  # section for why the actual schedule (a crontab line, a systemd timer)
+  # is left as a deploy-time step rather than committed here: the runner
+  # checkout's real path on the server is only known once someone
+  # actually registers it (README.md's own CD setup notes make the same
+  # call for the runner registration step itself).
+  reconcile-job:
+    image: ${JOBINGO_IMAGE:-jobingo:latest}
+    restart: "no"
+    profiles: ["reconcile"]
+    <<: *app-env
+    depends_on: *app-depends-on
+    command: ["python", "-m", "packages.core.reconcile_job"]
+
 volumes:
   jobingo_prod_postgres_data:
   jobingo_prod_redis_data:
