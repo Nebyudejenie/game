@@ -22,9 +22,10 @@ import pytest
 from packages.core.phone_crypto import encrypt_phone, phone_lookup_hash
 from services.engine.round_engine import RoundEngine, load_room_config
 from services.gateway.app import app as gateway_app
+from services.payments import deposits
 from tests.integration.conftest import build_init_data, create_funded_user, create_room, fund_user, next_telegram_id
 from tests.integration.test_miniapp_e2e import TELEGRAM_SDK_URL
-from tests.integration.test_payments_deposits import FakePaymentProvider
+from tests.integration.test_payments_deposits import FakePaymentProvider, _webhook
 from tests.integration.test_payout_worker import FakePayoutProvider
 
 pytestmark = pytest.mark.e2e
@@ -152,6 +153,87 @@ async def test_deposit_flow_shows_a_translated_error(gateway_server, browser, po
         assert "launch" not in status_text.lower()  # not the generic "not available" copy
 
         assert console_errors == [], f"JS errors during deposit error flow: {console_errors}"
+        await page.close()
+    finally:
+        gateway_app.state.chapa = original_provider
+
+
+async def test_deposit_flow_shows_confirming_then_confirms_on_real_completion(
+    gateway_server, browser, pool, redis, conn
+):
+    # Spec 2.6: "On return: 'Confirming your deposit…' with live polling,
+    # never a premature success." Opening the checkout link is not proof
+    # of payment -- the player hasn't paid yet at that point -- so the
+    # status right after must be a neutral "confirming" state, not
+    # "success" (the bug this fix closes: the old copy was already styled
+    # "success" the instant the checkout link opened, before any money
+    # had actually moved). Only a real ledger credit -- driven through
+    # services.payments.deposits.handle_webhook(), the same real
+    # completion path test_payments_deposits.py exercises directly, not a
+    # synthetic balance push -- should ever flip it to "confirmed".
+    original_provider = gateway_app.state.chapa
+    provider = FakePaymentProvider()
+    gateway_app.state.chapa = provider
+    try:
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('0.00')", timeout=10000
+        )
+
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        assert user_row is not None
+        phone = f"+2519{telegram_id % 100_000_000:08d}"
+        await conn.execute(
+            "UPDATE users SET phone_e164_encrypted = $2, phone_lookup_hash = $3 WHERE id = $1",
+            user_row["id"],
+            encrypt_phone(phone),
+            phone_lookup_hash(phone),
+        )
+
+        await _open_wallet_tab(page, "deposit")
+        await page.click('.amount-chip[data-amount="100"]')
+        await page.click("#deposit-submit-btn")
+
+        await page.wait_for_function("window.__openedLinks.length > 0", timeout=10000)
+
+        # The checkout link is open but nothing has been paid yet -- the
+        # status must be showing the neutral "confirming" copy, not
+        # "success". Text alone isn't proof (the earlier "opening
+        # checkout…" message is also non-empty); the class list is what
+        # actually distinguishes a premature claim from an honest one.
+        status_classes = await page.get_attribute("#deposit-status", "class")
+        assert "success" not in status_classes
+        assert "error" not in status_classes
+        confirming_text = await page.text_content("#deposit-status")
+        assert confirming_text and confirming_text.strip() != ""
+
+        payment_row = await pool.fetchrow(
+            "SELECT our_ref FROM payments WHERE user_id = $1 ORDER BY id DESC LIMIT 1", user_row["id"]
+        )
+        assert payment_row is not None
+        headers, body = _webhook(
+            event_id=f"evt-{payment_row['our_ref']}",
+            our_ref=payment_row["our_ref"],
+            status="succeeded",
+            amount="100.00",
+        )
+        outcome = await deposits.handle_webhook(pool, redis, provider, headers=headers, raw_body=body)
+        assert outcome == "credited"
+
+        # The real ledger credit above published a genuine balance_update
+        # over this user's own already-open WS connection -- proof the
+        # confirmation is wired to the actual completion signal, not a
+        # timer or a guess.
+        await page.wait_for_selector("#deposit-status.success", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('100.00')", timeout=10000
+        )
+
+        assert console_errors == [], f"JS errors during deposit confirmation flow: {console_errors}"
         await page.close()
     finally:
         gateway_app.state.chapa = original_provider

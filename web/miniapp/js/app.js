@@ -611,6 +611,21 @@ el("open-wallet-btn").addEventListener("click", openWallet);
 el("wallet-back-btn").addEventListener("click", () => showScreen("rooms"));
 
 // --- deposit ---------------------------------------------------------
+// Spec 2.6: "On return: 'Confirming your deposit…' with live polling,
+// never a premature success." Opening the checkout link is not a
+// completion -- the player hasn't paid yet at that point -- so this
+// tracks the deposit as pending and only ever calls it done once the
+// real ledger credit actually lands. `balance_update` (already pushed
+// live over this user's own Redis channel the moment
+// services/payments/deposits.py posts the credit -- see the handler
+// below) stands in for polling: genuinely live, and no new backend
+// endpoint needed. Comparing the new cash figure against what it was
+// before this specific deposit, by at least the deposited amount, is
+// what keeps this honest against an unrelated balance_update (a
+// same-session round settling, an admin adjustment) arriving while a
+// deposit happens to be pending and getting mislabeled as this deposit's
+// own confirmation.
+let pendingDeposit = null;
 
 document.querySelectorAll("#deposit-amount-chips .amount-chip").forEach((chip) => {
   chip.addEventListener("click", () => {
@@ -645,7 +660,8 @@ el("deposit-submit-btn").addEventListener("click", async () => {
     }
     if (tg) tg.openLink(data.checkout_url);
     else window.open(data.checkout_url, "_blank");
-    setWalletStatus("deposit-status", "wallet.deposit_ready", "success");
+    pendingDeposit = { amount: Number(amount), cashBefore: Number(getState().user?.balance ?? 0) };
+    setWalletStatus("deposit-status", "wallet.deposit_confirming", null);
   } catch {
     setWalletStatus("deposit-status", "wallet.error.generic", "error");
   } finally {
@@ -791,6 +807,10 @@ ws.on("balance_update", (msg) => {
     el("wallet-cash").textContent = `${msg.cash} ETB`;
     el("wallet-bonus").textContent = `${msg.bonus} ETB`;
     el("wallet-locked").textContent = `${msg.locked} ETB`;
+  }
+  if (pendingDeposit && Number(msg.cash) - pendingDeposit.cashBefore >= pendingDeposit.amount - 0.01) {
+    setWalletStatus("deposit-status", "wallet.deposit_confirmed", "success");
+    pendingDeposit = null;
   }
 });
 

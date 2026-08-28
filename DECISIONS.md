@@ -5,6 +5,77 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-28 — Deposit return flow could show "success" before any money moved (spec 2.6)
+
+The last P2 from the four-agent architecture audit's frontend findings.
+Spec 2.6 is explicit: "On return: 'Confirming your deposit…' with live
+polling, never a premature success." The Mini App's deposit flow
+(`web/miniapp/js/app.js`'s `deposit-submit-btn` handler) violated this
+literally -- the instant `tg.openLink(data.checkout_url)` fired (opening
+the provider's checkout page), the status line was set to
+`wallet.deposit_ready` styled with the `"success"` CSS class, before the
+player had done anything at all on that checkout page, let alone paid.
+There was no "confirming" state anywhere in the flow.
+
+**Fixed**: opening the checkout link now sets a genuine neutral
+"confirming" state (`wallet.deposit_confirming`, no `success`/`error`
+class -- matching how `wallet.deposit_opening` is already styled while
+the checkout call itself is in flight) and records `pendingDeposit =
+{ amount, cashBefore }`. The flip to an actual `"success"`-styled
+`wallet.deposit_confirmed` only happens inside the existing
+`ws.on("balance_update", ...)` handler, and only once, comparing the
+newly pushed cash figure against `cashBefore` by at least the deposited
+`amount` -- this is what "live polling" becomes here: `balance_update`
+is already pushed live over the user's own Redis channel the instant
+`services/payments/deposits.py` posts the real ledger credit (see that
+handler's own long-standing comment), so reusing it is strictly better
+than inventing a new polling loop against a status endpoint that doesn't
+exist. The amount comparison (not just "any balance_update arrived")
+is deliberate: `balance_update` also fires for gameplay stakes/refunds/
+winnings and payout completions, so a coincidental unrelated balance
+change while a deposit happens to be pending must never get mislabeled
+as that deposit's own confirmation. The now-unused `wallet.deposit_ready`
+key (and its "tap below if the payment page didn't open" copy, which
+didn't actually correspond to any visible link/button in the current
+markup) was removed from both `en.json` and `am.json` rather than left
+dead.
+
+Deliberately not built: an explicit `visibilitychange`/"app resumed"
+hook to detect the player physically returning from the external
+checkout tab. The live push already updates the status correctly
+whenever the confirmation actually lands, whether or not the player's
+still looking at the screen at that exact moment; if they've since
+navigated to the history tab and back, the deposit pane will already
+show the resolved state next time they open it, not a copy stuck on
+"Confirming…" indefinitely.
+
+**Verification**: a new real-browser Playwright e2e test,
+`test_deposit_flow_shows_confirming_then_confirms_on_real_completion`
+in `tests/integration/test_miniapp_wallet_e2e.py`, opens a real deposit
+checkout, asserts the status element's class list contains neither
+`success` nor `error` right after (the literal bug this closes), then
+drives the deposit to genuine completion through
+`services.payments.deposits.handle_webhook()` -- the same real
+completion path `test_payments_deposits.py` exercises directly, not a
+synthetic balance push -- and asserts `#deposit-status.success` and the
+header balance both update, proof the confirmation is wired to the
+actual ledger credit rather than a timer or a guess. Confirmed the test
+genuinely fails against the pre-fix code (`git stash` on the JS/locale
+files reproduced the real premature-success bug directly: `assert
+'success' not in 'wallet-note success'` failed exactly as expected, not
+a false pass). Full suite: mypy clean, `pytest tests/` 820 passed,
+`-m chaos_infra` 2 passed, `-m e2e` 19 passed (including this new test
+and the full pre-existing gameplay/wallet/admin-console e2e coverage).
+`-m load`'s `test_load_multiroom.py` p99 latency-budget test again
+failed under the same genuine host contention documented throughout
+this session (load average approaching 1.0 with the persistently-
+restarting unrelated `spos-backend` container still present) --
+unrelated to this change (pure WebSocket fan-out latency, nothing to do
+with the deposit flow).
+
+This closes every finding from the four-agent architecture audit's
+original P0-P2 gap map.
+
 ## 2026-08-28 — Wallet history tab had no filter (spec 2.6)
 
 A P2 from the four-agent architecture audit's frontend findings, scoped
