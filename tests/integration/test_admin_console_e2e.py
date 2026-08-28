@@ -23,6 +23,7 @@ import pytest
 from packages.core import ledger
 from tests.integration.conftest import create_funded_user
 from tests.integration.test_admin_auth import create_test_admin
+from tests.integration.test_admin_withdrawals import _review_withdrawal
 
 pytestmark = pytest.mark.e2e
 
@@ -205,28 +206,73 @@ async def test_admin_console_rooms_edit_changes_a_real_room_over_a_real_browser(
     await page.close()
 
 
-async def test_admin_console_rbac_denial_shows_a_real_message_not_a_blank_screen(admin_server, pool, browser):
-    # support has no risk:view permission (services/admin/rbac.py) --
-    # the console must surface that as a real message, the same
-    # test_rbac_support_cannot_view_risk_screen_over_http already proves
-    # at the API level, but here through the actual screen a support
-    # admin would land on. js/screens/risk.js catches its own fetch
-    # error and renders the real backend detail directly (js/app.js's
-    # own generic "no access" banner is only a fallback for a screen
-    # that doesn't handle its own errors) -- the real permission name is
-    # what should show up, not a placeholder.
+async def test_admin_console_rbac_denial_shows_a_real_message_not_a_blank_screen(
+    admin_server, pool, redis, conn, browser
+):
+    # support has payments:view (sees the screen, the list loads) but not
+    # payments:approve -- an *action*-level denial, not a view-level one:
+    # the nav-hiding fix below (services/admin/rbac.py's own risk:view
+    # gap this test used to exercise) now hides that screen from support
+    # entirely, so a real, still-reachable-via-the-actual-nav denial is
+    # needed to keep proving the same underlying property this test has
+    # always been about -- a real backend 403 renders as a real message,
+    # not a blank screen or a silently-succeeded action. js/screens/
+    # payments.js's decide() catches its own error and toasts the real
+    # backend detail directly.
     admin_id, username, password, totp_secret = await create_test_admin(pool, role="support")
+    user_id = await create_funded_user(conn, Decimal("500.00"))
+    payment_id, our_ref = await _review_withdrawal(pool, redis, conn, user_id, Decimal("100.00"))
 
     page = await browser.new_page(viewport={"width": 1280, "height": 900})
+    page.on("dialog", lambda dialog: dialog.accept("e2e test: attempting approval"))
+
     await _login(page, admin_server, username, password, totp_secret)
     await page.wait_for_selector(".stat-grid", timeout=10000)
 
-    await page.click('.nav-btn[data-screen="risk"]')
-    await page.wait_for_selector(".error-banner", timeout=10000)
-    banner_text = await page.text_content(".error-banner")
-    assert banner_text and "risk:view" in banner_text
+    await page.click('.nav-btn[data-screen="payments"]')
+    payment_row = f'tr[data-payment-id="{payment_id}"]'
+    await page.wait_for_selector(payment_row, timeout=10000)
+    await page.click(f"{payment_row} .approve-btn")
+
+    await page.wait_for_selector("#toast.visible", timeout=5000)
+    toast_text = await page.text_content("#toast")
+    assert toast_text and "payments:approve" in toast_text
+
+    # The denial has to be real, not just a UI-level message with the
+    # action secretly going through anyway.
+    status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", payment_id)
+    assert status == "review"
 
     await page.close()
+
+
+async def test_admin_console_nav_hides_screens_the_current_role_cant_view(admin_server, pool, browser):
+    # An architecture audit caught every screen shown to every role
+    # regardless -- a support admin saw "Reports"/"Risk"/"Audit" in the
+    # nav despite services/admin/rbac.py granting none of those *:view
+    # permissions to that role, discovering the denial only after
+    # clicking. Confirms both directions: hidden for the role that
+    # genuinely lacks them, and still present for superadmin (who has
+    # every permission) -- so this is proven to be real filtering, not a
+    # nav that's just broken/empty for everyone.
+    support_id, support_user, support_pw, support_totp = await create_test_admin(pool, role="support")
+    admin_id, username, password, totp_secret = await create_test_admin(pool, role="superadmin")
+
+    support_page = await browser.new_page(viewport={"width": 1280, "height": 900})
+    await _login(support_page, admin_server, support_user, support_pw, support_totp)
+    await support_page.wait_for_selector(".stat-grid", timeout=10000)
+    for hidden_screen in ("reports", "risk", "audit"):
+        assert await support_page.query_selector(f'.nav-btn[data-screen="{hidden_screen}"]') is None
+    for visible_screen in ("dashboard", "users", "payments", "rounds", "rooms"):
+        assert await support_page.query_selector(f'.nav-btn[data-screen="{visible_screen}"]') is not None
+    await support_page.close()
+
+    superadmin_page = await browser.new_page(viewport={"width": 1280, "height": 900})
+    await _login(superadmin_page, admin_server, username, password, totp_secret)
+    await superadmin_page.wait_for_selector(".stat-grid", timeout=10000)
+    for screen in ("dashboard", "users", "payments", "rounds", "rooms", "reports", "risk", "audit"):
+        assert await superadmin_page.query_selector(f'.nav-btn[data-screen="{screen}"]') is not None
+    await superadmin_page.close()
 
 
 async def test_admin_console_logout_returns_to_the_login_screen(admin_server, pool, browser):

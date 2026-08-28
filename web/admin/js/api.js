@@ -3,6 +3,10 @@
 // same-origin relative path, no base URL needed.
 
 const TOKEN_KEY = "jobingo_admin_token";
+// Stored purely so app.js can filter which nav items it shows -- a UX
+// nicety, not a security boundary; every route re-checks the real role
+// server-side via the bearer token regardless of what this holds.
+const ROLE_KEY = "jobingo_admin_role";
 
 export function getToken() {
   return localStorage.getItem(TOKEN_KEY);
@@ -14,6 +18,18 @@ export function setToken(token) {
 
 export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
+}
+
+export function getRole() {
+  return localStorage.getItem(ROLE_KEY);
+}
+
+export function setRole(role) {
+  localStorage.setItem(ROLE_KEY, role);
+}
+
+export function clearRole() {
+  localStorage.removeItem(ROLE_KEY);
 }
 
 export class ApiError extends Error {
@@ -52,6 +68,7 @@ export async function api(path, { method = "GET", body } = {}) {
   // form error, not a session-expiry event the whole app should react to.
   if (response.status === 401 && token) {
     clearToken();
+    clearRole();
     window.dispatchEvent(new CustomEvent("admin:unauthorized"));
   }
 

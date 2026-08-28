@@ -5,6 +5,79 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-28 — No client-side RBAC in the admin console, closing the last finding from the four-agent audit
+
+The last open item from the architecture audit. Backend RBAC
+(`services/admin/rbac.py`) was already sound and already thoroughly
+tested -- the finding was specifically that the *frontend* showed every
+nav item to every role regardless, discovering a denial only after the
+click. A `support` admin saw "Reports"/"Risk"/"Audit" in their nav
+despite `services/admin/rbac.py` granting none of those `*:view`
+permissions to that role.
+
+**Scoped deliberately to nav-level view visibility, not every action
+button**: gating every individual restricted action (adjust-balance,
+rooms:manage, payments:approve, etc.) across every already-visible
+screen would be a much larger, more invasive change touching most
+screen files for comparatively little real security value -- the
+backend already correctly denies every one of those for real, and (per
+the fix below) now shows a real message when it does. Hiding whole
+*screens* a role can never see at all is the actual "least privilege in
+the UI" gap the audit named, and the one with real UX value: it's the
+difference between a `support` admin never seeing "Audit" exists versus
+clicking it and being told no.
+
+**Fixed**: `/auth/login` now also returns the admin's `role` (reusing
+`resolve_session()` -- the P1 fix earlier this pass -- rather than
+widening `auth.login()`'s own `-> str` return type, which dozens of
+existing tests call directly). The frontend stores it alongside the
+token (`api.js`, cleared together on logout or a 401) and
+`app.js`'s `buildNav()` filters nav buttons against a small client-side
+mirror of `rbac.py`'s three actually-restricted `*:view` permissions
+(`reports`, `risk`, `audit` -- the other five screens are already
+granted to every role). Explicitly a UX nicety, not a security boundary
+-- every route still re-checks the real role server-side regardless of
+what this filters client-side.
+
+**A real test had to change, in the right direction**: the existing
+`test_admin_console_rbac_denial_shows_a_real_message_not_a_blank_screen`
+relied on a `support` admin clicking the (now correctly hidden)
+"risk" nav button to trigger a 403 -- exactly the click this fix
+removes. Updated it to a still-genuinely-reachable *action*-level
+denial instead (a `support` admin can view Payments but lacks
+`payments:approve`; clicking Approve on a real review-status withdrawal
+now proves the same "real message, not a blank screen or a silent
+success" property, and additionally confirms the withdrawal's status
+stayed `'review'`, not just that a toast appeared).
+
+**Verification**: a new `test_admin_console_nav_hides_screens_the_current_role_cant_view`
+proves both directions in one real-Chromium test -- `reports`/`risk`/
+`audit` nav buttons are absent for a `support` admin, present for a
+`superadmin`, and the five universally-granted screens remain visible
+to `support` too (so this is proven to be real, correct filtering, not
+a nav that's just broken or empty). Confirmed the test genuinely fails
+against the pre-fix files via the usual stash-revert step (the hidden
+screens weren't hidden at all pre-fix). Full `test_admin_app.py`
+(23 passed), `test_admin_auth.py` (13 passed), and
+`test_admin_withdrawals.py` (10 passed) confirm nothing regressed. mypy
+clean (67 source files). Full clean-slate rebuild: `docker compose down
+-v` -> `up -d` -> `alembic upgrade head` (all 11 migrations, unchanged)
+-> `mypy` clean -> full default suite 820 passed, 23 deselected (up
+from 22 -- one new e2e test) -> `-m load` 2 failures
+(`test_gateway_fanout.py`, `test_load_multiroom.py`; `uptime`/`docker
+ps` showed the same well-documented host-contention pattern, load 2.90
+with `spos-backend` still cycling, unrelated to an admin-console-only
+change) -> `-m chaos_infra` 2 passed -> `-m e2e` 16 passed.
+
+This closes every P0 and P1 finding from the four-agent architecture
+audit that opened this pass. Remaining, lower-priority P2s (a missing
+index on `round_entries.user_id`, the wallet history tab's missing
+filter, the deposit-return flow's missing "confirming" state, and
+keyboard accessibility on core Mini App controls) are tracked but not
+yet started.
+
+---
+
 ## 2026-08-28 — Admin rooms screen had create + activate/deactivate but no edit at all
 
 Another P1 from the four-audit pass. `services/admin/queries.py`'s

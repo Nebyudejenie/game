@@ -1,4 +1,4 @@
-import { getToken, clearToken, api, ApiError } from "./api.js";
+import { getToken, clearToken, getRole, clearRole, api, ApiError } from "./api.js";
 import { renderError } from "./ui.js";
 import * as loginScreen from "./screens/login.js";
 import * as dashboardScreen from "./screens/dashboard.js";
@@ -25,6 +25,26 @@ const SCREENS = {
   audit: auditScreen,
 };
 
+// A client-side mirror of services/admin/rbac.py's *:view permissions,
+// for nav visibility only -- an architecture audit caught that every
+// screen was shown to every role regardless, with a 403 only ever
+// discovered after the click, the opposite of least-privilege applied
+// to the UI. `null` means every role can see it (dashboard/users/
+// payments/rounds/rooms:view are all granted to support/finance/ops/
+// superadmin already). The backend remains the sole real enforcement --
+// this only ever hides a button faster than a click-then-403 would.
+const SCREEN_VIEW_ROLES = {
+  reports: ["finance", "superadmin"],
+  risk: ["ops", "finance", "superadmin"],
+  audit: ["superadmin"],
+};
+
+function visibleScreens(role) {
+  return Object.entries(SCREENS).filter(
+    ([name]) => !SCREEN_VIEW_ROLES[name] || SCREEN_VIEW_ROLES[name].includes(role)
+  );
+}
+
 const loginEl = document.getElementById("login-screen");
 const shellEl = document.getElementById("app-shell");
 const navEl = document.getElementById("nav");
@@ -33,7 +53,7 @@ const contentEl = document.getElementById("content");
 function buildNav(active) {
   navEl.innerHTML = `
     <div class="nav-brand">Jo Bingo Admin</div>
-    ${Object.entries(SCREENS).map(([name, mod]) => `
+    ${visibleScreens(getRole()).map(([name, mod]) => `
       <button class="nav-btn ${name === active ? "active" : ""}" data-screen="${name}">${mod.label}</button>
     `).join("")}
     <button class="nav-btn nav-logout" id="logout-btn">Log out</button>
@@ -77,6 +97,7 @@ async function doLogout() {
     // best-effort -- the token gets cleared client-side regardless
   }
   clearToken();
+  clearRole();
   showLogin();
 }
 

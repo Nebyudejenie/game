@@ -1,4 +1,4 @@
-import { api, setToken } from "../api.js";
+import { api, setToken, setRole } from "../api.js";
 
 export function render(container, onSuccess) {
   container.innerHTML = `
@@ -39,6 +39,7 @@ export function render(container, onSuccess) {
         },
       });
       setToken(result.token);
+      setRole(result.role);
       onSuccess();
     } catch (err) {
       errorEl.textContent = err.detail || err.message || "Login failed";

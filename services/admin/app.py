@@ -164,7 +164,14 @@ async def login(request: Request, body: LoginRequest) -> dict[str, str]:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     except auth.LoginFailed as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
-    return {"token": token}
+    # The frontend needs the role to filter its own nav (an architecture
+    # audit caught that every screen was shown regardless of role, with
+    # a 403 only ever discovered after the click) -- reusing
+    # resolve_session() rather than widening auth.login()'s own, widely
+    # relied-on `-> str` return type across every test that calls it.
+    session = await auth.resolve_session(app.state.pool, app.state.redis, token)
+    assert session is not None  # was just created above; can't be missing or inactive
+    return {"token": token, "role": session.role}
 
 
 @app.post("/auth/logout")
