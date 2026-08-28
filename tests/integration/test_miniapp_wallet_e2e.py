@@ -278,3 +278,82 @@ async def test_history_tab_shows_a_completed_round(gateway_server, browser, pool
     finally:
         await engine.stop()
         await asyncio.wait_for(task, timeout=15)
+
+
+async def test_history_tab_filters_by_won_and_lost(gateway_server, browser, pool, conn):
+    # Spec 2.6: "History: rounds and transactions, filterable, each
+    # linking to its detail." Seeding two already-completed rounds
+    # directly (one won, one lost) rather than playing a live round to
+    # completion -- the outcome test above already covers the live path,
+    # and its own auto-mark-vs-auto-mark setup can't guarantee a specific
+    # winner, which this test needs to prove the filter actually filters.
+    room_id = await create_room(conn)
+
+    telegram_id = next_telegram_id()
+    page, console_errors = await prepare_page(browser, telegram_id)
+    http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+    await page.goto(http_base + "/")
+    await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+    await page.wait_for_function(
+        "document.getElementById('balance-amount').textContent.includes('0.00')", timeout=10000
+    )
+    user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+    assert user_row is not None
+    user_id = user_row["id"]
+
+    won_round = await conn.fetchrow(
+        "INSERT INTO rounds (room_id, seq, status, stake, house_cut_bps, server_seed_hash, ended_at) "
+        "VALUES ($1, 101, 'done', 20.00, 2000, 'test-hash', now()) RETURNING id",
+        room_id,
+    )
+    await conn.execute(
+        "INSERT INTO round_entries (round_id, card_no, user_id) VALUES ($1, 1, $2)",
+        won_round["id"],
+        user_id,
+    )
+    await conn.execute(
+        "INSERT INTO round_winners (round_id, user_id, card_no, pattern, won_on_call, amount) "
+        "VALUES ($1, $2, 1, 'row', 10, 32.00)",
+        won_round["id"],
+        user_id,
+    )
+
+    lost_round = await conn.fetchrow(
+        "INSERT INTO rounds (room_id, seq, status, stake, house_cut_bps, server_seed_hash, ended_at) "
+        "VALUES ($1, 102, 'done', 20.00, 2000, 'test-hash', now()) RETURNING id",
+        room_id,
+    )
+    await conn.execute(
+        "INSERT INTO round_entries (round_id, card_no, user_id) VALUES ($1, 2, $2)",
+        lost_round["id"],
+        user_id,
+    )
+
+    await _open_wallet_tab(page, "history")
+    await page.wait_for_function(
+        "document.getElementById('history-list').children.length > 0", timeout=10000
+    )
+    assert await page.locator("#history-list .history-row").count() == 2
+
+    # The stub's language_code is "am" -- assert on the interpolated round
+    # number ("#101"), not English wording, so this holds regardless of
+    # which locale actually rendered.
+    await page.click('#history-filter-chips .amount-chip[data-filter="won"]')
+    await page.wait_for_function(
+        "document.getElementById('history-list').children.length === 1", timeout=5000
+    )
+    assert "#101" in (await page.text_content("#history-list"))
+
+    await page.click('#history-filter-chips .amount-chip[data-filter="lost"]')
+    await page.wait_for_function(
+        "document.getElementById('history-list').children.length === 1", timeout=5000
+    )
+    assert "#102" in (await page.text_content("#history-list"))
+
+    await page.click('#history-filter-chips .amount-chip[data-filter="all"]')
+    await page.wait_for_function(
+        "document.getElementById('history-list').children.length === 2", timeout=5000
+    )
+
+    assert console_errors == [], f"JS errors during history filtering: {console_errors}"
+    await page.close()

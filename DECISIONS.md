@@ -5,6 +5,60 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-28 — Wallet history tab had no filter (spec 2.6)
+
+A P2 from the four-agent architecture audit's frontend findings, scoped
+narrowly to what the audit actually flagged: spec 2.6 says "History:
+rounds and transactions, filterable, each linking to its detail," and
+the Mini App's history tab (`web/miniapp/js/app.js`'s `loadHistory()`)
+had none of "filterable" -- it rendered the last 10 rounds fetched from
+`/api/history` in a flat, unfilterable list. The fuller sentence also
+gestures at a combined rounds-*and*-transactions feed with per-item
+detail routing; deliberately not building that here -- there's no
+transactions-listing endpoint or round-detail screen anywhere in this
+codebase yet, and inventing that data model and navigation shape goes
+well beyond a P2 tightening fix into a new, unscoped feature. The filter
+is a real, self-contained gap that needs no new backend surface: every
+row `/api/history` already returns carries a `won` boolean.
+
+**Fixed**: three filter chips (All / Won / Lost) above the history list
+in `web/miniapp/index.html`, reusing the deposit screen's existing
+`.amount-chip` look and its native `<button>` element (already a real
+Tab-stop with no extra keyboard-accessibility work needed, unlike the
+`<div>`-based controls fixed just above). `loadHistory()` now fetches
+once into a module-level `historyRows` and a new `renderHistory()`
+filters and redraws from that in-memory list on each chip click --
+`historyFilter` state tracked in `app.js`, no repeated network calls per
+filter switch. New `wallet.history_filter_all/won/lost` and
+`wallet.history_filter_empty` (a distinct empty state from
+`wallet.history_empty`, for "you have history, just none matching this
+filter") in both `en.json` and `am.json`.
+
+**Verification**: a new real-browser Playwright e2e test,
+`test_history_tab_filters_by_won_and_lost` in
+`tests/integration/test_miniapp_wallet_e2e.py`, seeds two already-
+completed rounds directly via SQL (one with a `round_winners` row, one
+without) rather than playing a live round to completion -- the existing
+`test_history_tab_shows_a_completed_round` test already covers the live
+path, and its auto-mark-vs-auto-mark setup can't guarantee a specific
+winner, which this test needs to actually prove the filter filters.
+Clicks each chip and asserts the rendered row count and which round
+number is showing (asserted as the bare `"#101"`/`"#102"` substring, not
+English wording -- the test stub's `language_code` is `"am"`, so
+asserting English text would have been asserting on a translation that
+was never actually rendered). Confirmed the test genuinely fails against
+the pre-fix code (`git stash` on the HTML/JS/locale files reproduced a
+real Playwright timeout waiting for a `data-filter="won"` chip that
+doesn't exist yet, not a false pass). Full suite: mypy clean,
+`pytest tests/` 820 passed, `-m chaos_infra` 2 passed, `-m e2e` 18
+passed (including this new test and the full pre-existing gameplay/
+wallet/admin-console e2e coverage). `-m load`'s
+`test_load_multiroom.py` p99 latency-budget test again failed under the
+same genuine host contention documented throughout this session (load
+average ~1.1-1.2, the same persistently-restarting unrelated
+`spos-backend` container) -- unrelated to this change (pure WebSocket
+fan-out latency, nothing to do with the wallet history tab).
+
 ## 2026-08-28 — Core Mini App game-flow controls were unreachable without a pointer
 
 A P2 from the four-agent architecture audit's frontend findings: room

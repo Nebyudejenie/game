@@ -149,6 +149,11 @@
       <p id="withdraw-status" class="wallet-note"></p>
     </div>
     <div id="wallet-pane-history" class="wallet-pane hidden">
+      <div class="amount-chips" id="history-filter-chips">
+        <button type="button" class="amount-chip selected" data-filter="all" data-i18n="wallet.history_filter_all"></button>
+        <button type="button" class="amount-chip" data-filter="won" data-i18n="wallet.history_filter_won"></button>
+        <button type="button" class="amount-chip" data-filter="lost" data-i18n="wallet.history_filter_lost"></button>
+      </div>
       <div id="history-list"></div>
     </div>
   </main>

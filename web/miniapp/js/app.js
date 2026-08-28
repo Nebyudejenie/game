@@ -693,40 +693,76 @@ el("withdraw-submit-btn").addEventListener("click", async () => {
 });
 
 // --- history -------------------------------------------------------------
+// Spec 2.6: "History: rounds and transactions, filterable, each linking
+// to its detail." Transactions and per-round detail links aren't built
+// yet (no transaction-listing endpoint or round-detail screen exists),
+// but the filter itself is a real, self-contained gap: the last 10
+// rounds fetched here already carry a won/lost outcome, so filtering by
+// it needs no new backend surface -- reusing the deposit screen's own
+// .amount-chip look for a native, already-keyboard-accessible <button>
+// rather than inventing a new control style.
+
+let historyRows = [];
+let historyFilter = "all";
 
 async function loadHistory() {
-  const list = el("history-list");
   try {
     const response = await fetch("/api/history", { headers: authHeader() });
     if (!response.ok) return;
-    const rows = await response.json();
-    list.innerHTML = "";
-    if (rows.length === 0) {
-      const empty = document.createElement("p");
-      empty.className = "wallet-note";
-      empty.textContent = t("wallet.history_empty");
-      list.appendChild(empty);
-      return;
-    }
-    for (const row of rows) {
-      const line = document.createElement("div");
-      line.className = "history-row";
-      const outcome = row.won
-        ? t("wallet.history_won", { amount: row.won_amount })
-        : t("wallet.history_lost");
-      const roundLabel = document.createElement("span");
-      roundLabel.textContent = t("wallet.history_round", { seq: row.seq, stake: row.stake });
-      const outcomeLabel = document.createElement("span");
-      outcomeLabel.className = "history-meta";
-      outcomeLabel.textContent = outcome;
-      line.appendChild(roundLabel);
-      line.appendChild(outcomeLabel);
-      list.appendChild(line);
-    }
+    historyRows = await response.json();
+    renderHistory();
   } catch {
     /* history pane just keeps whatever it already had */
   }
 }
+
+function renderHistory() {
+  const list = el("history-list");
+  list.innerHTML = "";
+  if (historyRows.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "wallet-note";
+    empty.textContent = t("wallet.history_empty");
+    list.appendChild(empty);
+    return;
+  }
+  const filtered = historyRows.filter((row) => {
+    if (historyFilter === "won") return row.won;
+    if (historyFilter === "lost") return !row.won;
+    return true;
+  });
+  if (filtered.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "wallet-note";
+    empty.textContent = t("wallet.history_filter_empty");
+    list.appendChild(empty);
+    return;
+  }
+  for (const row of filtered) {
+    const line = document.createElement("div");
+    line.className = "history-row";
+    const outcome = row.won
+      ? t("wallet.history_won", { amount: row.won_amount })
+      : t("wallet.history_lost");
+    const roundLabel = document.createElement("span");
+    roundLabel.textContent = t("wallet.history_round", { seq: row.seq, stake: row.stake });
+    const outcomeLabel = document.createElement("span");
+    outcomeLabel.className = "history-meta";
+    outcomeLabel.textContent = outcome;
+    line.appendChild(roundLabel);
+    line.appendChild(outcomeLabel);
+    list.appendChild(line);
+  }
+}
+
+document.querySelectorAll("#history-filter-chips .amount-chip").forEach((chip) => {
+  chip.addEventListener("click", () => {
+    document.querySelectorAll("#history-filter-chips .amount-chip").forEach((c) => c.classList.remove("selected"));
+    chip.classList.add("selected");
+    historyFilter = chip.dataset.filter;
+    renderHistory();
+  });
+});
 
 // --- toasts / errors -------------------------------------------------
 
