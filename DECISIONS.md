@@ -5,6 +5,88 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-28 — Core Mini App game-flow controls were unreachable without a pointer
+
+A P2 from the four-agent architecture audit's frontend findings: room
+cards, the 100-cell card-selection grid, and the AUTO toggle in
+`web/miniapp/` were plain `<div>`s with only mouse/touch `click`
+listeners -- nothing in the primary "join a game" flow was reachable by
+keyboard (or any other non-pointer input), and none of them exposed the
+ARIA semantics a screen reader needs to announce them as controls at
+all.
+
+**Fixed**: a shared `makeKeyboardActivatable(element, handler)` helper
+in `web/miniapp/js/app.js` (`tabIndex = 0`, `role="button"` unless the
+caller already set a more specific role, a `click` listener, and a
+`keydown` listener firing the same handler on Enter or Space with
+`preventDefault()` on Space so it activates the control instead of
+scrolling the page) -- applied to room cards (`renderRoomList()`) and
+the lobby's 100-cell card grid (`buildCardGrid()`). The AUTO toggle gets
+`role="switch"` + a live `aria-checked` (kept in sync in both
+`enterGame()` and its own click/keyboard handler) instead of the
+helper's generic `role="button"` default, since it's a genuine on/off
+control, not a one-shot action -- matching its actual semantics rather
+than defaulting every interactive `<div>` to the same ARIA role.
+`web/miniapp/js/render/card.js`'s `onCellClick()` (the player's own held
+5x5 card's manual-mark cells) got the same treatment as small local/
+inline logic rather than importing the app.js helper, matching
+`render/board.js`'s own established no-cross-import pattern for
+rendering modules -- a natural extension beyond the audit's three
+literally-named examples, not a separately-scoped feature.
+`web/miniapp/css/screens.css` gained a `:focus-visible` block giving
+`.room-card`, `.card-grid-cell`, `.card-cell`, and `.switch` a
+deliberate, on-brand outline (`2px solid var(--accent)`) rather than
+relying on the browser's own default ring against this app's dark
+canvas -- `:focus-visible`, not bare `:focus`, so it only ever shows for
+real keyboard navigation, never a mouse/touch tap.
+
+**A genuine, independent bug found and fixed along the way**: the room
+list's own 1-second countdown-tick `setInterval` called
+`renderRoomList()` directly, which does `list.innerHTML = ""` and
+rebuilds every room card from scratch every single second -- destroying
+and replacing the exact DOM node a keyboard user had just tabbed to,
+silently kicking focus back to `<body>` once a second. This wasn't
+theoretical: it's what made the first draft of this fix's own e2e test
+genuinely flaky (a `.focus()` immediately followed by `Enter` would
+intermittently land after the interval had already swapped the node out
+from under it). Fixed by splitting the interval into a new
+`tickRoomCountdowns()` that updates only each card's existing
+`.countdown` text node in place -- the DOM nodes (and therefore focus
+and event listeners) now survive a tick; `renderRoomList()`'s full
+rebuild is reserved for genuinely new room data arriving over the
+`"rooms"` WebSocket message.
+
+**Verification**: a new real-browser Playwright e2e test,
+`test_room_card_is_reachable_and_activatable_by_keyboard_alone` in
+`tests/integration/test_miniapp_e2e.py`, `.focus()`es the room card
+directly (no `page.click()` anywhere in the test) and presses Enter,
+asserting the resulting `#screen-lobby.active` transition -- proving
+both that the element is a real Tab-stop and that Enter activates it
+the way a tap already does. Building this test surfaced a second,
+separate lesson worth recording: `RoundEngine.run_forever()` alone does
+not create a round row for a room -- `RoundEngine.join()` only starts
+one lazily, on the *first* actual join (idle -> lobby) -- so a bare
+`page.click()` control case against a room with an engine attached but
+nobody joined yet failed identically to the keyboard case, which is
+what pointed at the interval bug above rather than a keyboard-specific
+one. The test now joins a second player directly through the engine
+first (mirroring `test_miniapp_full_gameplay_flow`'s own setup) to force
+the round into `"lobby"` before the browser ever loads the page.
+Confirmed the new test genuinely fails against the pre-fix JS/CSS
+(`git stash` on just those three files reproduced a real
+`assert None == "0"` on the room card's `tabindex` attribute, not a
+false pass). Full suite: mypy clean, `pytest tests/` 820 passed,
+`-m chaos_infra` 2 passed, `-m e2e` 17 passed (including this new test
+and the full pre-existing gameplay/wallet/admin-console e2e coverage).
+`-m load`'s `test_gateway_fanout.py`/`test_load_multiroom.py` p99
+latency-budget tests failed under genuine host contention (load average
+climbing past 2.0 with no single dominant process, the same
+persistently-restarting unrelated `spos-backend` container noted
+throughout this session) -- reconfirmed via `uptime`/`docker ps` per
+this session's established practice, and unrelated to this change (pure
+WebSocket fan-out latency under 1000 concurrent sockets, nothing to do
+with Mini App JS/CSS).
+
 ## 2026-08-28 — `round_entries` had no index supporting a `user_id`-first lookup
 
 A P2 from the four-agent architecture audit, the same class of bug the

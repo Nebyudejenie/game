@@ -115,6 +115,68 @@ async def test_miniapp_loads_authenticates_and_shows_balance(gateway_server, bro
     await page.close()
 
 
+async def test_room_card_is_reachable_and_activatable_by_keyboard_alone(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    # An architecture audit found room cards, the card-selection grid, and
+    # the AUTO toggle were plain <div>s with only mouse/touch click
+    # listeners -- nothing in the primary "join a game" flow reachable
+    # without a pointer. This is the first control in that flow: a real
+    # keyboard-only focus + Enter (no page.click() anywhere in this test)
+    # must reach the lobby screen exactly the way a tap already does.
+    #
+    # A live RoundEngine is required here (matching
+    # test_miniapp_full_gameplay_flow's own setup) -- state_sync reads
+    # whatever round row currently exists for the room, and run_forever()
+    # alone doesn't create one: RoundEngine.join() only starts a new round
+    # (idle -> lobby) lazily, on the first actual join, so a room with an
+    # engine attached but nobody joined yet still has no round at all. A
+    # room with no engine attached has no round ever, so no click -- mouse
+    # or keyboard -- would reach the lobby screen either way; the first
+    # draft of this test learned that the hard way by confirming a plain
+    # page.click() control case failed identically. Joining a second,
+    # separate player directly through the engine (like the full-gameplay
+    # test does) is what actually forces the round into "lobby" before the
+    # browser ever loads the page.
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=8, is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    try:
+        other_player = await create_funded_user(conn)
+        assert (await engine.join(other_player, 2)).ok
+
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page.wait_for_selector(room_selector, timeout=10000)
+
+        room_card = page.locator(room_selector)
+        assert await room_card.get_attribute("tabindex") == "0"
+        assert await room_card.get_attribute("role") == "button"
+
+        await room_card.focus()
+        assert await page.evaluate(
+            f"document.activeElement === document.querySelector('{room_selector}')"
+        )
+        await page.keyboard.press("Enter")
+
+        await page.wait_for_selector("#screen-lobby.active", timeout=10000)
+
+        assert console_errors == [], f"JS errors during keyboard-only room entry: {console_errors}"
+        await page.close()
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
 async def test_miniapp_language_uses_the_db_value_over_the_telegram_hint(
     gateway_server, browser, pool, conn
 ):

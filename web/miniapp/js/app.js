@@ -28,6 +28,27 @@ function el(id) {
   return document.getElementById(id);
 }
 
+// Room cards, the card-selection grid, and the AUTO toggle are plain
+// <div>s (not <button>s -- they need custom layout/styling <button>'s
+// own UA defaults would fight) -- an architecture audit caught that
+// left them unreachable without a pointer. tabindex="0" + role="button"
+// makes an element real Tab-stop; the keydown handler is what actually
+// makes Enter/Space activate it the way a native button already would
+// (preventDefault on Space specifically, so it activates the control
+// instead of scrolling the page, the one thing a real <button> handles
+// for free that this doesn't get automatically).
+function makeKeyboardActivatable(element, handler) {
+  element.tabIndex = 0;
+  if (!element.hasAttribute("role")) element.setAttribute("role", "button");
+  element.addEventListener("click", handler);
+  element.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      handler();
+    }
+  });
+}
+
 function applyStaticTranslations() {
   for (const node of document.querySelectorAll("[data-i18n]")) {
     node.textContent = t(node.dataset.i18n);
@@ -85,7 +106,7 @@ function renderRoomList() {
         <div class="countdown">${roomCountdownText(room)}</div>
       </div>
     `;
-    card.addEventListener("click", () => enterRoom(room.room_id));
+    makeKeyboardActivatable(card, () => enterRoom(room.room_id));
     list.appendChild(card);
   }
 }
@@ -124,11 +145,29 @@ function refreshRoomList() {
 // countdown would sit frozen at whatever number happened to be true the
 // last time the list was fetched, indistinguishable from a bug to a
 // player watching it. Same guarded-permanent-interval shape as the
-// session-time reminder below; re-renders the existing room data
-// in-memory (no new request) so lobby countdowns actually tick.
+// session-time reminder below; updates the existing room data in-memory
+// (no new request) so lobby countdowns actually tick.
+//
+// This used to call renderRoomList() itself, which wipes and rebuilds
+// every card via innerHTML = "" every single second -- destroying and
+// replacing the exact DOM node a keyboard user just tabbed to, silently
+// kicking focus back to <body> once a second. Ticking only the countdown
+// text in place keeps the existing nodes (and their focus/listeners)
+// alive; a full rebuild is still what happens whenever genuinely new
+// room data arrives above.
 setInterval(() => {
-  if (getState().screen === "rooms") renderRoomList();
+  if (getState().screen === "rooms") tickRoomCountdowns();
 }, 1000);
+
+function tickRoomCountdowns() {
+  const rooms = getState().rooms;
+  for (const roomEl of el("room-list").children) {
+    const room = rooms.find((r) => String(r.room_id) === roomEl.dataset.roomId);
+    if (!room) continue;
+    const countdownEl = roomEl.querySelector(".countdown");
+    if (countdownEl) countdownEl.textContent = roomCountdownText(room);
+  }
+}
 
 // --- entering a room: state_sync decides which screen to show -----------
 
@@ -176,7 +215,7 @@ function buildCardGrid() {
     const cell = document.createElement("div");
     cell.className = "card-grid-cell";
     cell.textContent = String(n);
-    cell.addEventListener("click", () => {
+    makeKeyboardActivatable(cell, () => {
       if (takenCards.has(n) && n !== selectedCard) return;
       haptics.lightTap();
       selectedCard = n;
@@ -280,6 +319,7 @@ function enterGame(sync) {
   const autoOn = sync.auto_mark !== false;
   setState({ autoMark: autoOn });
   el("auto-switch").classList.toggle("on", autoOn);
+  el("auto-switch").setAttribute("aria-checked", String(autoOn));
 
   card.onCellClick((r, c) => {
     if (getState().autoMark) return;
@@ -367,11 +407,17 @@ el("bingo-btn").addEventListener("click", () => {
   ws.claim(state.round.round_id);
 });
 
-el("auto-switch").addEventListener("click", () => {
+// role="switch" (not the generic "button" makeKeyboardActivatable
+// defaults to), since this is a real on/off toggle -- set before calling
+// it, which the helper takes as "already has a role, don't override".
+el("auto-switch").setAttribute("role", "switch");
+el("auto-switch").setAttribute("aria-checked", "true"); // matches index.html's own static class="switch on" default
+makeKeyboardActivatable(el("auto-switch"), () => {
   const state = getState();
   const next = !state.autoMark;
   setState({ autoMark: next });
   el("auto-switch").classList.toggle("on", next);
+  el("auto-switch").setAttribute("aria-checked", String(next));
   if (state.currentRoomId !== null) ws.setAuto(state.currentRoomId, next);
 });
 

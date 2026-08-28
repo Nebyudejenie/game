@@ -1,5 +1,22 @@
 /* Screen-specific layout -- spec section 2. */
 
+/* Room cards, the card-selection grid, the AUTO toggle, and the held
+   card's own manual-mark cells are plain <div>s given tabindex="0" +
+   role="button" in JS (an architecture audit caught nothing in the
+   primary game flow was reachable without a pointer) -- browsers apply
+   a focus outline to any focusable element by default, but this makes
+   it a deliberate, on-brand ring instead of relying on whatever the
+   browser's own default happens to look like against this app's dark
+   canvas. :focus-visible (not bare :focus) so it only ever shows for
+   real keyboard navigation, never a mouse/touch tap. */
+.room-card:focus-visible,
+.card-grid-cell:focus-visible,
+.card-cell:focus-visible,
+.switch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* --- 2.1 Room list --- */
 
 .room-list-header {

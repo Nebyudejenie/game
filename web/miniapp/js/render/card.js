@@ -88,9 +88,26 @@ export function hasCompletePattern(calledSet, patterns) {
 }
 
 export function onCellClick(handler) {
+  // tabindex="0" + role="button" + a keydown handler -- the same
+  // reachable-without-a-pointer fix app.js's own makeKeyboardActivatable()
+  // applies to the room list/card-selection grid/AUTO toggle, kept local
+  // here rather than imported from app.js so this rendering module stays
+  // self-contained (matching board.js's own no-cross-import pattern).
+  // Only meaningful when AUTO is off (handler no-ops otherwise, same as
+  // the click path already did) -- manual marking is advisory only, the
+  // server never trusts a client-reported mark either way.
   for (let r = 0; r < 5; r++) {
     for (let c = 0; c < 5; c++) {
-      cells[r][c].addEventListener("click", () => handler(r, c));
+      const cell = cells[r][c];
+      cell.tabIndex = 0;
+      cell.setAttribute("role", "button");
+      cell.addEventListener("click", () => handler(r, c));
+      cell.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          handler(r, c);
+        }
+      });
     }
   }
 }
