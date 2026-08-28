@@ -115,7 +115,7 @@ async def current_admin(
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="missing bearer session token")
     token = authorization[len("Bearer ") :]
-    session = await auth.resolve_session(app.state.redis, token)
+    session = await auth.resolve_session(app.state.pool, app.state.redis, token)
     if session is None:
         raise HTTPException(status_code=401, detail="session expired or invalid")
     return session

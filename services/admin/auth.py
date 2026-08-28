@@ -148,11 +148,26 @@ async def login(
     return token
 
 
-async def resolve_session(redis: Redis, token: str) -> AdminSession | None:
+async def resolve_session(pool: asyncpg.Pool, redis: Redis, token: str) -> AdminSession | None:
+    """Returns None for a missing/expired Redis session, same as before --
+    but also now for a *live* one belonging to an admin who's since been
+    deactivated (admin_users.is_active). An architecture audit caught that
+    this module's own docstring already promised "a compromised or
+    offboarded admin's session can be revoked server-side instantly," but
+    nothing here ever actually re-checked account state after login --
+    flipping is_active to false left every session already issued valid
+    for up to the full SESSION_TTL_SECONDS regardless. Checked on every
+    call rather than only at login, the same as every other privileged
+    admin route already re-reads real DB state per request rather than
+    trusting a cached value.
+    """
     raw = await redis.get(SESSION_KEY_PREFIX + token)
     if raw is None:
         return None
     data = json.loads(raw)
+    is_active = await pool.fetchval("SELECT is_active FROM admin_users WHERE id = $1", data["admin_id"])
+    if not is_active:
+        return None
     return AdminSession(admin_id=data["admin_id"], username=data["username"], role=data["role"])
 
 

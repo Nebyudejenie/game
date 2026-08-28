@@ -5,6 +5,56 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-28 — First P1 from the four-audit pass: a deactivated admin's live session kept working
+
+`services/admin/auth.py`'s own module docstring has always claimed
+"session tokens held in Redis rather than a client-trusted JWT so a
+compromised or offboarded admin's session can be revoked server-side
+instantly." `resolve_session()` never actually delivered on that: it
+only checked whether the Redis key existed, never re-checking
+`admin_users.is_active` after login. Flipping an admin to inactive (the
+offboarding/compromise scenario the docstring names directly) left every
+session they'd already been issued valid for up to the remaining
+`SESSION_TTL_SECONDS` (8 hours), not revoked at all.
+
+**Scope check first**: there is currently no route or UI anywhere to
+actually flip `is_active` -- `create_admin_user()`'s own docstring is
+explicit that admin provisioning is deliberately out-of-band, by a
+trusted operator, never through a public endpoint, and no `admins.js`
+screen exists in `web/admin/`. Building a full admin-management UI
+wasn't what this gap needed and would have been a real scope expansion
+beyond this codebase's own established design; the actual bug is that
+*whenever* `is_active` changes (today: direct DB access, same as
+`create_admin_user`'s own provisioning path), sessions don't honor it.
+
+**Fixed**: `resolve_session()` now takes `pool` and, after finding a
+live Redis session, checks `admin_users.is_active` for real before
+returning it -- the same "re-read real DB state per request rather than
+trust a cache" discipline every other privileged admin route already
+follows. A deleted admin row (`is_active` reading `None`) is treated the
+same as `false`, not a crash.
+
+**Verification**: `test_resolve_session_rejects_a_session_belonging_to_a_deactivated_admin`
+in `test_admin_auth.py` -- log in for a real session, flip `is_active`
+directly (the same out-of-band mechanism a real operator would use
+today), confirm the previously-valid session is rejected on its very
+next use. Confirmed the test genuinely fails against the pre-fix file
+via the usual stash-revert step (`TypeError: resolve_session() takes 2
+positional arguments but 3 were given` -- the signature change itself is
+what the fix hinges on). Full `test_admin_auth.py` (13 passed) and
+`test_admin_app.py` (23 passed) confirm no existing session/RBAC/IP-
+allowlist behavior regressed. mypy clean (67 source files). Full
+clean-slate rebuild: `docker compose down -v` -> `up -d` -> `alembic
+upgrade head` (all 11 migrations, unchanged) -> `mypy` clean -> full
+default suite 818 passed (up from 817), 21 deselected -> `-m load` 1
+failure (`test_load_multiroom.py`, 337.5ms vs the 300ms budget; `uptime`
+showed load average 1.98 with `spos-backend` still cycling through
+health checks, the same well-documented host-contention pattern,
+unrelated to an admin-auth-only change) -> `-m chaos_infra` 2 passed ->
+`-m e2e` 14 passed.
+
+---
+
 ## 2026-08-28 — The second P0: Chapa-vs-our-records reconciliation existed, was tested, and was never called from anywhere
 
 The second of two P0s the four-audit pass found. `services/payments/deposits.py`'s

@@ -37,7 +37,7 @@ async def test_successful_login_returns_a_working_session(pool, redis):
     token = await auth.login(pool, redis, username=username, password=password, totp_code=code)
     assert token
 
-    session = await auth.resolve_session(redis, token)
+    session = await auth.resolve_session(pool, redis, token)
     assert session is not None
     assert session.admin_id == admin_id
     assert session.username == username
@@ -149,13 +149,32 @@ async def test_logout_invalidates_the_session(pool, redis):
     code = pyotp.TOTP(totp_secret).now()
     token = await auth.login(pool, redis, username=username, password=password, totp_code=code)
 
-    assert await auth.resolve_session(redis, token) is not None
+    assert await auth.resolve_session(pool, redis, token) is not None
     await auth.logout(redis, token)
-    assert await auth.resolve_session(redis, token) is None
+    assert await auth.resolve_session(pool, redis, token) is None
 
 
-async def test_resolve_session_returns_none_for_garbage_token(redis):
-    assert await auth.resolve_session(redis, "not-a-real-token") is None
+async def test_resolve_session_returns_none_for_garbage_token(pool, redis):
+    assert await auth.resolve_session(pool, redis, "not-a-real-token") is None
+
+
+async def test_resolve_session_rejects_a_session_belonging_to_a_deactivated_admin(pool, redis):
+    # The exact scenario this module's own docstring promises but never
+    # actually implemented until now: an admin already holding a live,
+    # valid session gets deactivated (offboarding, a compromised account)
+    # -- their session must stop working on its very next use, not stay
+    # valid for the rest of its 8-hour TTL. admin_users has no UI/route to
+    # flip is_active (deliberately out-of-band provisioning, same as
+    # create_admin_user's own docstring), so this does it directly, the
+    # same way a trusted operator actually would.
+    admin_id, username, password, totp_secret = await create_test_admin(pool)
+    code = pyotp.TOTP(totp_secret).now()
+    token = await auth.login(pool, redis, username=username, password=password, totp_code=code)
+    assert await auth.resolve_session(pool, redis, token) is not None
+
+    await pool.execute("UPDATE admin_users SET is_active = false WHERE id = $1", admin_id)
+
+    assert await auth.resolve_session(pool, redis, token) is None
 
 
 async def test_successful_login_updates_last_login_at(pool, redis):
