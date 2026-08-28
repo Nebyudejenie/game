@@ -5,6 +5,90 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-28 — The room list's own countdown was a literal broken string, and the deadline it needs was silently dropped before it ever left the backend
+
+Another P1 from the four-audit pass. Mini App spec 2.1's room-list
+mockup calls for a real countdown ("0:18") on any room still filling
+its lobby, and the bare word "Playing" once a room's round has started
+("← countdown or 'Playing'", the diagram's own label for that column).
+Two independent bugs meant a player never saw either:
+
+1. `services/gateway/queries.py`'s `list_rooms()` ran a SQL query that
+   already selected `lobby_deadline`, then never included it in the
+   dict returned to the client -- the data existed one line away from
+   being used and was silently dropped every time.
+2. `web/miniapp/js/app.js`'s `renderRoomList()` called
+   `t("rooms.playing", { seconds: "" })` unconditionally for a running
+   room and nothing at all for a lobby room -- an empty string
+   substituted into "Playing — next in ~{seconds}s" produces the
+   literal, permanently-broken "Playing — next in ~s" text spec's own
+   prose separately describes as "next in ~40s" (a real number, not a
+   blank).
+
+**Scope call on the ambiguity between the mockup and the prose**: the
+prose line ("next in ~40s") and the diagram's own inline label
+("countdown or 'Playing'") don't actually agree on what a *running*
+room's row shows -- and there's no honest way to compute "time until
+this round ends" from data this codebase has (round length is
+determined entirely by when a player completes a pattern; no formula,
+historical average, or heuristic is specified or would be anything but
+fabricated). Read the diagram's own literal inline label as the more
+concrete, authoritative element (matching data that's genuinely
+available) over the prose's looser paraphrase: a *lobby* room shows a
+real, exact countdown from the real `lobby_deadline`; a *running* room
+shows the bare word "Playing," never an invented number.
+
+**Fixed**: `list_rooms()` now includes `lobby_deadline_ms` (same
+epoch-ms conversion `build_state_sync()` already uses for the same
+column). `renderRoomList()` gained `roomCountdownText()`: a real M:SS
+countdown for a lobby room (computed against `serverNow()`, the same
+clock-skew-corrected source the existing lobby-screen countdown uses),
+the new `rooms.playing_now` key ("Playing" / "እየተጫወተ" -- reusing the
+already-vetted lead word from the existing `rooms.playing` string
+rather than composing new Amharic) for a running one. Since the room
+list previously only refreshed on an explicit request (boot, or
+returning here after a round ends -- confirmed by grepping for every
+`ws.on("rooms", ...)`/`requestRooms()` call site), a lobby countdown
+would otherwise sit visibly frozen the whole time a player watched the
+screen; a permanent 1-second guarded interval (`if (getState().screen
+=== "rooms") renderRoomList();`, the same shape as this file's own
+existing session-reminder interval) re-renders it from already-held
+state, no new network request per tick.
+
+**Verification**: `test_rooms_list_reports_a_real_lobby_deadline` in
+`tests/integration/test_gateway_gameplay.py` -- a real WebSocket
+session against a real two-player lobby, asserting the room list's
+reported `lobby_deadline_ms` is a real, correctly-bounded value (`0 <
+seconds_left <= lobby_seconds`), not just present. Confirmed the test
+genuinely fails against the pre-fix query (`KeyError:
+'lobby_deadline_ms'`) via the usual stash-revert step. First draft hit
+the same teardown pitfall a false-claim test in this same file already
+taught this session: `lobby_seconds=30` left the round parked mid-lobby
+well past the 15s teardown window (`engine.stop()` only takes effect
+between rounds); fixed by shortening to `lobby_seconds=5` and waiting
+for the round to reach `idle` naturally before tearing down, the exact
+pattern already established for that reason. Stress-tested 5 consecutive
+runs clean before trusting it. The new client-side rendering code has
+no dedicated browser test, but is exercised for real by the existing
+Mini App e2e suite (several of those tests spend multiple seconds on
+the room list screen, which would surface any crash in the new render
+path or interval as a real `pageerror` -- none appeared). mypy clean
+(67 source files). Full clean-slate rebuild: `docker compose down -v`
+-> `up -d` -> `alembic upgrade head` (all 11 migrations, unchanged) ->
+`mypy` clean -> full default suite 820 passed (up from 819), 21
+deselected -> `-m load` 2 failures (`test_gateway_fanout.py`,
+`test_load_multiroom.py`; `uptime` and `docker ps` showed the same
+well-documented host-contention pattern) -> `-m chaos_infra` 1 failure
+on first pass (`test_chaos_gateway_kill.py`, a container-operation-
+timing test that's never flaked before this session -- `docker ps`
+showed `redis` freshly restarted and `spos-backend` still cycling,
+consistent with genuine Docker-daemon contention from that unrelated
+container's own restart, not this change; reran in isolation and it
+passed cleanly, then reran the full suite clean, 2 passed) -> `-m e2e`
+14 passed with zero JS errors.
+
+---
+
 ## 2026-08-28 — `deploy/backup.sh`/`restore.sh` had no working path to production at all
 
 Another P1 from the four-audit pass. Both scripts hardcoded

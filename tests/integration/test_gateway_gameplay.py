@@ -6,6 +6,7 @@ each piece in isolation.
 
 import asyncio
 import json
+import time
 from decimal import Decimal
 
 import websockets
@@ -275,6 +276,59 @@ async def test_claim_is_rate_limited_after_three_false_claims_in_one_session(
             await ws.send(json.dumps({"t": "claim", "round_id": round_id}))
             blocked = await recv_until(ws, "error", attempts=300)
             assert blocked["code"] == "rate_limited"
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
+async def test_rooms_list_reports_a_real_lobby_deadline(gateway_server, pool, redis, card_pool, conn):
+    # Mini App spec 2.1: the room list's own countdown ("0:18") for a room
+    # still filling its lobby. An architecture audit found the SQL behind
+    # list_rooms() already selected lobby_deadline but the Python code
+    # silently dropped it before it ever reached a client -- this proves
+    # a real client actually receives a real, correctly-bounded deadline,
+    # not just that the backend query includes the column.
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=5,
+        call_interval_ms=10, is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        # One direct join is enough to open the lobby (min_players=2, so
+        # the round won't actually start calling numbers yet) -- this
+        # test is about the room list's own reported deadline, not full
+        # gameplay.
+        other_player = await create_funded_user(conn)
+        assert (await engine.join(other_player, 2)).ok
+        await wait_until(lambda: engine.status == "lobby", timeout=5)
+
+        telegram_id = next_telegram_id()
+        async with websockets.connect(gateway_server) as ws:
+            await ws.send(json.dumps({"t": "auth", "init_data": build_init_data(telegram_id)}))
+            await ws.recv()  # authed
+
+            await ws.send(json.dumps({"t": "rooms"}))
+            rooms_msg = json.loads(await ws.recv())
+            assert rooms_msg["t"] == "rooms"
+
+            room_entry = next(r for r in rooms_msg["rooms"] if r["room_id"] == room_id)
+            assert room_entry["status"] == "lobby"
+            assert room_entry["lobby_deadline_ms"] is not None
+
+            now_ms = time.time() * 1000
+            seconds_left = (room_entry["lobby_deadline_ms"] - now_ms) / 1000
+            # Real bound, not a coincidence: lobby_seconds=5 above, so a
+            # correct deadline is somewhere under 5s away, comfortably
+            # above 0 (the lobby only just opened).
+            assert 0 < seconds_left <= 5
+
+        # Let the round actually finish (short lobby_seconds and fast
+        # call_interval_ms above, so this is quick) before tearing down --
+        # stop() only takes effect between rounds, matching every other
+        # test in this file's own pattern.
+        await wait_until(lambda: engine.status == "idle", timeout=15)
     finally:
         await engine.stop()
         await asyncio.wait_for(task, timeout=15)

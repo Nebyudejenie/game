@@ -1,6 +1,7 @@
 {
   "rooms.title": "Rooms",
   "rooms.playing": "Playing — next in ~{seconds}s",
+  "rooms.playing_now": "Playing",
   "rooms.derash_up_to": "Derash up to {amount}",
   "rooms.empty": "No rooms available",
 

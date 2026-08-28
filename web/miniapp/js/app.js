@@ -72,7 +72,6 @@ function renderRoomList() {
     return;
   }
   for (const room of state.rooms) {
-    const isPlaying = room.status === "running" || room.status === "lobby";
     const card = document.createElement("div");
     card.className = "room-card" + (room.status === "running" ? " playing" : "");
     card.dataset.roomId = String(room.room_id);
@@ -83,13 +82,32 @@ function renderRoomList() {
       </div>
       <div style="text-align:right">
         <div class="derash-line">${t("rooms.derash_up_to", { amount: room.pot })}</div>
-        <div class="countdown">${room.status === "running" ? t("rooms.playing", { seconds: "" }) : ""}</div>
+        <div class="countdown">${roomCountdownText(room)}</div>
       </div>
     `;
     card.addEventListener("click", () => enterRoom(room.room_id));
     list.appendChild(card);
-    void isPlaying;
   }
+}
+
+// Mini App spec 2.1's own mockup: "0:18" (a bare countdown) while a room
+// is still filling its lobby, the bare word "Playing" once the round's
+// started -- "← countdown or 'Playing'" is the diagram's own inline
+// label for this exact column. There's no honest way to predict when a
+// running round will actually end (that depends entirely on when a
+// player completes a pattern, purely random), so this never fabricates
+// a number for one -- the spec's separate prose line ("next in ~40s")
+// reads as a looser paraphrase of the same row, not a literal formula
+// this could compute without guessing.
+function roomCountdownText(room) {
+  if (room.status === "lobby" && room.lobby_deadline_ms != null) {
+    const secondsLeft = Math.max(0, Math.round((room.lobby_deadline_ms - serverNow()) / 1000));
+    const minutes = Math.floor(secondsLeft / 60);
+    const seconds = String(secondsLeft % 60).padStart(2, "0");
+    return `${minutes}:${seconds}`;
+  }
+  if (room.status === "running") return t("rooms.playing_now");
+  return "";
 }
 
 ws.on("rooms", (msg) => {
@@ -100,6 +118,17 @@ ws.on("rooms", (msg) => {
 function refreshRoomList() {
   ws.requestRooms();
 }
+
+// The room list only gets a fresh "rooms" push on request (boot, or
+// returning here after a round ends) -- without this, a lobby room's
+// countdown would sit frozen at whatever number happened to be true the
+// last time the list was fetched, indistinguishable from a bug to a
+// player watching it. Same guarded-permanent-interval shape as the
+// session-time reminder below; re-renders the existing room data
+// in-memory (no new request) so lobby countdowns actually tick.
+setInterval(() => {
+  if (getState().screen === "rooms") renderRoomList();
+}, 1000);
 
 // --- entering a room: state_sync decides which screen to show -----------
 

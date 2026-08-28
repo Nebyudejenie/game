@@ -138,6 +138,17 @@ async def list_rooms(pool: asyncpg.Pool) -> list[dict[str, Any]]:
                 "status": row["status"] or "idle",
                 "players": row["player_count"] or 0,
                 "pot": str(row["pot"]) if row["pot"] is not None else "0.00",
+                # Mini App spec 2.1: the room list's own countdown ("0:18")
+                # for a room still in its lobby -- the SQL above already
+                # selected this column, but it was silently dropped here
+                # before ever reaching a client, leaving the Mini App with
+                # no real deadline to count down to (an architecture audit
+                # found this).
+                "lobby_deadline_ms": (
+                    int(row["lobby_deadline"].timestamp() * 1000)
+                    if row["lobby_deadline"] is not None
+                    else None
+                ),
             }
         )
     return out

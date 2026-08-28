@@ -1,6 +1,7 @@
 {
   "rooms.title": "ክፍሎች",
   "rooms.playing": "እየተጫወተ — በ~{seconds}ሰ ቀጣይ",
+  "rooms.playing_now": "እየተጫወተ",
   "rooms.derash_up_to": "ደራሽ እስከ {amount}",
   "rooms.empty": "ምንም ክፍል የለም",
 
