@@ -144,6 +144,67 @@ async def test_admin_console_adjust_balance_credits_a_real_user_over_a_real_brow
     await page.close()
 
 
+async def test_admin_console_rooms_edit_changes_a_real_room_over_a_real_browser(
+    admin_server, pool, conn, browser
+):
+    # An architecture audit found the rooms screen had create + activate/
+    # deactivate but no edit UI at all, despite update_room_admin()/
+    # _UPDATABLE_ROOM_FIELDS fully supporting it (spec 11: "create/edit
+    # stakes, cut, timings, patterns") -- this is the first real-browser
+    # coverage of the new edit form, including the window.prompt() reason
+    # dialog neither this action nor the pre-existing activate/deactivate
+    # button had any Playwright coverage for before.
+    from tests.integration.conftest import create_room
+
+    admin_id, username, password, totp_secret = await create_test_admin(pool, role="ops")
+    room_id = await create_room(conn, stake=Decimal("10.00"), house_cut_bps=2000)
+
+    page = await browser.new_page(viewport={"width": 1280, "height": 900})
+    page_errors: list[str] = []
+    page.on("pageerror", lambda exc: page_errors.append(str(exc)))
+    # window.prompt() is auto-dismissed (returns null) with no handler --
+    # this is what actually lets the edit form's reason prompt go through
+    # rather than the save silently no-op'ing on a cancelled dialog.
+    page.on("dialog", lambda dialog: dialog.accept("e2e test: correcting the stake"))
+
+    await _login(page, admin_server, username, password, totp_secret)
+    await page.wait_for_selector(".stat-grid", timeout=10000)
+
+    await page.click('.nav-btn[data-screen="rooms"]')
+    room_row = f'tr[data-room-id="{room_id}"]'
+    await page.wait_for_selector(room_row, timeout=10000)
+    await page.click(f'{room_row} .edit-room-btn')
+
+    await page.wait_for_selector("#edit-room-form", timeout=5000)
+    stake_input = page.locator('#edit-room-form input[name="stake"]')
+    await stake_input.fill("")
+    await stake_input.fill("25.00")
+    await page.click('#edit-room-form button[type="submit"]')
+
+    await page.wait_for_selector("#toast.visible", timeout=5000)
+    await page.wait_for_function(
+        f"""() => {{
+            const row = document.querySelector('tr[data-room-id="{room_id}"]');
+            return row && row.textContent.includes('25.00');
+        }}""",
+        timeout=5000,
+    )
+
+    updated_stake = await conn.fetchval("SELECT stake FROM rooms WHERE id = $1", room_id)
+    assert updated_stake == Decimal("25.00")
+
+    audit_row = await conn.fetchrow(
+        "SELECT reason FROM admin_audit_log WHERE admin_id = $1 AND action = 'rooms.update' "
+        "ORDER BY id DESC LIMIT 1",
+        admin_id,
+    )
+    assert audit_row is not None
+    assert "correcting the stake" in audit_row["reason"]
+
+    assert page_errors == [], f"JS errors during rooms-edit flow: {page_errors}"
+    await page.close()
+
+
 async def test_admin_console_rbac_denial_shows_a_real_message_not_a_blank_screen(admin_server, pool, browser):
     # support has no risk:view permission (services/admin/rbac.py) --
     # the console must surface that as a real message, the same

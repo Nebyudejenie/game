@@ -5,6 +5,54 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-28 — Admin rooms screen had create + activate/deactivate but no edit at all
+
+Another P1 from the four-audit pass. `services/admin/queries.py`'s
+`update_room_admin()`/`_UPDATABLE_ROOM_FIELDS` fully support editing
+stake, house cut, min/max players, timings, and win patterns -- spec
+section 11's own Rooms-screen line: "Create/edit stakes, cut, timings,
+patterns." `web/admin/js/screens/rooms.js` only ever exposed create and
+a bare activate/deactivate toggle; there was no way to actually edit a
+room's config from the console at all, even though the backend, the
+audit log wiring, and the RBAC permission (`rooms:manage`) were already
+fully built and already used by the toggle button.
+
+**Fixed**: an "Edit" button per room row opens an inline form
+pre-filled with that room's current values (same field set as the
+existing "Create room" form), reusing the *same* `PATCH /rooms/{id}`
+endpoint the toggle-active button already calls. Only fields that
+actually changed are sent -- comparing against the room's original
+values before building the `changes` payload, so bumping one number
+doesn't generate an audit-log entry implying every other field was also
+"changed" to the value it already had. Reason prompt via the same
+`window.prompt()` pattern the toggle button already uses, for
+consistency within this one screen.
+
+**Verification**: `test_admin_console_rooms_edit_changes_a_real_room_over_a_real_browser`,
+a new real-Chromium test -- opens the edit form, changes the stake,
+handles the `window.prompt()` reason dialog (Playwright's
+`page.on("dialog", ...)`, a pattern this codebase had never needed
+before, since neither this new action nor the pre-existing toggle-active
+button had any prior browser coverage), submits, and confirms both the
+real `rooms.stake` DB value and a real `admin_audit_log` row with the
+given reason. Confirmed the test genuinely fails against the pre-fix
+frontend via the usual stash-revert step (`TimeoutError` waiting for
+`.edit-room-btn`, which doesn't exist pre-fix). No Python production
+code changed (the backend support already existed) -- mypy clean (67
+source files) confirms nothing broke. Full clean-slate rebuild: `docker
+compose down -v` -> `up -d` -> `alembic upgrade head` (all 11
+migrations, unchanged) -> `mypy` clean -> full default suite 820
+passed, 22 deselected (up from 21 -- one new e2e test) -> `-m load` 5
+passed, fully clean -> `-m chaos_infra` 2 passed -> `-m e2e` 1 failure
+on first pass (`test_miniapp_full_gameplay_flow`, unrelated to the room
+list screen the player had already left by the point of failure --
+`uptime`/`docker ps` showed load 1.91 with `spos-backend` still cycling
+and redis freshly restarted from the chaos_infra run moments earlier),
+reran clean in isolation, then reran the full `-m e2e` suite clean, 15
+passed.
+
+---
+
 ## 2026-08-28 — The room list's own countdown was a literal broken string, and the deadline it needs was silently dropped before it ever left the backend
 
 Another P1 from the four-audit pass. Mini App spec 2.1's room-list
