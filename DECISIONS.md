@@ -5,6 +5,58 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-28 — `round_entries` had no index supporting a `user_id`-first lookup
+
+A P2 from the four-agent architecture audit, the same class of bug the
+prior `ix_round_entries_joined_at` migration already fixed once for
+this table: `services/gateway/queries.py`'s `user_history()` (the bot's
+`/history` command and the Mini App's own wallet history tab) filters
+`WHERE re.user_id = $1`, but every existing index on `round_entries`
+leads with `round_id` (`PRIMARY KEY (round_id, card_no)`,
+`UNIQUE (round_id, user_id)`, plus the `joined_at`-only index) -- none
+supports a `user_id`-first lookup, so this ordinary, frequent action
+forced a full sequential scan of a table that grows with every single
+stake ever made platform-wide.
+
+**Fixed**: `CREATE INDEX ix_round_entries_user_id ON round_entries
+(user_id, round_id)`, migration `5a5fe5256892`.
+
+**Verification, done for real rather than assumed from the DDL alone**:
+`EXPLAIN` on the actual query at the table's real, current size (a few
+hundred rows) still correctly picks a sequential scan -- the right
+planner call for a table this small, not evidence the index doesn't
+work. Seeded 20,000 synthetic `round_entries` rows to check properly;
+the first attempt was itself a mistake worth naming -- giving every
+synthetic row to one single `user_id` made that user's own filter match
+nearly the *entire* table, which isn't remotely the real access pattern
+(one user's own history among many other users' rows) and predictably
+left the planner preferring a different existing index instead. Cleaned
+that up and reseeded 50,000 rows round-robinned across 2,000 distinct
+real user ids instead -- a realistic, selective distribution (~25 rows
+per user) -- and re-ran `EXPLAIN`: the plan now names
+`Bitmap Index Scan on ix_round_entries_user_id` directly, unambiguous
+proof the new index is what the planner actually chooses for this exact
+query shape. All synthetic seed data removed afterward (confirmed back
+to the original row count). No behavior/output changed for any query,
+so no new correctness test was needed -- `user_history()` is already
+exercised indirectly via `/api/history` (`test_gateway_rest.py`) and
+the Mini App's wallet history tab (`test_history_tab_shows_a_completed_round`),
+both rerun clean. mypy clean (68 source files, `migrations/` is in
+scope per `pyproject.toml`). Full clean-slate rebuild: `docker compose
+down -v` -> `up -d` -> `alembic upgrade head` (all 12 migrations apply
+cleanly from scratch) -> `mypy` clean -> full default suite 820 passed,
+23 deselected -> `-m load` 2 failures (`test_gateway_fanout.py`,
+`test_load_multiroom.py`, barely over budget this time (304.8ms vs
+300ms); `uptime` showed the whole host had only been up 19 minutes --
+a reboot happened at some point this session, which is also why the
+dev containers had to be restarted mid-pass -- with `spos-backend`
+still cycling through its own restart loop moments after boot, the
+same well-documented host-contention pattern, unrelated to a pure DB
+index) -> `-m chaos_infra` 2 passed -> `-m e2e` 16 passed, including
+the wallet history tab test.
+
+---
+
 ## 2026-08-28 — No client-side RBAC in the admin console, closing the last finding from the four-agent audit
 
 The last open item from the architecture audit. Backend RBAC
