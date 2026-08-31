@@ -96,11 +96,31 @@ async def process_one(
         async with pool.acquire() as conn:
             async with conn.transaction():
                 payment = await conn.fetchrow(
-                    "SELECT id, user_id, amount, method_id, status FROM payments "
+                    "SELECT id, user_id, amount, method_id, status, provider FROM payments "
                     "WHERE our_ref = $1 FOR UPDATE",
                     our_ref,
                 )
                 if payment is None or payment["status"] not in _PENDING_STATUSES:
+                    await redis.xack(PAYOUT_STREAM, GROUP, msg_id)
+                    span.set_attribute("payout.outcome", "skipped")
+                    return "skipped"
+
+                # Defense in depth: this worker is started with exactly
+                # one provider instance (Chapa, in production -- see
+                # main_async()) and nothing should ever enqueue a
+                # different provider's payment onto this stream --
+                # approve_withdrawal_admin's own guard query already
+                # refuses to enqueue a 'manual' row. If one still turns
+                # up here (a bug, a stale/hand-crafted XADD), refuse to
+                # dispatch it to the wrong rail rather than silently
+                # calling create_payout() with mismatched data.
+                if payment["provider"] != provider.name:
+                    logger.error(
+                        "payout_provider_mismatch",
+                        our_ref=our_ref,
+                        payment_provider=payment["provider"],
+                        worker_provider=provider.name,
+                    )
                     await redis.xack(PAYOUT_STREAM, GROUP, msg_id)
                     span.set_attribute("payout.outcome", "skipped")
                     return "skipped"

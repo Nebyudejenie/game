@@ -782,6 +782,12 @@ async def daily_ggr(pool: asyncpg.Pool, on_date: date) -> dict[str, Any]:
 
 
 async def list_pending_withdrawals(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+    # provider != 'manual': manual withdrawals always land in 'review'
+    # too (see request_withdrawal's force_review), but they need a human
+    # to actually send the transfer, not the automatic approve_
+    # withdrawal_admin -> enqueue_payout -> payout_worker path this
+    # screen's Approve button drives. They get their own queue,
+    # list_pending_manual_withdrawals, below.
     rows = await pool.fetch(
         """
         SELECT p.id, p.user_id, u.display_name, p.our_ref, p.amount, p.status, p.created_at,
@@ -789,7 +795,7 @@ async def list_pending_withdrawals(pool: asyncpg.Pool) -> list[dict[str, Any]]:
         FROM payments p
         JOIN users u ON u.id = p.user_id
         LEFT JOIN payment_methods pm ON pm.id = p.method_id
-        WHERE p.direction = 'out' AND p.status = 'review'
+        WHERE p.direction = 'out' AND p.status = 'review' AND p.provider != 'manual'
         ORDER BY p.created_at
         """
     )
@@ -841,8 +847,18 @@ async def approve_withdrawal_admin(
 ) -> bool:
     async with pool.acquire() as conn:
         async with conn.transaction():
+            # provider != 'manual': this function's whole point past the
+            # status flip is enqueue_payout() -> payout_worker.py's
+            # automatic dispatch, which calls provider.create_payout()
+            # on whatever single provider instance that worker was
+            # started with (Chapa, in production) -- calling that on a
+            # manual-marked payment would be a real cross-provider
+            # dispatch bug, not just a UI mismatch. Manual withdrawals
+            # go through approve_manual_withdrawal_admin instead, which
+            # never enqueues anything.
             row = await conn.fetchrow(
-                "SELECT our_ref, status FROM payments WHERE id = $1 AND direction = 'out' FOR UPDATE",
+                "SELECT our_ref, status FROM payments WHERE id = $1 AND direction = 'out' "
+                "AND provider != 'manual' FOR UPDATE",
                 payment_id,
             )
             if row is None or row["status"] != "review":
@@ -1062,6 +1078,226 @@ async def reject_manual_deposit_admin(
 
     await notify_user(
         pool, redis, user_id=user_id, key="notify.manual_deposit_rejected", amount=str(amount), reason=reason
+    )
+    return True
+
+
+# --- Manual withdrawals ------------------------------------------------
+#
+# A manual withdrawal reaches 'review' via request_withdrawal's own
+# force_review=True (see services/payments/withdrawals.py) -- the exact
+# same fund-locking/KYC/velocity/chargeback-window gates an automatic
+# withdrawal runs, unmodified. From there it needs a real two-checkpoint
+# admin flow, not one action: sending a real bank/Telebirr transfer is
+# never instantaneous the way an API call is, so there's a genuine gap
+# between "we decided to pay this" (approved) and "we have a reference
+# number for the transfer we actually sent" (settled) that needs to stay
+# visible, mirroring the automatic rail's own 'approved' checkpoint
+# before payout_worker.py ever dispatches anything.
+#
+# reject_withdrawal_admin (above) is reused UNCHANGED for the
+# review -> rejected path -- its guard query has no provider filter, so
+# it already reverses a manual withdrawal's lock correctly today; writing
+# a second, parallel reject function here would just be a fork waiting to
+# drift from it.
+
+
+async def list_pending_manual_withdrawals(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+    rows = await pool.fetch(
+        """
+        SELECT p.id, p.user_id, u.display_name, u.kyc_level, p.our_ref, p.amount, p.status,
+               p.created_at, p.review_reason, pm.kind AS method_kind, pm.account_ref, pm.holder_name,
+               (
+                 SELECT count(*) FROM payments p2
+                 WHERE p2.user_id = p.user_id AND p2.direction = 'out' AND p2.status = 'succeeded'
+               ) AS prior_successful_withdrawals
+        FROM payments p
+        JOIN users u ON u.id = p.user_id
+        LEFT JOIN payment_methods pm ON pm.id = p.method_id
+        WHERE p.direction = 'out' AND p.status = 'review' AND p.provider = 'manual'
+        ORDER BY p.created_at
+        """
+    )
+    return [dict(r) for r in rows]
+
+
+async def list_manual_withdrawals_awaiting_settlement(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+    rows = await pool.fetch(
+        """
+        SELECT p.id, p.user_id, u.display_name, p.our_ref, p.amount, p.status, p.created_at,
+               pm.kind AS method_kind, pm.account_ref, pm.holder_name
+        FROM payments p
+        JOIN users u ON u.id = p.user_id
+        LEFT JOIN payment_methods pm ON pm.id = p.method_id
+        WHERE p.direction = 'out' AND p.status = 'approved' AND p.provider = 'manual'
+        ORDER BY p.created_at
+        """
+    )
+    return [dict(r) for r in rows]
+
+
+async def approve_manual_withdrawal_admin(
+    pool: asyncpg.Pool,
+    redis: Redis,
+    *,
+    admin_id: int,
+    payment_id: int,
+    reason: str | None,
+    ip_address: str | None,
+) -> bool:
+    """review -> approved. No ledger call -- funds are already locked
+    from request_withdrawal() itself; this just records the decision to
+    actually send the transfer. Deliberately does NOT call enqueue_payout
+    -- there is no automatic dispatch for the manual rail, an admin
+    settles it by hand via settle_manual_withdrawal_admin once the
+    transfer has genuinely gone out.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT status FROM payments WHERE id = $1 AND direction = 'out' AND provider = 'manual' "
+                "FOR UPDATE",
+                payment_id,
+            )
+            if row is None or row["status"] != "review":
+                return False
+            await conn.execute(
+                "UPDATE payments SET status = 'approved', updated_at = now() WHERE id = $1", payment_id
+            )
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="manual_withdrawals.approve",
+                target_type="payment",
+                target_id=str(payment_id),
+                before={"status": "review"},
+                after={"status": "approved"},
+                reason=reason,
+                ip_address=ip_address,
+            )
+    return True
+
+
+async def settle_manual_withdrawal_admin(
+    pool: asyncpg.Pool,
+    redis: Redis,
+    *,
+    admin_id: int,
+    payment_id: int,
+    external_reference: str,
+    reason: str | None,
+    ip_address: str | None,
+) -> bool:
+    """approved -> succeeded, once an admin has actually sent the
+    transfer externally and has a real reference for it. Same ledger
+    shape as payout_worker.py's own _settle_success(): locked -amount,
+    provider_settlement +amount.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT user_id, amount, our_ref, status FROM payments "
+                "WHERE id = $1 AND direction = 'out' AND provider = 'manual' FOR UPDATE",
+                payment_id,
+            )
+            if row is None or row["status"] != "approved":
+                return False
+
+            locked = await ledger.get_or_create_account(conn, row["user_id"], "user_locked")
+            provider_account = await ledger.get_or_create_account(conn, None, "provider_settlement")
+            txn = await ledger.post(
+                conn,
+                "payout",
+                [ledger.Entry(locked.id, -row["amount"]), ledger.Entry(provider_account.id, row["amount"])],
+                idempotency_key=f"manual-payout-settle-{row['our_ref']}",
+                payment_id=payment_id,
+            )
+            await conn.execute(
+                "UPDATE payments SET status = 'succeeded', provider_ref = $2, ledger_txn_id = $3, "
+                "updated_at = now() WHERE id = $1",
+                payment_id,
+                external_reference,
+                txn.id,
+            )
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="manual_withdrawals.settle",
+                target_type="payment",
+                target_id=str(payment_id),
+                before={"status": "approved"},
+                after={"status": "succeeded", "provider_ref": external_reference},
+                reason=reason,
+                ip_address=ip_address,
+            )
+            user_id = row["user_id"]
+            amount = row["amount"]
+        metrics.ledger_transactions_total.labels(kind=txn.kind).inc()
+        await ledger.publish_balance_update(pool, redis, user_id)
+
+    await notify_user(
+        pool, redis, user_id=user_id, key="notify.withdrawal_succeeded", amount=str(amount)
+    )
+    return True
+
+
+async def fail_manual_withdrawal_admin(
+    pool: asyncpg.Pool,
+    redis: Redis,
+    *,
+    admin_id: int,
+    payment_id: int,
+    reason: str,
+    ip_address: str | None,
+) -> bool:
+    """approved -> failed: the escape hatch for a transfer that turns out
+    undeliverable after approval (bad destination discovered too late,
+    etc). Same ledger shape as payout_worker.py's own _reverse(): reverses
+    the lock back to spendable cash, exactly like an automatic payout
+    that failed at the provider.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT user_id, amount, our_ref, status FROM payments "
+                "WHERE id = $1 AND direction = 'out' AND provider = 'manual' FOR UPDATE",
+                payment_id,
+            )
+            if row is None or row["status"] != "approved":
+                return False
+
+            locked = await ledger.get_or_create_account(conn, row["user_id"], "user_locked")
+            cash = await ledger.get_or_create_account(conn, row["user_id"], "user_cash")
+            txn = await ledger.post(
+                conn,
+                "refund",
+                [ledger.Entry(locked.id, -row["amount"]), ledger.Entry(cash.id, row["amount"])],
+                idempotency_key=f"manual-payout-fail-{payment_id}",
+                payment_id=payment_id,
+            )
+            await conn.execute(
+                "UPDATE payments SET status = 'failed', failure_reason = $2, updated_at = now() WHERE id = $1",
+                payment_id,
+                reason,
+            )
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="manual_withdrawals.fail",
+                target_type="payment",
+                target_id=str(payment_id),
+                before={"status": "approved"},
+                after={"status": "failed"},
+                reason=reason,
+                ip_address=ip_address,
+            )
+            user_id = row["user_id"]
+            amount = row["amount"]
+        metrics.ledger_transactions_total.labels(kind=txn.kind).inc()
+        await ledger.publish_balance_update(pool, redis, user_id)
+
+    await notify_user(
+        pool, redis, user_id=user_id, key="notify.withdrawal_failed", amount=str(amount)
     )
     return True
 

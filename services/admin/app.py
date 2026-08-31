@@ -504,6 +504,88 @@ async def get_manual_deposit_receipt(
     return Response(content=photo_resp.content, media_type="image/jpeg")
 
 
+# --- manual withdrawals ----------------------------------------------------
+
+
+@app.get("/manual-withdrawals")
+async def list_pending_manual_withdrawals(
+    admin: Annotated[AdminSession, Depends(require("payments:view"))],
+) -> list[dict[str, Any]]:
+    return await queries.list_pending_manual_withdrawals(app.state.pool)
+
+
+@app.get("/manual-withdrawals/awaiting-settlement")
+async def list_manual_withdrawals_awaiting_settlement(
+    admin: Annotated[AdminSession, Depends(require("payments:view"))],
+) -> list[dict[str, Any]]:
+    return await queries.list_manual_withdrawals_awaiting_settlement(app.state.pool)
+
+
+@app.post("/manual-withdrawals/{payment_id}/approve")
+async def approve_manual_withdrawal(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("payments:approve"))],
+    payment_id: int,
+    body: ManualPaymentDecisionRequest,
+) -> dict[str, bool]:
+    _require_reason(body.reason)
+    approved = await queries.approve_manual_withdrawal_admin(
+        app.state.pool,
+        app.state.redis,
+        admin_id=admin.admin_id,
+        payment_id=payment_id,
+        reason=body.reason,
+        ip_address=_client_ip(request),
+    )
+    return {"approved": approved}
+
+
+class SettleManualWithdrawalRequest(BaseModel):
+    external_reference: str
+    reason: str
+
+
+@app.post("/manual-withdrawals/{payment_id}/settle")
+async def settle_manual_withdrawal(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("payments:approve"))],
+    payment_id: int,
+    body: SettleManualWithdrawalRequest,
+) -> dict[str, bool]:
+    _require_reason(body.reason)
+    if not body.external_reference.strip():
+        raise HTTPException(status_code=422, detail="external_reference is required")
+    settled = await queries.settle_manual_withdrawal_admin(
+        app.state.pool,
+        app.state.redis,
+        admin_id=admin.admin_id,
+        payment_id=payment_id,
+        external_reference=body.external_reference,
+        reason=body.reason,
+        ip_address=_client_ip(request),
+    )
+    return {"settled": settled}
+
+
+@app.post("/manual-withdrawals/{payment_id}/fail")
+async def fail_manual_withdrawal(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("payments:approve"))],
+    payment_id: int,
+    body: ManualPaymentDecisionRequest,
+) -> dict[str, bool]:
+    _require_reason(body.reason)
+    failed = await queries.fail_manual_withdrawal_admin(
+        app.state.pool,
+        app.state.redis,
+        admin_id=admin.admin_id,
+        payment_id=payment_id,
+        reason=body.reason,
+        ip_address=_client_ip(request),
+    )
+    return {"failed": failed}
+
+
 # --- rooms ---------------------------------------------------------------
 
 

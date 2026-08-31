@@ -5,6 +5,82 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-31 — Manual payment subsystem, Stage 3: manual withdrawals
+
+Third stage of the P1 manual-payment directive (Stage 1: schema/
+foundation; Stage 2: manual deposits). This stage makes manual
+withdrawals real at the domain/admin-backend layer, plus two safety
+guards the design surfaced along the way.
+
+**`services/payments/withdrawals.py`**: `request_withdrawal()` gains one
+backward-compatible parameter, `force_review: bool = False`. When true,
+`failed_checks` is still computed (so `review_reason` stays informative)
+but `status` always lands on `'review'` regardless of the auto-approve
+checks -- a manual rail has no automated dispatch to gate in the first
+place, a human must act on every single request either way. Every
+existing validation (KYC threshold, chargeback window, velocity,
+fund-locking) is inherited unchanged; confirmed via the full existing
+`test_payments_withdrawals.py`/`test_admin_withdrawals.py`/
+`test_payout_worker.py` suite (39 tests) passing with zero modifications.
+
+**Two-checkpoint admin flow** (`services/admin/queries.py`):
+`approve_manual_withdrawal_admin()` (`review`→`approved`, no ledger call
+-- funds are already locked from the request itself) and
+`settle_manual_withdrawal_admin()` (`approved`→`succeeded`, same ledger
+shape as `payout_worker.py`'s own `_settle_success()`, keyed
+`f"manual-payout-settle-{our_ref}"`), plus `fail_manual_withdrawal_admin()`
+as the escape hatch for a transfer that turns out undeliverable after
+approval (same shape as `_reverse()`). This mirrors the real-world gap a
+one-action design would have hidden: sending an actual bank/Telebirr
+transfer takes real, unpredictable time, so there needs to be a visible,
+audited state for "we decided to pay this" distinct from "we have a
+reference number for the transfer we actually sent" -- the same
+`approved` checkpoint the automatic rail already has before
+`payout_worker.py` ever dispatches anything.
+
+`reject_withdrawal_admin` (existing) needed **zero changes** for the
+`review`→`rejected` path -- its guard query never filtered by provider,
+so it already reverses a manual withdrawal's lock correctly; confirmed
+by a new test exercising it unmodified against a manual row rather than
+writing a parallel function that could drift from it.
+
+**Two safety guards this stage's own design surfaced, not explicitly
+requested but necessary**: (1) `approve_withdrawal_admin`'s guard query
+now excludes `provider = 'manual'` -- that function's real job past the
+status flip is `enqueue_payout()`, dispatching to
+`payout_worker.py`'s *single*, Chapa-wired provider instance;
+letting it touch a manual row would have been a genuine cross-provider
+dispatch bug, not just a UI mismatch. (2) `payout_worker.process_one()`
+gained a defense-in-depth check that skips (and logs
+`payout_provider_mismatch`) any job whose `payments.provider` doesn't
+match the worker's own wired provider, in case a mismatched row ever
+reaches the stream despite guard (1). `list_pending_withdrawals()` also
+now excludes manual rows (`list_pending_manual_withdrawals()` is the
+dedicated queue for those), so the existing Payments screen's Approve
+button can never be pointed at a request it can't safely process.
+
+**Verification**: mypy clean. 13 new tests in
+`test_payments_manual_withdrawals.py`, including a 20-way concurrent
+double-settlement race (exactly one payout, locked balance reaches
+exactly zero), a post-commit-retry no-op test, and direct tests of both
+new safety guards (the general approve route refusing a manual row, and
+the payout worker refusing a provider-mismatched job without ever
+calling `create_payout()`). All 13 confirmed to genuinely fail against
+the pre-Stage-3 tree via `git stash`. Full clean-slate rebuild: `docker
+compose down -v` → `up -d` → fresh `alembic upgrade head` (all 13
+migrations apply cleanly in order) → mypy clean → `pytest tests/` → 855
+passed, 0 failed (the Stage 1/2 `retention_cohorts` date-boundary flake
+did not reproduce this run -- real elapsed wall-clock time moved past
+whatever boundary triggered it) → `-m chaos_infra` 2 passed → `-m e2e`
+19 passed (one gameplay-flow test failed on the first pass with a wrong
+balance, confirmed as the same real-host-contention flake pattern
+documented throughout this session by rerunning it alone, clean, then
+rerunning the full e2e suite, clean) → `-m load`'s two latency-budget
+tests failed again under the same already-documented shared-CPU
+contention, unrelated to this change (no gateway/fanout code touched).
+
+---
+
 ## 2026-08-31 — Manual payment subsystem, Stage 2: manual deposits
 
 Second stage of the P1 manual-payment directive (see Stage 1 above for

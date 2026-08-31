@@ -93,6 +93,7 @@ async def request_withdrawal(
     chargeback_window_minutes: int,
     min_account_age_hours: float = 24.0,
     max_withdrawals_per_day: int = 3,
+    force_review: bool = False,
 ) -> WithdrawalIntent:
     # One span for the whole request -- the withdrawal path spec section
     # 10.4 asks traced "end to end" starts here, not just at the point a
@@ -232,8 +233,19 @@ async def request_withdrawal(
                         f"(max {max_withdrawals_per_day})"
                     )
 
-                auto_ok = not failed_checks
+                # force_review=True (the manual rail -- see
+                # services/payments/manual_provider.py) always lands in
+                # review regardless of these checks: a manual withdrawal
+                # has no automated dispatch to gate in the first place, a
+                # human must act on every single one. failed_checks is
+                # still computed and folded into review_reason even then
+                # -- an admin working a manual-withdrawal queue should be
+                # able to tell it's *also* high-risk on top of just being
+                # manual, not see a blank reason.
+                auto_ok = not failed_checks and not force_review
                 status = STATUS_APPROVED if auto_ok else STATUS_REVIEW
+                if force_review:
+                    failed_checks = [*failed_checks, "manual rail requires human settlement"]
                 review_reason = "; ".join(failed_checks) if failed_checks else None
                 span.set_attribute("withdrawal.status", status)
                 # A code-review pass caught that review_reason (added
