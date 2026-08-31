@@ -26,6 +26,14 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     "audit:view": frozenset({"superadmin"}),
     "payments:view": frozenset({"support", "finance", "ops", "superadmin"}),
     "payments:approve": frozenset({"finance", "superadmin"}),
+    # Narrower than payments:approve on purpose: approving one payment
+    # bounds the blast radius of a bad call to that one request, but
+    # toggling which rail is live or editing where manual deposits get
+    # paid into changes behavior for every player at once -- the single
+    # highest-leverage lever a compromised/rogue admin account could
+    # pull (e.g. quietly redirecting the manual-deposit destination to a
+    # personal account).
+    "payments:configure": frozenset({"superadmin"}),
     # Same roles as rounds:void, not reports:view -- reading the risk
     # screen is an investigation tool for the roles who'd act on what it
     # shows (ops handles collusion/room abuse, finance handles payout

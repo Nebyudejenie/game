@@ -657,6 +657,109 @@ async def update_room(
     return {"updated": updated}
 
 
+# --- manual payment configuration (payments:configure -- superadmin only,
+# see rbac.py's own comment on why this is narrower than payments:approve) --
+
+
+@app.get("/manual-payment-destinations")
+async def list_manual_payment_destinations(
+    admin: Annotated[AdminSession, Depends(require("payments:view"))],
+) -> list[dict[str, Any]]:
+    # view-only listing stays at the normal payments:view level (an
+    # ops/support admin looking at a manual deposit in review needs to
+    # see which destination it was paid into); only creating/editing a
+    # destination needs payments:configure.
+    return await queries.list_manual_payment_destinations(app.state.pool)
+
+
+class CreateManualPaymentDestinationRequest(BaseModel):
+    method_kind: str
+    account_ref: str
+    account_name: str
+    instructions: str | None = None
+
+
+@app.post("/manual-payment-destinations")
+async def create_manual_payment_destination(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("payments:configure"))],
+    body: CreateManualPaymentDestinationRequest,
+) -> dict[str, int]:
+    destination_id = await queries.create_manual_payment_destination_admin(
+        app.state.pool,
+        admin_id=admin.admin_id,
+        method_kind=body.method_kind,
+        account_ref=body.account_ref,
+        account_name=body.account_name,
+        instructions=body.instructions,
+        ip_address=_client_ip(request),
+    )
+    return {"id": destination_id}
+
+
+class UpdateManualPaymentDestinationRequest(BaseModel):
+    changes: dict[str, Any]
+    reason: str | None = None
+
+
+@app.patch("/manual-payment-destinations/{destination_id}")
+async def update_manual_payment_destination(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("payments:configure"))],
+    destination_id: int,
+    body: UpdateManualPaymentDestinationRequest,
+) -> dict[str, bool]:
+    try:
+        updated = await queries.update_manual_payment_destination_admin(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            destination_id=destination_id,
+            changes=body.changes,
+            reason=body.reason,
+            ip_address=_client_ip(request),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail="destination not found")
+    return {"updated": updated}
+
+
+@app.get("/payment-provider-availability")
+async def get_payment_provider_availability(
+    admin: Annotated[AdminSession, Depends(require("payments:view"))],
+) -> list[dict[str, Any]]:
+    return await queries.get_payment_provider_availability(app.state.pool)
+
+
+class SetPaymentProviderAvailabilityRequest(BaseModel):
+    enabled: bool
+    reason: str
+
+
+@app.patch("/payment-provider-availability/{provider}/{direction}")
+async def set_payment_provider_availability(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("payments:configure"))],
+    provider: str,
+    direction: str,
+    body: SetPaymentProviderAvailabilityRequest,
+) -> dict[str, bool]:
+    _require_reason(body.reason)
+    updated = await queries.set_payment_provider_availability_admin(
+        app.state.pool,
+        admin_id=admin.admin_id,
+        provider=provider,
+        direction=direction,
+        enabled=body.enabled,
+        reason=body.reason,
+        ip_address=_client_ip(request),
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="unknown provider/direction")
+    return {"updated": updated}
+
+
 # --- reports ---------------------------------------------------------------
 
 

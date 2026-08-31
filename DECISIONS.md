@@ -5,6 +5,78 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-31 — Manual payment subsystem, Stage 4: admin console frontend + payment configuration
+
+Fourth stage of the P1 manual-payment directive. This stage gives
+admins real screens for everything Stages 2-3 built, plus the two
+genuinely new admin-configuration concerns the product directive asked
+for: which company accounts manual deposits get paid into, and which
+provider/direction combinations are currently live.
+
+**New permission** (`services/admin/rbac.py`): `payments:configure`,
+scoped to `superadmin` only -- narrower than `payments:approve` on
+purpose. Approving one payment bounds a bad call to that one request;
+toggling which rail is live or editing where manual deposits get paid
+into changes behavior for every player at once, the single
+highest-leverage lever a compromised/rogue admin account could pull
+(e.g. quietly redirecting the manual-deposit destination to a personal
+account). Viewing either configuration screen stays at the ordinary
+`payments:view` level (all four roles) -- an ops/support admin looking
+at a deposit in review still needs to see which destination it was
+paid into; only *creating or editing* a destination, or *toggling*
+availability, needs the tighter permission.
+
+**Backend** (`services/admin/queries.py` + `app.py`):
+`list_manual_payment_destinations`/`create_manual_payment_destination_
+admin`/`update_manual_payment_destination_admin` follow the identical
+diff-before-audit shape `update_room_admin` already established (only
+changed fields recorded, before/after values on the audit row);
+`get_payment_provider_availability`/`set_payment_provider_availability_
+admin` are a straightforward row-locked toggle-with-audit over the
+Stage 1 `payment_provider_availability` table. New routes:
+`GET/POST /manual-payment-destinations`, `PATCH /manual-payment-
+destinations/{id}`, `GET /payment-provider-availability`,
+`PATCH /payment-provider-availability/{provider}/{direction}`.
+
+**Frontend** (`web/admin/js/screens/`): four new screen modules --
+`manual_deposits.js` and `manual_withdrawals.js` reuse the existing
+withdrawal-review screen's button + `window.prompt()` + `toast()` +
+`reload()` interaction pattern exactly (the withdrawals screen splits
+into two live sections: Pending, needing Approve, and Awaiting
+Settlement, needing a real external reference before Settle); the
+manual-deposits list surfaces the live `possible_duplicate_reference`
+flag from Stage 2 as a badge, and a receipt link when a photo was
+attached. `payment_destinations.js` follows `rooms.js`'s more recent
+inline-panel + `FormData`-diff-before-submit convention (the
+established pattern for real multi-field admin forms). All four
+registered in `app.js`'s `SCREENS`; none need a `SCREEN_VIEW_ROLES`
+entry since their view permission (`payments:view`) is already granted
+to every role, matching `payments`/`rooms`'s own existing precedent.
+
+**Verification**: mypy clean. All five new JS files syntax-checked with
+`node --check`. 8 new backend tests in `test_payment_availability.py`
+(seeded-default assertions matching the product directive's own launch
+principle -- Chapa + Manual live, SantimPay/ArifPay off --, audit-row
+checks, and the `payments:configure` RBAC boundary over real HTTP). 4
+new real-browser Playwright tests in
+`test_admin_manual_payments_e2e.py`: a superadmin creating a
+destination and toggling availability, and -- the ones that actually
+matter -- a finance admin approving a manual deposit and a finance
+admin running the full approve-then-settle manual-withdrawal flow, both
+through the literal UI (clicks and `window.prompt()` dialogs, not the
+API directly) with real database state asserted afterward. All 12 new
+tests confirmed to genuinely fail against the pre-Stage-4 tree via `git
+stash` (the 4 e2e tests correctly timed out waiting for nav buttons
+that didn't exist yet). Full clean-slate rebuild: fresh `alembic
+upgrade head` (14 migrations) → mypy clean → `pytest tests/` → 863
+passed, 0 failed → `-m e2e` 23 passed (including all 4 new + all
+existing miniapp/admin-console browser tests) → `-m chaos_infra` 2
+passed → `-m load`'s two latency-budget tests failed again under the
+same already-documented shared-CPU contention, unrelated to this
+change (no gateway/fanout code touched).
+
+---
+
 ## 2026-08-31 — Manual payment subsystem, Stage 3: manual withdrawals
 
 Third stage of the P1 manual-payment directive (Stage 1: schema/

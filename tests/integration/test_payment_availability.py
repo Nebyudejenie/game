@@ -1,0 +1,164 @@
+"""Admin-controlled payment configuration: which company destinations
+manual deposits get paid into (manual_payment_destinations) and which
+provider/direction combinations are currently live
+(payment_provider_availability). Both are payments:configure-gated
+(superadmin only -- narrower than payments:approve, see rbac.py's own
+comment on why).
+"""
+
+import httpx
+
+from services.admin import queries
+from tests.integration.test_admin_app import _auth_headers
+from tests.integration.test_admin_auth import create_test_admin
+
+
+async def test_seeded_availability_matches_the_launch_principle_chapa_plus_manual(pool):
+    # "The product must be able to launch with ONE AUTOMATIC PROVIDER +
+    # MANUAL FALLBACK" -- the migration seeds exactly this, not four
+    # providers all live from day one.
+    rows = await queries.get_payment_provider_availability(pool)
+    by_key = {(r["provider"], r["direction"]): r["enabled"] for r in rows}
+    assert by_key[("chapa", "in")] is True
+    assert by_key[("chapa", "out")] is True
+    assert by_key[("manual", "in")] is True
+    assert by_key[("manual", "out")] is True
+    assert by_key[("santimpay", "in")] is False
+    assert by_key[("santimpay", "out")] is False
+    assert by_key[("arifpay", "in")] is False
+    assert by_key[("arifpay", "out")] is False
+
+
+async def test_set_availability_writes_an_audit_row(pool, conn):
+    admin_id, *_ = await create_test_admin(pool)
+
+    updated = await queries.set_payment_provider_availability_admin(
+        pool, admin_id=admin_id, provider="santimpay", direction="in", enabled=True,
+        reason="SantimPay integration approved for launch", ip_address="10.0.0.1",
+    )
+    assert updated is True
+
+    rows = await queries.get_payment_provider_availability(pool)
+    match = next(r for r in rows if r["provider"] == "santimpay" and r["direction"] == "in")
+    assert match["enabled"] is True
+
+    audit_row = await conn.fetchrow(
+        "SELECT action, before, after, reason FROM admin_audit_log "
+        "WHERE target_type = 'payment_provider_availability' AND target_id = 'santimpay:in' "
+        "ORDER BY id DESC LIMIT 1"
+    )
+    assert audit_row["action"] == "payment_provider_availability.set"
+    assert audit_row["reason"] == "SantimPay integration approved for launch"
+
+    # Restore -- this table is shared, session-wide state, not per-test data.
+    await queries.set_payment_provider_availability_admin(
+        pool, admin_id=admin_id, provider="santimpay", direction="in", enabled=False,
+        reason="test cleanup", ip_address="10.0.0.1",
+    )
+
+
+async def test_set_availability_rejects_an_unknown_provider_direction_pair(pool):
+    admin_id, *_ = await create_test_admin(pool)
+    updated = await queries.set_payment_provider_availability_admin(
+        pool, admin_id=admin_id, provider="chapa", direction="sideways", enabled=True,
+        reason="nonsense", ip_address="10.0.0.1",
+    )
+    assert updated is False
+
+
+async def test_create_and_update_manual_payment_destination(pool, conn):
+    admin_id, *_ = await create_test_admin(pool)
+
+    destination_id = await queries.create_manual_payment_destination_admin(
+        pool, admin_id=admin_id, method_kind="cbe_birr", account_ref="1000123456789",
+        account_name="Jo Bingo PLC", instructions="Reference your Jo Bingo user id in the memo",
+        ip_address="10.0.0.1",
+    )
+    assert isinstance(destination_id, int)
+
+    rows = await queries.list_manual_payment_destinations(pool)
+    match = next(r for r in rows if r["id"] == destination_id)
+    assert match["method_kind"] == "cbe_birr"
+    assert match["account_ref"] == "1000123456789"
+    assert match["is_active"] is True
+
+    updated = await queries.update_manual_payment_destination_admin(
+        pool, admin_id=admin_id, destination_id=destination_id, changes={"is_active": False},
+        reason="account closed", ip_address="10.0.0.1",
+    )
+    assert updated is True
+
+    rows_after = await queries.list_manual_payment_destinations(pool)
+    match_after = next(r for r in rows_after if r["id"] == destination_id)
+    assert match_after["is_active"] is False
+
+    audit_row = await conn.fetchrow(
+        "SELECT action, reason FROM admin_audit_log WHERE target_type = 'manual_payment_destination' "
+        "AND target_id = $1 ORDER BY id DESC LIMIT 1",
+        str(destination_id),
+    )
+    assert audit_row["action"] == "manual_payment_destinations.update"
+    assert audit_row["reason"] == "account closed"
+
+
+async def test_update_destination_rejects_an_unknown_field(pool):
+    admin_id, *_ = await create_test_admin(pool)
+    destination_id = await queries.create_manual_payment_destination_admin(
+        pool, admin_id=admin_id, method_kind="telebirr", account_ref="0911000000",
+        account_name="Jo Bingo PLC", instructions=None, ip_address="10.0.0.1",
+    )
+    try:
+        await queries.update_manual_payment_destination_admin(
+            pool, admin_id=admin_id, destination_id=destination_id, changes={"secret_key": "nope"},
+            reason="x", ip_address="10.0.0.1",
+        )
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+
+
+async def test_finance_can_view_but_not_configure_payment_availability_over_http(admin_server, pool):
+    finance_headers = await _auth_headers(admin_server, pool, role="finance")
+
+    async with httpx.AsyncClient() as client:
+        view_response = await client.get(f"{admin_server}/payment-provider-availability", headers=finance_headers)
+        assert view_response.status_code == 200
+
+        configure_response = await client.patch(
+            f"{admin_server}/payment-provider-availability/chapa/in",
+            headers=finance_headers,
+            json={"enabled": False, "reason": "testing"},
+        )
+    assert configure_response.status_code == 403
+
+
+async def test_superadmin_can_configure_payment_availability_over_http(admin_server, pool):
+    headers = await _auth_headers(admin_server, pool, role="superadmin")
+
+    async with httpx.AsyncClient() as client:
+        response = await client.patch(
+            f"{admin_server}/payment-provider-availability/arifpay/in",
+            headers=headers,
+            json={"enabled": True, "reason": "approved for a market pilot"},
+        )
+        assert response.status_code == 200
+        assert response.json()["updated"] is True
+
+        # Restore -- shared, session-wide state.
+        await client.patch(
+            f"{admin_server}/payment-provider-availability/arifpay/in",
+            headers=headers,
+            json={"enabled": False, "reason": "test cleanup"},
+        )
+
+
+async def test_finance_cannot_create_manual_payment_destinations_over_http(admin_server, pool):
+    headers = await _auth_headers(admin_server, pool, role="finance")
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{admin_server}/manual-payment-destinations",
+            headers=headers,
+            json={"method_kind": "telebirr", "account_ref": "0911000000", "account_name": "Jo Bingo PLC"},
+        )
+    assert response.status_code == 403

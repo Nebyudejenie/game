@@ -713,6 +713,167 @@ async def update_room_admin(
     return True
 
 
+# --- Manual payment configuration (payments:configure only -- narrower
+# than payments:approve, since these two functions change behavior
+# platform-wide rather than one payment at a time: which destination
+# manual deposits get paid into, and which rails are live at all. The
+# single highest-leverage lever a compromised/rogue admin account could
+# pull, so it's scoped tighter than approving one request.) -----------
+
+
+async def list_manual_payment_destinations(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+    rows = await pool.fetch(
+        "SELECT id, method_kind, account_ref, account_name, instructions, is_active, "
+        "created_at, updated_at FROM manual_payment_destinations ORDER BY method_kind, id"
+    )
+    return [dict(r) for r in rows]
+
+
+async def create_manual_payment_destination_admin(
+    pool: asyncpg.Pool,
+    *,
+    admin_id: int,
+    method_kind: str,
+    account_ref: str,
+    account_name: str,
+    instructions: str | None,
+    ip_address: str | None,
+) -> int:
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                INSERT INTO manual_payment_destinations
+                    (method_kind, account_ref, account_name, instructions, created_by_admin_id)
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING id
+                """,
+                method_kind,
+                account_ref,
+                account_name,
+                instructions,
+                admin_id,
+            )
+            assert row is not None
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="manual_payment_destinations.create",
+                target_type="manual_payment_destination",
+                target_id=str(row["id"]),
+                after={"method_kind": method_kind, "account_ref": account_ref, "account_name": account_name},
+                ip_address=ip_address,
+            )
+    return int(row["id"])
+
+
+_UPDATABLE_DESTINATION_FIELDS = {"method_kind", "account_ref", "account_name", "instructions", "is_active"}
+
+
+async def update_manual_payment_destination_admin(
+    pool: asyncpg.Pool,
+    *,
+    admin_id: int,
+    destination_id: int,
+    changes: dict[str, Any],
+    reason: str | None,
+    ip_address: str | None,
+) -> bool:
+    unknown = set(changes) - _UPDATABLE_DESTINATION_FIELDS
+    if unknown:
+        raise ValueError(f"not an editable destination field: {unknown}")
+    if not changes:
+        return False
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            before = await conn.fetchrow(
+                "SELECT * FROM manual_payment_destinations WHERE id = $1", destination_id
+            )
+            if before is None:
+                return False
+
+            set_clauses = []
+            values: list[Any] = []
+            for i, (field, value) in enumerate(changes.items(), start=1):
+                set_clauses.append(f"{field} = ${i}")
+                values.append(value)
+            values.append(destination_id)
+
+            await conn.execute(
+                f"UPDATE manual_payment_destinations SET {', '.join(set_clauses)}, updated_at = now() "
+                f"WHERE id = ${len(values)}",
+                *values,
+            )
+            after = await conn.fetchrow(
+                "SELECT * FROM manual_payment_destinations WHERE id = $1", destination_id
+            )
+
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="manual_payment_destinations.update",
+                target_type="manual_payment_destination",
+                target_id=str(destination_id),
+                before={k: str(before[k]) for k in changes},
+                after={k: str(after[k]) for k in changes} if after else None,
+                reason=reason,
+                ip_address=ip_address,
+            )
+    return True
+
+
+async def get_payment_provider_availability(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+    rows = await pool.fetch(
+        "SELECT provider, direction, enabled, updated_at FROM payment_provider_availability "
+        "ORDER BY provider, direction"
+    )
+    return [dict(r) for r in rows]
+
+
+async def set_payment_provider_availability_admin(
+    pool: asyncpg.Pool,
+    *,
+    admin_id: int,
+    provider: str,
+    direction: str,
+    enabled: bool,
+    reason: str | None,
+    ip_address: str | None,
+) -> bool:
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            before = await conn.fetchrow(
+                "SELECT enabled FROM payment_provider_availability WHERE provider = $1 AND direction = $2 "
+                "FOR UPDATE",
+                provider,
+                direction,
+            )
+            if before is None:
+                return False
+
+            await conn.execute(
+                "UPDATE payment_provider_availability SET enabled = $3, updated_by_admin_id = $4, "
+                "updated_at = now() WHERE provider = $1 AND direction = $2",
+                provider,
+                direction,
+                enabled,
+                admin_id,
+            )
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="payment_provider_availability.set",
+                target_type="payment_provider_availability",
+                target_id=f"{provider}:{direction}",
+                before={"enabled": before["enabled"]},
+                after={"enabled": enabled},
+                reason=reason,
+                ip_address=ip_address,
+            )
+    return True
+
+
 async def dashboard_summary(pool: asyncpg.Pool) -> dict[str, Any]:
     active_rounds = await pool.fetchval(
         "SELECT count(*) FROM rounds WHERE status IN ('lobby', 'running', 'settling')"

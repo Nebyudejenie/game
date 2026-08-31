@@ -4,6 +4,10 @@ import * as loginScreen from "./screens/login.js";
 import * as dashboardScreen from "./screens/dashboard.js";
 import * as usersScreen from "./screens/users.js";
 import * as paymentsScreen from "./screens/payments.js";
+import * as manualDepositsScreen from "./screens/manual_deposits.js";
+import * as manualWithdrawalsScreen from "./screens/manual_withdrawals.js";
+import * as paymentDestinationsScreen from "./screens/payment_destinations.js";
+import * as providerAvailabilityScreen from "./screens/provider_availability.js";
 import * as roundsScreen from "./screens/rounds.js";
 import * as roomsScreen from "./screens/rooms.js";
 import * as reportsScreen from "./screens/reports.js";
@@ -18,6 +22,10 @@ const SCREENS = {
   dashboard: dashboardScreen,
   users: usersScreen,
   payments: paymentsScreen,
+  manual_deposits: manualDepositsScreen,
+  manual_withdrawals: manualWithdrawalsScreen,
+  payment_destinations: paymentDestinationsScreen,
+  provider_availability: providerAvailabilityScreen,
   rounds: roundsScreen,
   rooms: roomsScreen,
   reports: reportsScreen,
