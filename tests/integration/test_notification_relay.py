@@ -14,7 +14,7 @@ from packages.core.notifications import NOTIFICATIONS_STREAM, notify_user
 from services.admin import queries as admin_queries
 from services.bot import notification_relay
 from services.bot.notifier import Notifier
-from services.payments import deposits, payout_worker, withdrawals
+from services.payments import deposits, manual, payout_worker, withdrawals
 from tests.integration.conftest import fund_user, next_telegram_id
 from tests.integration.test_admin_auth import create_test_admin
 from tests.integration.test_bot_handlers import make_bot
@@ -281,6 +281,55 @@ async def test_admin_rejected_withdrawal_notifies_with_the_reason(pool, redis, c
         assert len(session.sent) == 1
         assert "300.00" in session.sent[0].text
         assert "account under review" in session.sent[0].text
+    finally:
+        await notifier.stop()
+
+
+async def test_admin_rejected_manual_deposit_notifies_with_the_reason(pool, redis, conn):
+    # notify.manual_deposit_rejected is a key this session's own Stage 2
+    # work introduced -- this proves it actually resolves through a real
+    # Notifier delivery, not just that something landed on the Redis
+    # stream (which every other manual-deposit test already checked).
+    # Catches exactly the class of bug a missing/typo'd locale key would
+    # be: t()'s own contract is to raise on an unresolved key, so a
+    # broken key here would surface as this test failing loudly, not a
+    # silently dropped notification in production.
+    notifier, session = await _make_notifier()
+    try:
+        telegram_id = next_telegram_id()
+        user_id = await _register(conn, telegram_id)
+        destination_row = await conn.fetchrow(
+            "INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name) "
+            "VALUES ('telebirr', '0911000000', 'Jo Bingo PLC') RETURNING id"
+        )
+        intent = await manual.create_manual_deposit_request(
+            pool,
+            redis,
+            user_id=user_id,
+            amount=Decimal("75.00"),
+            manual_destination_id=destination_row["id"],
+            external_reference="FT-RELAY-TEST",
+            receipt_telegram_file_id=None,
+            min_deposit=Decimal("10.00"),
+            daily_cap=Decimal("50000.00"),
+        )
+
+        admin_id, *_ = await create_test_admin(pool)
+        rejected = await admin_queries.reject_manual_deposit_admin(
+            pool, redis, admin_id=admin_id, payment_id=intent.payment_id,
+            reason="reference did not match any statement line", ip_address=None,
+        )
+        assert rejected is True
+
+        delivered = await notification_relay.process_next(
+            pool, redis, notifier, consumer_name=f"test-{telegram_id}"
+        )
+        assert delivered is True
+        await asyncio.sleep(0.1)
+
+        assert len(session.sent) == 1
+        assert "75.00" in session.sent[0].text
+        assert "reference did not match any statement line" in session.sent[0].text
     finally:
         await notifier.stop()
 

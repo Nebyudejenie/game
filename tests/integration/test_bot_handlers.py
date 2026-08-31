@@ -16,12 +16,13 @@ from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.methods import TelegramMethod
 from aiogram.methods.send_message import SendMessage
-from aiogram.types import Chat, Contact, Message, TelegramObject, Update, User
+from aiogram.types import Chat, Contact, Message, PhotoSize, TelegramObject, Update, User
 
 from packages.core.config import Settings
 from packages.core.phone_crypto import decrypt_phone
 from services.bot.app import build_dispatcher
 from services.bot.notifier import Notifier
+from services.payments import manual
 from tests.integration.conftest import next_telegram_id
 
 # Randomized start, not itertools.count(1): update_ids feed the dedup
@@ -1100,3 +1101,64 @@ async def test_registered_user_sending_unrecognized_text_gets_no_reply(bot_ctx):
     await dp.feed_update(bot, make_text_update(telegram_id, "hello there"))
     await _settle()
     assert session.sent == []
+
+
+# --- manual deposit receipt photo (P1: keep taking deposits when the
+# automatic provider is unavailable) --------------------------------
+
+
+def make_photo_update(telegram_id: int, *, file_id: str, first_name: str = "Test") -> Update:
+    user = User(id=telegram_id, is_bot=False, first_name=first_name)
+    photo = [PhotoSize(file_id=file_id, file_unique_id=f"{file_id}-unique", width=90, height=90)]
+    message = Message(
+        message_id=next(_id_counter),
+        date=datetime.now(timezone.utc),
+        chat=Chat(id=telegram_id, type="private"),
+        from_user=user,
+        photo=photo,
+    )
+    return Update(update_id=next(_id_counter), message=message)
+
+
+async def test_photo_with_no_pending_manual_deposit_gets_a_clear_reply(pool, bot_ctx):
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+
+    await dp.feed_update(bot, make_photo_update(telegram_id, file_id="AgACAgQ-no-pending"))
+    await _settle()
+
+    assert len(session.sent) == 1
+    assert "pending" in session.sent[0].text or "ቀሪ" in session.sent[0].text
+
+
+async def test_photo_attaches_to_the_players_most_recent_pending_manual_deposit(pool, redis, bot_ctx, conn):
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+    user_id = await pool.fetchval("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+
+    destination_row = await conn.fetchrow(
+        "INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name) "
+        "VALUES ('telebirr', '0911000000', 'Jo Bingo PLC') RETURNING id"
+    )
+    intent = await manual.create_manual_deposit_request(
+        pool,
+        redis,
+        user_id=user_id,
+        amount=Decimal("120.00"),
+        manual_destination_id=destination_row["id"],
+        external_reference="FT-BOT-PHOTO",
+        receipt_telegram_file_id=None,
+        min_deposit=Decimal("10.00"),
+        daily_cap=Decimal("50000.00"),
+    )
+
+    await dp.feed_update(bot, make_photo_update(telegram_id, file_id="AgACAgQ-real-receipt"))
+    await _settle()
+
+    assert len(session.sent) == 1
+    assert "received" in session.sent[0].text or "ደርሷል" in session.sent[0].text
+
+    stored = await conn.fetchval(
+        "SELECT receipt_telegram_file_id FROM payments WHERE id = $1", intent.payment_id
+    )
+    assert stored == "AgACAgQ-real-receipt"

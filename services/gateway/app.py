@@ -29,8 +29,9 @@ from services.admin.queries import get_round_fairness
 from services.gateway import queries
 from services.gateway.connection import ConnectionHandler
 from services.gateway.fanout import FanoutHub
-from services.payments import deposits, withdrawals
+from services.payments import deposits, manual, withdrawals
 from services.payments.chapa import ChapaProvider
+from services.payments.manual_provider import ManualProvider
 
 # Anchored to this file's location, not the process's cwd -- the gateway
 # must serve the Mini App correctly regardless of the directory it's
@@ -143,6 +144,14 @@ async def api_round_fairness(
     return fairness
 
 
+@app.get("/api/manual-payment-destinations")
+async def api_manual_payment_destinations(
+    authorization: str = Header(default=""),
+) -> list[dict[str, Any]]:
+    await _authenticated_user_id(authorization)
+    return await queries.list_active_manual_payment_destinations(app.state.pool)
+
+
 # Every DepositRejected/WithdrawalRejected subclass maps to a short error
 # code the Mini App looks up its own translated message for -- the same
 # "distinct exception type, not a string reason" pattern
@@ -155,6 +164,7 @@ _DEPOSIT_ERROR_CODES: dict[type[Exception], str] = {
     deposits.DailyDepositCapExceeded: "daily_cap_exceeded",
     deposits.DepositorSelfExcluded: "self_excluded",
     deposits.DepositorCoolingOff: "cooling_off",
+    manual.UnknownManualDestination: "no_manual_destination",
 }
 _WITHDRAWAL_ERROR_CODES: dict[type[Exception], str] = {
     withdrawals.BelowMinimumWithdrawal: "below_minimum",
@@ -207,10 +217,52 @@ async def api_create_deposit(
     return {"checkout_url": intent.checkout_url, "our_ref": intent.our_ref}
 
 
+class ManualDepositRequest(BaseModel):
+    amount: str
+    manual_destination_id: int
+    external_reference: str
+
+
+@app.post("/api/deposit/manual")
+async def api_create_manual_deposit(
+    body: ManualDepositRequest, authorization: str = Header(default="")
+) -> dict[str, str]:
+    user_id = await _authenticated_user_id(authorization)
+    settings = get_settings()
+
+    try:
+        amount = Decimal(body.amount)
+    except InvalidOperation:
+        raise HTTPException(status_code=422, detail="invalid_amount") from None
+    if amount <= 0:
+        raise HTTPException(status_code=422, detail="invalid_amount")
+    if not body.external_reference.strip():
+        raise HTTPException(status_code=422, detail="external_reference_required")
+
+    try:
+        intent = await manual.create_manual_deposit_request(
+            app.state.pool,
+            app.state.redis,
+            user_id=user_id,
+            amount=amount,
+            manual_destination_id=body.manual_destination_id,
+            external_reference=body.external_reference,
+            receipt_telegram_file_id=None,
+            min_deposit=settings.min_deposit_etb,
+            daily_cap=settings.daily_deposit_cap_etb,
+        )
+    except deposits.DepositRejected as exc:
+        code = _DEPOSIT_ERROR_CODES.get(type(exc), "provider_error")
+        raise HTTPException(status_code=422, detail=code) from exc
+
+    return {"status": "review", "our_ref": intent.our_ref}
+
+
 class WithdrawRequest(BaseModel):
     amount: str
     account_ref: str
     holder_name: str
+    provider: str = "chapa"
 
 
 @app.post("/api/withdraw")
@@ -219,7 +271,10 @@ async def api_create_withdrawal(
 ) -> dict[str, str]:
     user_id = await _authenticated_user_id(authorization)
     settings = get_settings()
-    if app.state.chapa is None:
+
+    if body.provider not in ("chapa", "manual"):
+        raise HTTPException(status_code=422, detail="unknown_provider")
+    if body.provider == "chapa" and app.state.chapa is None:
         raise HTTPException(status_code=503, detail="withdrawals are not available yet")
 
     try:
@@ -229,11 +284,13 @@ async def api_create_withdrawal(
     if amount <= 0 or not body.account_ref.strip() or not body.holder_name.strip():
         raise HTTPException(status_code=422, detail="invalid_amount")
 
+    provider = ManualProvider() if body.provider == "manual" else app.state.chapa
+
     try:
         intent = await withdrawals.request_withdrawal(
             app.state.pool,
             app.state.redis,
-            app.state.chapa,
+            provider,
             user_id=user_id,
             amount=amount,
             method_kind=withdrawals.DEFAULT_METHOD_KIND,
@@ -244,6 +301,7 @@ async def api_create_withdrawal(
             kyc_threshold=settings.kyc_required_above_etb,
             chargeback_window_minutes=settings.withdraw_chargeback_window_minutes,
             max_withdrawals_per_day=settings.max_withdrawals_per_day,
+            force_review=(body.provider == "manual"),
         )
     except withdrawals.WithdrawalRejected as exc:
         code = _WITHDRAWAL_ERROR_CODES.get(type(exc), "unknown_error")

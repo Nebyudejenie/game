@@ -28,7 +28,7 @@ from services.bot.registration import (
     get_registered_user,
     register_from_contact,
 )
-from services.payments import deposits, withdrawals
+from services.payments import deposits, manual, withdrawals
 from services.payments.chapa import ChapaProvider
 
 router = Router(name="jobingo-bot")
@@ -516,6 +516,36 @@ async def cmd_change_username(
         "UPDATE users SET display_name = $1 WHERE telegram_id = $2", new_name, message.from_user.id
     )
     await notifier.send(message.chat.id, t("change_username.success", language, name=new_name))
+
+
+@router.message(F.photo)
+async def on_photo(message: Message, pool: asyncpg.Pool, notifier: Notifier) -> None:
+    """Optional receipt-proof mechanism for a manual deposit (P1: keep
+    taking deposits when Chapa is unavailable) -- Telegram-native, no new
+    object storage needed, since the photo already lives on Telegram's
+    own servers the moment it's sent here. No conversational state
+    required: correlates to whichever manual deposit request this player
+    most recently submitted that's still awaiting review with no receipt
+    attached yet (manual.attach_receipt_to_latest_pending_deposit).
+    Registered users only -- an unregistered sender has no deposit to
+    attach anything to in the first place.
+    """
+    assert message.from_user is not None and message.photo is not None
+    language = await _language_for(pool, message.from_user.id)
+    user = await get_registered_user(pool, message.from_user.id)
+    if user is None:
+        return
+
+    # Telegram sends the same photo at several resolutions; the last
+    # entry is always the highest-resolution one.
+    file_id = message.photo[-1].file_id
+    attached_to = await manual.attach_receipt_to_latest_pending_deposit(
+        pool, user_id=user.id, telegram_file_id=file_id
+    )
+    if attached_to is None:
+        await notifier.send(message.chat.id, t("manual_deposit.no_pending_request", language))
+        return
+    await notifier.send(message.chat.id, t("manual_deposit.receipt_received", language))
 
 
 @router.message(F.text)

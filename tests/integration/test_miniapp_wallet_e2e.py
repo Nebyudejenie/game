@@ -439,3 +439,106 @@ async def test_history_tab_filters_by_won_and_lost(gateway_server, browser, pool
 
     assert console_errors == [], f"JS errors during history filtering: {console_errors}"
     await page.close()
+
+
+async def test_manual_deposit_flow_submits_a_real_review_request(gateway_server, browser, pool, conn):
+    # P1: keep taking deposits when the automatic provider is
+    # unavailable. Deliberately doesn't touch gateway_app.state.chapa at
+    # all -- the manual rail is provider-independent by design (the whole
+    # point of this feature), so this proves the manual panel works
+    # regardless of Chapa's own state.
+    destination_row = await conn.fetchrow(
+        "INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name, instructions) "
+        "VALUES ('telebirr', '0911000000', 'Jo Bingo PLC', 'Reference your player id') RETURNING id"
+    )
+
+    telegram_id = next_telegram_id()
+    page, console_errors = await prepare_page(browser, telegram_id)
+    http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+    await page.goto(http_base + "/")
+    await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+    await page.wait_for_function(
+        "document.getElementById('balance-amount').textContent.includes('0.00')", timeout=10000
+    )
+    user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+    assert user_row is not None
+
+    await _open_wallet_tab(page, "deposit")
+    await page.click("#deposit-manual-toggle-btn")
+    await page.wait_for_selector("#deposit-manual-destination-select", timeout=10000)
+    # The dropdown lists every active destination (shared, session-wide
+    # data other tests also insert into), ordered by method_kind then id
+    # -- not necessarily this test's own newest row -- so select it
+    # explicitly rather than assuming it's the default option.
+    await page.select_option("#deposit-manual-destination-select", str(destination_row["id"]))
+
+    await page.fill("#deposit-manual-amount-input", "300")
+    await page.fill("#deposit-manual-reference-input", "FT-E2E-MINIAPP-1")
+    await page.click("#deposit-manual-submit-btn")
+
+    await page.wait_for_selector("#deposit-manual-status.success", timeout=10000)
+
+    row = await pool.fetchrow(
+        "SELECT status, provider, amount, provider_ref, manual_destination_id FROM payments "
+        "WHERE user_id = $1 ORDER BY id DESC LIMIT 1",
+        user_row["id"],
+    )
+    assert row["status"] == "review"
+    assert row["provider"] == "manual"
+    assert row["amount"] == Decimal("300.00")
+    assert row["provider_ref"] == "FT-E2E-MINIAPP-1"
+    assert row["manual_destination_id"] == destination_row["id"]
+
+    # No premature credit -- the whole point of "PENDING REVIEW".
+    balance_text = await page.text_content("#balance-amount")
+    assert balance_text and "0.00" in balance_text
+
+    assert console_errors == [], f"JS errors during manual deposit flow: {console_errors}"
+    await page.screenshot(path="/tmp/miniapp-manual-deposit.png")
+    await page.close()
+
+
+async def test_manual_withdraw_checkbox_forces_a_real_review_status(gateway_server, browser, pool, conn):
+    # Proves the checkbox actually changes server-side behavior, not just
+    # UI copy: a small amount that would normally auto-approve over the
+    # automatic rail must still land in 'review' with provider='manual'
+    # once the checkbox is checked -- a human must act on every manual
+    # withdrawal regardless of amount (see request_withdrawal's own
+    # force_review parameter).
+    telegram_id = next_telegram_id()
+    page, console_errors = await prepare_page(browser, telegram_id)
+    http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+    await page.goto(http_base + "/")
+    await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+    await page.wait_for_function(
+        "document.getElementById('balance-amount').textContent.includes('0.00')", timeout=10000
+    )
+
+    user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+    assert user_row is not None
+    await fund_user(conn, user_row["id"], Decimal("500.00"))
+
+    await _open_wallet_tab(page, "withdraw")
+    await page.fill("#withdraw-amount-input", "100")
+    await page.fill("#withdraw-account-input", "0911223344")
+    await page.fill("#withdraw-name-input", "Test Holder")
+    await page.check("#withdraw-manual-checkbox")
+    await page.click("#withdraw-submit-btn")
+
+    # data.status is always "review" for a force_review request (never
+    # "approved"), so wallet.withdraw_review is the only copy that can
+    # render here -- checked below via the real DB row instead of the
+    # rendered text, since the stub's language isn't pinned in this file
+    # the way test_miniapp_e2e.py's own stub pins "am".
+    await page.wait_for_selector("#withdraw-status.success", timeout=10000)
+    status_text = await page.text_content("#withdraw-status")
+    assert status_text and status_text.strip() != ""
+
+    row = await pool.fetchrow(
+        "SELECT status, provider FROM payments WHERE user_id = $1 ORDER BY id DESC LIMIT 1", user_row["id"]
+    )
+    assert row["status"] == "review"
+    assert row["provider"] == "manual"
+
+    assert console_errors == [], f"JS errors during manual withdraw flow: {console_errors}"
+    await page.close()

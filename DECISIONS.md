@@ -5,6 +5,96 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-31 — Manual payment subsystem, Stage 5: player-facing bot + Mini App UI
+
+Fifth stage of the P1 manual-payment directive. This is the first stage
+where a player can actually reach the manual rail themselves, not just
+an admin working a backend queue.
+
+**Gateway** (`services/gateway/app.py`/`queries.py`): `GET /api/manual-
+payment-destinations` (active destinations only, no admin bookkeeping
+columns -- a real player-facing/admin-facing data boundary, not the same
+query reused with a filter bolted on); `POST /api/deposit/manual`, same
+422/503 error-code convention as the existing `/api/deposit`; `POST
+/api/withdraw` gained an optional `provider: "chapa" | "manual"` field
+(default `"chapa"`, so every existing caller is unaffected) that swaps
+in a `ManualProvider()` and `force_review=True`.
+
+**Mini App**: the deposit pane gained a "Pay manually instead" toggle
+revealing a destination picker + reference-number field (a genuinely
+different flow, not a variant of the automatic form -- pick a
+destination, pay externally, come back with a reference); the withdraw
+pane gained a single checkbox, since manual withdrawal reuses the exact
+same fields the automatic form already collects. New `wallet.*` i18n
+keys landed in both `en.json` and `am.json` (key parity has no automated
+test for this catalog, unlike the bot's -- see below -- so this was
+checked by hand: real JSON validity plus the same real-browser e2e
+coverage that already exercises every other wallet flow).
+
+**Bot**: a new `@router.message(F.photo)` handler is the entire
+receipt-proof mechanism -- correlates an incoming photo to the player's
+own most recent manual deposit still awaiting review with no receipt
+yet, via one `UPDATE ... WHERE id = (SELECT ...)`. No conversational
+state needed: confirmed during Stage-1 planning that no aiogram FSM
+exists anywhere in this codebase, and building one just for this would
+have been a real, avoidable increase in surface area.
+
+**A real gap this stage caught and closed**: Stage 2's
+`reject_manual_deposit_admin()` already called `notify_user(...,
+key="notify.manual_deposit_rejected", ...)`, but that key was never
+actually added to `services/bot/locales/{en,am}.json` -- unlike the
+Mini App's own locale catalog, the *bot's* catalog has a real automated
+key-parity test (`test_am_and_en_have_matching_key_sets`), but that test
+only checks am/en agree with *each other*, not that every key any code
+path references actually exists in either file. `t()`'s own contract is
+to raise on an unresolved key, so any real manual-deposit rejection
+would have made `notification_relay.py`'s `process_one()` raise instead
+of delivering -- a real, if narrow, "one specific notification type
+silently never reaches the player" bug that had been sitting
+unnoticed since Stage 2 because every existing Stage 2 test only checked
+the Redis stream received *an* entry, never that a real `Notifier`
+could actually resolve and deliver it. Fixed by adding the key (plus
+`manual_deposit.receipt_received`/`manual_deposit.no_pending_request`
+for the new photo handler) to both locale files, and by adding a new
+test, `test_admin_rejected_manual_deposit_notifies_with_the_reason` in
+`test_notification_relay.py`, that runs the actual delivery path end to
+end -- the same technique the file's own existing withdrawal-rejection
+test already used, just never extended to this newer key.
+
+**Amharic content note**: every new Amharic string in this stage (Mini
+App `wallet.*` and bot `notify.manual_deposit_rejected`/
+`manual_deposit.*`) was written directly rather than sourced from a
+native speaker, reusing established vocabulary already present
+elsewhere in the same locale files where possible (ገቢ/ወጪ/መጠን/ብር/
+እባክዎ/እንደገና ይሞክሩ). Flagged here explicitly for native-speaker review
+before this rail is genuinely relied on in production -- consistent
+with this project's standing practice of never quietly presenting
+unreviewed translation as finished.
+
+**Verification**: mypy clean. Two genuine test bugs caught and fixed
+while writing the new Mini App e2e tests (both confirmed as test bugs,
+not product bugs, before fixing): the manual-deposit test assumed the
+destination `<select>` would default to the just-created row, when it
+actually defaults to the first option in `method_kind, id` order across
+all active destinations in the shared dev database -- fixed by
+selecting the destination explicitly; the manual-withdraw test used a
+20 ETB amount, below the real configured minimum withdrawal -- fixed by
+using 100 ETB, matching the existing automatic-withdraw test's own
+amount. 8 total new/extended tests (2 gateway-driven Mini App e2e tests,
+2 bot photo-handler tests, 1 real-delivery notification test) all
+confirmed to genuinely fail against the pre-Stage-5 tree via `git
+stash`. Full clean-slate rebuild: fresh `alembic upgrade head` (14
+migrations) → mypy clean → `pytest tests/` → 866 passed, 0 failed →
+`-m e2e` 25 passed on a clean rerun (2 gameplay-flow tests failed on the
+first pass, confirmed as the same real-host-contention pattern
+documented throughout this session -- passed individually, then the
+full suite passed clean on rerun) → `-m chaos_infra` 2 passed →
+`-m load`'s multi-room latency test failed again under the same
+already-documented shared-CPU contention, unrelated to this change (no
+gateway/fanout code touched).
+
+---
+
 ## 2026-08-31 — Manual payment subsystem, Stage 4: admin console frontend + payment configuration
 
 Fourth stage of the P1 manual-payment directive. This stage gives

@@ -75,6 +75,18 @@
   "wallet.error.provider_error": "አሁን ማጠናቀቅ አልተቻለም። እባክዎ እንደገና ይሞክሩ።",
   "wallet.error.unknown_error": "አሁን ማጠናቀቅ አልተቻለም። እባክዎ እንደገና ይሞክሩ።",
   "wallet.error.generic": "አሁን ማጠናቀቅ አልተቻለም። እባክዎ እንደገና ይሞክሩ።",
+  "wallet.error.no_manual_destination": "ይህ የክፍያ መድረሻ አሁን አይገኝም። እባክዎ ገጹን አድስተው ሌላ ይምረጡ።",
+  "wallet.error.external_reference_required": "እባክዎ የግብይት ማጣቀሻ ቁጥር ያስገቡ።",
+  "wallet.error.unknown_provider": "አሁን ማጠናቀቅ አልተቻለም። እባክዎ እንደገና ይሞክሩ።",
+
+  "wallet.manual_deposit_toggle": "በምትኩ በእጅ ይክፈሉ",
+  "wallet.deposit_automatic_toggle": "ራስ-ሰር ክፍያ ይጠቀሙ",
+  "wallet.manual_deposit_intro": "መጠኑን ከታች ወዳለው አካውንት ይላኩ፣ ከዚያም ከክፍያዎ ማጣቀሻ ቁጥር ያስገቡ።",
+  "wallet.manual_reference_placeholder": "የግብይት ማጣቀሻ ቁጥር",
+  "wallet.manual_deposit_submit": "ለግምገማ ያስገቡ",
+  "wallet.manual_deposit_submitted": "ለግምገማ ገብቷል። ሲጸድቅ ይነገርዎታል።",
+  "wallet.no_manual_destinations": "አሁን ምንም የተዋቀረ የክፍያ መድረሻ የለም።",
+  "wallet.manual_withdraw_toggle": "እንደ በእጅ ወጪ ይጠይቁ",
 
   "session.reminder": "ለ{minutes} ደቂቃዎች ሲጫወቱ ቆይተዋል።",
 

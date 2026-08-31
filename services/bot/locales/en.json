@@ -81,6 +81,10 @@
   "notify.withdrawal_succeeded": "✅ Your {amount} ETB withdrawal has been sent.",
   "notify.withdrawal_failed": "Your {amount} ETB withdrawal could not be completed and has been returned to your balance. Please try again or contact support.",
   "notify.withdrawal_rejected": "Your {amount} ETB withdrawal was rejected: {reason}. The funds have been returned to your balance.",
+  "notify.manual_deposit_rejected": "Your manual deposit of {amount} ETB was rejected: {reason}. No funds were added to your balance.",
   "notify.you_won": "Congratulations! You won {amount} ETB.",
-  "wallet.insufficient": "Insufficient balance. Please deposit."
+  "wallet.insufficient": "Insufficient balance. Please deposit.",
+
+  "manual_deposit.receipt_received": "Receipt received and attached to your pending deposit.",
+  "manual_deposit.no_pending_request": "You don't have a pending manual deposit to attach a receipt to."
 }

@@ -56,6 +56,19 @@ async def get_or_create_user_by_telegram_id(
     return int(row["id"])
 
 
+async def list_active_manual_payment_destinations(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+    """Player-facing: only what a player choosing Manual Deposit needs to
+    see (which account to pay into, and the instructions) -- no admin
+    bookkeeping columns (created_by_admin_id, timestamps), and only rows
+    an admin has actually left active.
+    """
+    rows = await pool.fetch(
+        "SELECT id, method_kind, account_ref, account_name, instructions "
+        "FROM manual_payment_destinations WHERE is_active ORDER BY method_kind, id"
+    )
+    return [dict(r) for r in rows]
+
+
 async def user_phone(pool: asyncpg.Pool, user_id: int) -> str | None:
     blob = await pool.fetchval("SELECT phone_e164_encrypted FROM users WHERE id = $1", user_id)
     return decrypt_phone(bytes(blob)) if blob is not None else None

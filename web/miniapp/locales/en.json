@@ -75,6 +75,18 @@
   "wallet.error.provider_error": "Couldn't complete this right now. Please try again.",
   "wallet.error.unknown_error": "Couldn't complete this right now. Please try again.",
   "wallet.error.generic": "Couldn't complete this right now. Please try again.",
+  "wallet.error.no_manual_destination": "That payment destination isn't available anymore. Please refresh and pick another.",
+  "wallet.error.external_reference_required": "Please enter the transaction reference.",
+  "wallet.error.unknown_provider": "Couldn't complete this right now. Please try again.",
+
+  "wallet.manual_deposit_toggle": "Pay manually instead",
+  "wallet.deposit_automatic_toggle": "Use automatic payment instead",
+  "wallet.manual_deposit_intro": "Send the amount to the account below, then enter the reference number from your payment.",
+  "wallet.manual_reference_placeholder": "Transaction reference",
+  "wallet.manual_deposit_submit": "Submit for review",
+  "wallet.manual_deposit_submitted": "Submitted for review. You'll be notified once it's approved.",
+  "wallet.no_manual_destinations": "No manual payment destinations are configured right now.",
+  "wallet.manual_withdraw_toggle": "Request as a manual withdrawal",
 
   "session.reminder": "You've been playing for {minutes} minutes.",
 

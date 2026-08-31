@@ -669,12 +669,102 @@ el("deposit-submit-btn").addEventListener("click", async () => {
   }
 });
 
+// --- manual deposit (P1: keep taking deposits when the automatic
+// provider is unavailable) -- a distinct panel, not another automatic
+// -deposit field: the flow is genuinely different (pick a destination,
+// pay externally, come back with a reference), not a variant of the
+// same form.
+
+let manualDestinationsLoaded = false;
+
+el("deposit-manual-toggle-btn").addEventListener("click", async () => {
+  el("deposit-automatic-section").classList.add("hidden");
+  el("deposit-manual-toggle-btn").classList.add("hidden");
+  el("deposit-manual-section").classList.remove("hidden");
+  el("deposit-automatic-toggle-btn").classList.remove("hidden");
+  if (!manualDestinationsLoaded) {
+    manualDestinationsLoaded = true;
+    await loadManualDestinations();
+  }
+});
+
+el("deposit-automatic-toggle-btn").addEventListener("click", () => {
+  el("deposit-manual-section").classList.add("hidden");
+  el("deposit-automatic-toggle-btn").classList.add("hidden");
+  el("deposit-automatic-section").classList.remove("hidden");
+  el("deposit-manual-toggle-btn").classList.remove("hidden");
+});
+
+async function loadManualDestinations() {
+  const listEl = el("deposit-manual-destinations");
+  try {
+    const response = await fetch("/api/manual-payment-destinations", { headers: authHeader() });
+    const destinations = await response.json();
+    if (!response.ok || destinations.length === 0) {
+      listEl.innerHTML = `<p class="wallet-note">${t("wallet.no_manual_destinations")}</p>`;
+      return;
+    }
+    listEl.innerHTML = `
+      <select id="deposit-manual-destination-select" class="wallet-input">
+        ${destinations
+          .map((d) => `<option value="${d.id}">${d.method_kind} - ${d.account_name} (${d.account_ref})</option>`)
+          .join("")}
+      </select>
+      <p id="deposit-manual-instructions" class="wallet-note"></p>
+    `;
+    const select = el("deposit-manual-destination-select");
+    const instructionsEl = el("deposit-manual-instructions");
+    const byId = new Map(destinations.map((d) => [String(d.id), d]));
+    const updateInstructions = () => {
+      const destination = byId.get(select.value);
+      instructionsEl.textContent = (destination && destination.instructions) || "";
+    };
+    select.addEventListener("change", updateInstructions);
+    updateInstructions();
+  } catch {
+    listEl.innerHTML = `<p class="wallet-note">${t("wallet.error.generic")}</p>`;
+  }
+}
+
+el("deposit-manual-submit-btn").addEventListener("click", async () => {
+  const amount = el("deposit-manual-amount-input").value;
+  const reference = el("deposit-manual-reference-input").value.trim();
+  const select = el("deposit-manual-destination-select");
+  const destinationId = select ? Number(select.value) : null;
+  if (!amount || Number(amount) <= 0 || !destinationId || !reference) {
+    setWalletStatus("deposit-manual-status", "wallet.error.invalid_amount", "error");
+    return;
+  }
+  el("deposit-manual-submit-btn").disabled = true;
+  setWalletStatus("deposit-manual-status", "wallet.deposit_opening", null);
+  try {
+    const response = await fetch("/api/deposit/manual", {
+      method: "POST",
+      headers: { ...authHeader(), "Content-Type": "application/json" },
+      body: JSON.stringify({ amount, manual_destination_id: destinationId, external_reference: reference }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      setWalletStatus("deposit-manual-status", `wallet.error.${data.detail || "generic"}`, "error");
+      return;
+    }
+    setWalletStatus("deposit-manual-status", "wallet.manual_deposit_submitted", "success");
+    el("deposit-manual-amount-input").value = "";
+    el("deposit-manual-reference-input").value = "";
+  } catch {
+    setWalletStatus("deposit-manual-status", "wallet.error.generic", "error");
+  } finally {
+    el("deposit-manual-submit-btn").disabled = false;
+  }
+});
+
 // --- withdraw ----------------------------------------------------------
 
 el("withdraw-submit-btn").addEventListener("click", async () => {
   const amount = el("withdraw-amount-input").value;
   const accountRef = el("withdraw-account-input").value.trim();
   const holderName = el("withdraw-name-input").value.trim();
+  const manual = el("withdraw-manual-checkbox").checked;
   if (!amount || Number(amount) <= 0 || !accountRef || !holderName) {
     setWalletStatus("withdraw-status", "wallet.error.invalid_amount", "error");
     return;
@@ -685,7 +775,12 @@ el("withdraw-submit-btn").addEventListener("click", async () => {
     const response = await fetch("/api/withdraw", {
       method: "POST",
       headers: { ...authHeader(), "Content-Type": "application/json" },
-      body: JSON.stringify({ amount, account_ref: accountRef, holder_name: holderName }),
+      body: JSON.stringify({
+        amount,
+        account_ref: accountRef,
+        holder_name: holderName,
+        provider: manual ? "manual" : "chapa",
+      }),
     });
     if (response.status === 503) {
       setWalletStatus("withdraw-status", "wallet.not_available", "error");

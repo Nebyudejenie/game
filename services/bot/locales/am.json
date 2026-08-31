@@ -81,6 +81,10 @@
   "notify.withdrawal_succeeded": "✅ የ{amount} ብር ወጪዎ ተልኳል።",
   "notify.withdrawal_failed": "የ{amount} ብር ወጪዎ አልተሳካም እና ወደ ቀሪ ሂሳብዎ ተመልሷል። እባክዎ እንደገና ይሞክሩ ወይም ድጋፍን ያግኙ።",
   "notify.withdrawal_rejected": "የ{amount} ብር ወጪዎ ውድቅ ተደርጓል፦ {reason}። ገንዘቡ ወደ ቀሪ ሂሳብዎ ተመልሷል።",
+  "notify.manual_deposit_rejected": "የ{amount} ብር በእጅ ገቢዎ ውድቅ ተደርጓል፦ {reason}። ገንዘብ ወደ ቀሪ ሂሳብዎ አልታከለም።",
   "notify.you_won": "እንኳን ደስ አለዎት! {amount} ብር አሸንፈዋል።",
-  "wallet.insufficient": "በቂ ቀሪ ሂሳብ የለዎትም። እባክዎ ያስገቡ።"
+  "wallet.insufficient": "በቂ ቀሪ ሂሳብ የለዎትም። እባክዎ ያስገቡ።",
+
+  "manual_deposit.receipt_received": "ደረሰኝ ደርሷል እና ከቆየው ገቢዎ ጋር ተያይዟል።",
+  "manual_deposit.no_pending_request": "ደረሰኝ የሚያያዝበት ቀሪ በእጅ ገቢ የለዎትም።"
 }
