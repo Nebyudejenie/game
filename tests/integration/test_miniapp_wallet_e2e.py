@@ -20,10 +20,12 @@ from decimal import Decimal
 import pytest
 
 from packages.core.phone_crypto import encrypt_phone, phone_lookup_hash
+from services.admin import queries as admin_queries
 from services.engine.round_engine import RoundEngine, load_room_config
 from services.gateway.app import app as gateway_app
 from services.payments import deposits
 from tests.integration.conftest import build_init_data, create_funded_user, create_room, fund_user, next_telegram_id
+from tests.integration.test_admin_auth import create_test_admin
 from tests.integration.test_miniapp_e2e import TELEGRAM_SDK_URL
 from tests.integration.test_payments_deposits import FakePaymentProvider, _webhook
 from tests.integration.test_payout_worker import FakePayoutProvider
@@ -609,3 +611,172 @@ async def test_wallet_locks_withdraw_to_manual_when_chapa_withdraw_is_disabled(g
         await page.close()
     finally:
         await _toggle_chapa(conn, direction="out", enabled=True)
+
+
+async def test_full_lifecycle_registration_through_withdrawal_using_the_manual_rail(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    # The product directive's own final acceptance bar, verbatim:
+    # "verify that a Telegram player can complete: Registration ->
+    # Deposit -> Wallet credit -> Play -> Win -> Payout -> Withdrawal"
+    # using either automatic or manual payment. Every individual link in
+    # this chain already has its own dedicated, focused test elsewhere;
+    # this is the one test proving they compose correctly as a single
+    # continuous player session that survives crossing both payment
+    # system boundaries -- deposit review and withdrawal settlement --
+    # without ever touching Chapa. The admin-side actions (approve the
+    # deposit, approve+settle the withdrawal) are called directly rather
+    # than driven through the admin console's own UI, since that UI path
+    # is already independently proven in test_admin_manual_payments_e2e
+    # .py -- this test's own job is the PLAYER's continuous journey.
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=8, call_interval_ms=15, is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    try:
+        destination_row = await conn.fetchrow(
+            "INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name) "
+            "VALUES ('telebirr', '0911000000', 'Jo Bingo PLC') RETURNING id"
+        )
+        admin_id, *_ = await create_test_admin(pool)
+
+        # --- Registration ---
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('0.00')", timeout=10000
+        )
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        assert user_row is not None
+
+        # --- Deposit (manual, real browser submission) ---
+        await _open_wallet_tab(page, "deposit")
+        await page.click("#deposit-manual-toggle-btn")
+        await page.wait_for_selector("#deposit-manual-destination-select", timeout=10000)
+        await page.select_option("#deposit-manual-destination-select", str(destination_row["id"]))
+        await page.fill("#deposit-manual-amount-input", "100")
+        await page.fill("#deposit-manual-reference-input", "FT-E2E-LIFECYCLE-1")
+        await page.click("#deposit-manual-submit-btn")
+        await page.wait_for_selector("#deposit-manual-status.success", timeout=10000)
+
+        deposit_payment_id = await pool.fetchval(
+            "SELECT id FROM payments WHERE user_id = $1 AND direction = 'in' ORDER BY id DESC LIMIT 1",
+            user_row["id"],
+        )
+
+        # --- Wallet credit (admin approves; the credit must reach this
+        # already-open tab live, over the same WS connection) ---
+        approved = await admin_queries.approve_manual_deposit_admin(
+            pool, redis, admin_id=admin_id, payment_id=deposit_payment_id, reason="verified externally",
+            ip_address="10.0.0.1",
+        )
+        assert approved is True
+        await page.wait_for_function(
+            "document.getElementById('wallet-cash').textContent.includes('100.00')", timeout=10000
+        )
+        # request_withdrawal()'s chargeback-window gate (30 real minutes
+        # in this environment's settings) correctly treats a just-
+        # -succeeded deposit as reversible regardless of rail -- a real,
+        # already-existing protection this test ran straight into on its
+        # first pass, not something to special-case around in the
+        # product code. Backdating here is the test's own concern:
+        # simulating that the window has genuinely elapsed, the same
+        # "age a row via direct SQL" technique test_admin_withdrawals.py
+        # already uses for its own stuck-payout test.
+        await conn.execute(
+            "UPDATE payments SET created_at = now() - interval '1 hour' WHERE id = $1", deposit_payment_id
+        )
+
+        # --- Play ---
+        await page.click("#wallet-back-btn")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        other_player = await create_funded_user(conn)
+        assert (await engine.join(other_player, 2)).ok
+
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page.wait_for_selector(room_selector, timeout=10000)
+        await page.click(room_selector)
+        await page.wait_for_selector("#screen-lobby.active", timeout=10000)
+        cells = await page.query_selector_all(".card-grid-cell")
+        await cells[9].click()  # card #10
+        await page.click("#lobby-cta")
+        await page.wait_for_function(
+            "document.getElementById('lobby-cta').textContent.includes('10')", timeout=5000
+        )
+        await page.wait_for_selector("#screen-game.active", timeout=25000)
+
+        # --- Win / Payout (whatever the real, unrigged outcome is --
+        # matching this suite's own established precedent of never
+        # forcing a specific winner; either outcome reaches a terminal
+        # state and this test's own job is what happens to the balance
+        # afterward, not which player happened to win) ---
+        await page.wait_for_selector("#screen-result.active", timeout=90000)
+        cash_after_round = await pool.fetchval(
+            """
+            SELECT balance FROM account_balances b JOIN accounts a ON a.id = b.account_id
+            WHERE a.user_id = $1 AND a.kind = 'user_cash'
+            """,
+            user_row["id"],
+        )
+        assert cash_after_round is not None and cash_after_round >= Decimal("0.00")
+
+        # --- Withdrawal (manual, real browser submission, of whatever
+        # remains after the stake and possible win) ---
+        await page.reload()
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await _open_wallet_tab(page, "withdraw")
+        await page.fill("#withdraw-amount-input", str(cash_after_round))
+        await page.fill("#withdraw-account-input", "0911223344")
+        await page.fill("#withdraw-name-input", "Test Holder")
+        await page.check("#withdraw-manual-checkbox")
+        await page.click("#withdraw-submit-btn")
+        await page.wait_for_selector("#withdraw-status.success", timeout=10000)
+
+        withdrawal = await pool.fetchrow(
+            "SELECT id, status, provider, amount FROM payments WHERE user_id = $1 AND direction = 'out' "
+            "ORDER BY id DESC LIMIT 1",
+            user_row["id"],
+        )
+        assert withdrawal["status"] == "review"
+        assert withdrawal["provider"] == "manual"
+        assert withdrawal["amount"] == cash_after_round
+
+        # --- Admin approves and settles the withdrawal ---
+        approved_wd = await admin_queries.approve_manual_withdrawal_admin(
+            pool, redis, admin_id=admin_id, payment_id=withdrawal["id"], reason="verified identity",
+            ip_address="10.0.0.1",
+        )
+        assert approved_wd is True
+        settled = await admin_queries.settle_manual_withdrawal_admin(
+            pool, redis, admin_id=admin_id, payment_id=withdrawal["id"], external_reference="TXN-E2E-LIFECYCLE",
+            reason="sent via Telebirr", ip_address="10.0.0.1",
+        )
+        assert settled is True
+
+        final_status = await conn.fetchrow(
+            "SELECT status, provider_ref FROM payments WHERE id = $1", withdrawal["id"]
+        )
+        assert final_status["status"] == "succeeded"
+        assert final_status["provider_ref"] == "TXN-E2E-LIFECYCLE"
+
+        locked_balance = await pool.fetchval(
+            """
+            SELECT balance FROM account_balances b JOIN accounts a ON a.id = b.account_id
+            WHERE a.user_id = $1 AND a.kind = 'user_locked'
+            """,
+            user_row["id"],
+        )
+        assert locked_balance == Decimal("0.00")
+
+        assert console_errors == [], f"JS errors during the full lifecycle: {console_errors}"
+        await page.screenshot(path="/tmp/miniapp-full-lifecycle.png")
+        await page.close()
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)

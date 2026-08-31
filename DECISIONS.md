@@ -5,6 +5,106 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-31 — Manual payment subsystem, Stage 7: crash/retry sweep (closes the feature)
+
+Seventh and final stage of the P1 manual-payment directive. Every prior
+stage already carried its own concurrency/idempotency proof as it was
+built (each of Stages 2 and 3's own commits includes a real
+20-way-concurrent-`asyncio.gather()` race and a post-commit-retry
+no-op test) -- this stage is specifically the two items the plan's own
+test-matrix named that weren't yet covered by any per-stage test, plus
+the literal capstone the product directive itself asks for.
+
+**No source code changed in this stage** -- pure additional test
+coverage exercising behavior Stages 1-6 already built and verified.
+The usual `git stash`-and-confirm-genuine-failure step doesn't apply
+here the way it did for every prior stage (there is no "fix" being
+added to revert away from); noted here explicitly rather than silently
+skipped, since every other stage's entry describes running it.
+
+**Notification failure never blocks or reverses a credit**
+(`test_admin_manual_payments.py`): breaks only `redis.xadd` (what
+`notify_user()` calls) via monkeypatch, confirms `approve_manual_
+deposit_admin()` still returns `True` and the ledger credit still
+landed. `notify_user()`'s own contract (`packages/core/notifications
+.py`) already catches any exception and just logs it -- this is the
+concrete proof that contract holds from the caller's side, not just a
+read of the source.
+
+**The "DB retry" scenario from the plan's own test matrix was
+deliberately not built as a separate synthetic test.** Postgres's own
+transaction atomicity already guarantees a transient connection loss
+mid-transaction leaves nothing partially applied -- the same reasoning
+this codebase already relies on for `ledger.post()` itself (see its own
+module docstring). Manufacturing a contrived "kill the connection
+mid-transaction" test would exercise Postgres's own guarantees, not
+anything this codebase's own code is responsible for; the concurrent-
+approval and post-commit-retry tests already built in Stages 2-3 are
+the tests that actually matter for this class of risk (they prove the
+*application-level* idempotency guard, which is the part actually
+written here).
+
+**The capstone**: `test_full_lifecycle_registration_through_
+withdrawal_using_the_manual_rail` in `test_miniapp_wallet_e2e.py` --
+the product directive's own final acceptance criterion, verbatim:
+"verify that a Telegram player can complete: Registration → Deposit →
+Wallet credit → Play → Win → Payout → Withdrawal" via the manual rail,
+in one continuous real-browser session, never touching Chapa. Every
+individual link already had its own dedicated test; this is the one
+test proving they compose correctly as a single player session that
+survives crossing both payment system boundaries (deposit review,
+withdrawal settlement) without losing state. The round's own outcome
+is genuinely unrigged (win or lose, matching this suite's established
+"never force a specific winner" precedent) -- confirmed robust across
+four consecutive real runs before treating it as reliable. Admin-side
+actions (approve the deposit, approve+settle the withdrawal) are called
+directly rather than driven through the admin console's own UI, since
+that UI path is already independently proven in `test_admin_manual_
+payments_e2e.py`; this test's own job is the player's continuous
+journey, not re-proving the admin screens.
+
+**A real, correct interaction this test ran straight into on its first
+pass, not a bug**: `request_withdrawal()`'s chargeback-window gate (30
+real minutes in this environment's configured settings) treats a
+just-succeeded deposit as reversible regardless of which rail credited
+it -- so requesting a withdrawal immediately after a manual deposit's
+approval correctly landed on `RecentReversibleDeposit`, exactly as it
+would for an automatic Chapa deposit. This is an existing, deliberate
+protection this stage's job was to verify against, not redesign; the
+test itself backdates the deposit's `created_at` by an hour after
+approval (real SQL, the exact "age a row" technique `test_admin_
+withdrawals.py`'s own stuck-payout test already established) to
+simulate the window having genuinely elapsed, rather than either
+waiting 30 real minutes or quietly loosening a real fraud protection
+to make a test pass.
+
+**Verification**: mypy clean. 2 new tests (the notification-failure
+test, the capstone lifecycle test), the capstone independently rerun 4
+times total to confirm robustness against real round-outcome
+randomness before treating it as reliable, not just lucky once. Full
+clean-slate rebuild: fresh `alembic upgrade head` (14 migrations) →
+mypy clean → `pytest tests/` → 874 passed, 0 failed → `-m e2e` 28
+passed clean → `-m chaos_infra` 2 passed → `-m load`'s multi-room
+latency test failed again under the same already-documented shared-CPU
+contention, unrelated to this change (no gateway/fanout code touched
+anywhere in this entire 7-stage feature).
+
+**The manual payment subsystem is complete.** Seven independently-
+committed, independently-verified stages: schema + provider
+abstraction, manual deposits, manual withdrawals, admin console
+frontend, player-facing bot/Mini App UI, dynamic provider availability,
+and this crash/retry sweep. A Telegram player can deposit and withdraw
+real money whether Chapa is up or down, with every money-moving path
+going through the exact same ledger/idempotency/audit architecture the
+automatic rail already used -- never a raw balance edit, never the
+generic admin "adjust balance" button, exactly as the product directive
+required. The one item deliberately not built, decided in Stage 1 and
+unchanged since: two-person approval for high-risk manual payments,
+which needs a real threshold and approval shape from the business that
+this session was never given and did not invent.
+
+---
+
 ## 2026-08-31 — Manual payment subsystem, Stage 6: dynamic provider availability
 
 Sixth and final feature stage of the P1 manual-payment directive. Every

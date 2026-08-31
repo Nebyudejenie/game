@@ -233,3 +233,34 @@ async def test_receipt_route_404s_when_nothing_attached(admin_server, pool, redi
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{admin_server}/manual-deposits/{payment_id}/receipt", headers=headers)
     assert response.status_code == 404
+
+
+async def test_notification_failure_never_blocks_or_reverses_the_credit(pool, redis, conn, monkeypatch):
+    # notify_user()'s own contract (packages/core/notifications.py) is to
+    # catch *any* exception and just log it -- this proves that contract
+    # holds for real from the caller's side too: a genuinely broken
+    # notification channel must never roll back, or even just fail to
+    # report, a real-money credit that already committed. Breaks only
+    # redis.xadd (what notify_user calls) -- publish_balance_update's own
+    # redis.publish() call is untouched, so a real balance push still
+    # goes out even though the Telegram notification specifically can't.
+    admin_id, *_ = await create_test_admin(pool)
+    user_id = await create_user(conn)
+    payment_id, our_ref = await _pending_manual_deposit(pool, redis, conn, user_id, Decimal("80.00"), _unique_ref())
+
+    async def broken_xadd(*args, **kwargs):
+        raise ConnectionError("simulated: notification stream unreachable")
+
+    monkeypatch.setattr(redis, "xadd", broken_xadd)
+
+    approved = await queries.approve_manual_deposit_admin(
+        pool, redis, admin_id=admin_id, payment_id=payment_id, reason="ok", ip_address="10.0.0.1"
+    )
+    assert approved is True
+
+    status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", payment_id)
+    assert status == "succeeded"
+    txn_count = await conn.fetchval(
+        "SELECT count(*) FROM ledger_transactions WHERE idempotency_key = $1", our_ref
+    )
+    assert txn_count == 1
