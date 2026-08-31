@@ -5,6 +5,73 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-31 — Manual payment subsystem, Stage 2: manual deposits
+
+Second stage of the P1 manual-payment directive (see Stage 1 above for
+the overall design). This stage makes manual deposits real end to end at
+the domain/admin-backend layer -- no player-facing UI yet (Stage 5).
+
+**`services/payments/manual.py`**: `create_manual_deposit_request()`
+runs the exact same shared eligibility gates Stage 1 extracted from
+`create_deposit_intent()`, then inserts straight to `status='review'`
+(no checkout step to model). `attach_receipt_to_latest_pending_deposit()`
+is the whole receipt-photo mechanism: correlates an incoming Telegram
+photo to the player's own most recent still-pending manual deposit with
+no receipt yet, via one `UPDATE ... WHERE id = (SELECT ...)`, no
+conversational bot state required.
+
+**`services/admin/queries.py`**: `list_pending_manual_deposits()`,
+`approve_manual_deposit_admin()`, `reject_manual_deposit_admin()`,
+following the identical row-lock + status-guard + audit-inside-
+transaction + side-effects-after-commit shape as the pre-existing
+`approve_withdrawal_admin`/`reject_withdrawal_admin` -- that guard (a
+`FOR UPDATE` lock plus a status check that returns `False`, not an
+exception, if the row already moved) is the whole idempotency mechanism
+against a double-click, a browser retry, or two admins racing on the
+same request; no separate client-supplied idempotency token was needed,
+matching how withdrawals already work. Approval reuses the
+`notify.deposit_confirmed` key an automatic Chapa credit already sends
+-- same economic event, different rail. Duplicate external-reference
+detection is a live, correlated `EXISTS` in the list query (never a
+column set at insert time), so the flag on a still-pending request
+correctly clears the moment an earlier conflicting one gets rejected,
+rather than staying stuck stale -- matches this codebase's existing
+precedent for this whole class of signal (`shared_payout_account_
+clusters`/`repeat_room_pairings`'s own docstrings make the same "live at
+query time, never a background job or stored flag" call).
+
+**`services/admin/app.py`**: `GET /manual-deposits`, `POST /manual-
+deposits/{id}/approve`, `POST /manual-deposits/{id}/reject` (all gated
+on the existing `payments:view`/`payments:approve` -- same trust level
+as the withdrawal queue, no new permission needed for review actions),
+and `GET /manual-deposits/{id}/receipt`, a thin proxy through the Bot
+API's `getFile`/file-download endpoints so an admin can view a receipt
+photo with zero new object storage -- the photo already lives on
+Telegram's own servers the moment a player sends it to the bot; this
+repo only ever stores the `file_id`.
+
+**Verification**: mypy clean. 21 new tests across
+`test_payments_manual_deposits.py` (11) and `test_admin_manual_payments
+.py` (10), including a real `asyncio.gather()` concurrent-double-
+approval race (20-way) proving exactly one credit and exactly one
+`ledger_transactions` row, a direct "admin's browser retries after the
+server already committed" test (second call is a clean no-op, never an
+exception, never a second credit), and the live duplicate-reference flag
+genuinely clearing after a rejection. All 21 confirmed to genuinely fail
+(an `ImportError`, since none of this code existed yet) against the
+pre-Stage-2 tree via `git stash`. One test-hygiene bug caught and fixed
+along the way: two tests used hardcoded literal reference strings
+(`"FT26001"` etc.) that collided with leftovers from earlier runs
+against this same never-torn-down dev database, producing a false
+`possible_duplicate_reference=True` on a second run -- fixed with a
+`uuid4()`-based unique-ref helper, matching this suite's own established
+`unique_username()`/`next_telegram_id()` pattern for exactly this class
+of problem. Full suite: `pytest tests/` → 841 passed, 1 failed (the same
+pre-existing, unrelated `retention_cohorts` date bug flagged in Stage 1,
+reconfirmed unrelated).
+
+---
+
 ## 2026-08-31 — Manual payment subsystem, Stage 1: foundation
 
 A P1/launch-critical product directive: Jo Bingo must keep taking deposits

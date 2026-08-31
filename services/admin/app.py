@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import asyncpg
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -417,6 +418,90 @@ async def reject_withdrawal(
         ip_address=_client_ip(request),
     )
     return {"rejected": rejected}
+
+
+# --- manual deposits (P1: keep taking deposits when Chapa is down) -------
+
+
+@app.get("/manual-deposits")
+async def list_pending_manual_deposits(
+    admin: Annotated[AdminSession, Depends(require("payments:view"))],
+) -> list[dict[str, Any]]:
+    return await queries.list_pending_manual_deposits(app.state.pool)
+
+
+class ManualPaymentDecisionRequest(BaseModel):
+    reason: str
+
+
+@app.post("/manual-deposits/{payment_id}/approve")
+async def approve_manual_deposit(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("payments:approve"))],
+    payment_id: int,
+    body: ManualPaymentDecisionRequest,
+) -> dict[str, bool]:
+    _require_reason(body.reason)
+    approved = await queries.approve_manual_deposit_admin(
+        app.state.pool,
+        app.state.redis,
+        admin_id=admin.admin_id,
+        payment_id=payment_id,
+        reason=body.reason,
+        ip_address=_client_ip(request),
+    )
+    return {"approved": approved}
+
+
+@app.post("/manual-deposits/{payment_id}/reject")
+async def reject_manual_deposit(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("payments:approve"))],
+    payment_id: int,
+    body: ManualPaymentDecisionRequest,
+) -> dict[str, bool]:
+    _require_reason(body.reason)
+    rejected = await queries.reject_manual_deposit_admin(
+        app.state.pool,
+        app.state.redis,
+        admin_id=admin.admin_id,
+        payment_id=payment_id,
+        reason=body.reason,
+        ip_address=_client_ip(request),
+    )
+    return {"rejected": rejected}
+
+
+@app.get("/manual-deposits/{payment_id}/receipt")
+async def get_manual_deposit_receipt(
+    admin: Annotated[AdminSession, Depends(require("payments:view"))],
+    payment_id: int,
+) -> Response:
+    # A thin proxy through the Bot API rather than any new object storage
+    # -- this is a Telegram-native product, so the receipt photo already
+    # lives on Telegram's own servers the moment a player sends it to the
+    # bot; we only ever store its file_id (see services/payments/manual.py
+    # 's attach_receipt_to_latest_pending_deposit).
+    file_id = await queries.get_manual_deposit_receipt_file_id(app.state.pool, payment_id)
+    if file_id is None:
+        raise HTTPException(status_code=404, detail="no receipt attached to this request")
+    settings = get_settings()
+    if not settings.telegram_bot_token:
+        raise HTTPException(status_code=503, detail="bot is not configured")
+    async with httpx.AsyncClient() as client:
+        file_resp = await client.get(
+            f"https://api.telegram.org/bot{settings.telegram_bot_token}/getFile",
+            params={"file_id": file_id},
+        )
+        if file_resp.status_code != 200:
+            raise HTTPException(status_code=502, detail="could not resolve receipt from Telegram")
+        file_path = file_resp.json()["result"]["file_path"]
+        photo_resp = await client.get(
+            f"https://api.telegram.org/file/bot{settings.telegram_bot_token}/{file_path}"
+        )
+        if photo_resp.status_code != 200:
+            raise HTTPException(status_code=502, detail="could not download receipt from Telegram")
+    return Response(content=photo_resp.content, media_type="image/jpeg")
 
 
 # --- rooms ---------------------------------------------------------------

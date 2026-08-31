@@ -919,6 +919,153 @@ async def reject_withdrawal_admin(
     return True
 
 
+# --- Manual deposits (P1 directive: Jo Bingo must keep taking deposits
+# when Chapa is unavailable) -----------------------------------------
+
+async def get_manual_deposit_receipt_file_id(pool: asyncpg.Pool, payment_id: int) -> str | None:
+    file_id: str | None = await pool.fetchval(
+        "SELECT receipt_telegram_file_id FROM payments WHERE id = $1 AND direction = 'in' "
+        "AND provider = 'manual'",
+        payment_id,
+    )
+    return file_id
+
+
+async def list_pending_manual_deposits(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+    rows = await pool.fetch(
+        """
+        SELECT p.id, p.user_id, u.display_name, p.our_ref, p.amount, p.status, p.created_at,
+               p.provider_ref AS external_reference, p.receipt_telegram_file_id,
+               md.method_kind, md.account_ref AS destination_account_ref,
+               md.account_name AS destination_account_name,
+               EXISTS (
+                 SELECT 1 FROM payments p2
+                 WHERE p2.direction = 'in' AND p2.provider = 'manual' AND p2.id != p.id
+                   AND p2.provider_ref = p.provider_ref AND p2.status != 'rejected'
+               ) AS possible_duplicate_reference
+        FROM payments p
+        JOIN users u ON u.id = p.user_id
+        LEFT JOIN manual_payment_destinations md ON md.id = p.manual_destination_id
+        WHERE p.direction = 'in' AND p.provider = 'manual' AND p.status = 'review'
+        ORDER BY p.created_at
+        """
+    )
+    return [dict(r) for r in rows]
+
+
+async def approve_manual_deposit_admin(
+    pool: asyncpg.Pool,
+    redis: Redis,
+    *,
+    admin_id: int,
+    payment_id: int,
+    reason: str | None,
+    ip_address: str | None,
+) -> bool:
+    # Same shape as approve_withdrawal_admin/reject_withdrawal_admin: row-
+    # lock, no-op (return False) if the row already moved out of the
+    # expected status -- that guard IS the idempotency/concurrency
+    # mechanism against a double-click, a browser retry, or two admins
+    # racing, exactly as it already is for withdrawals. The credit itself
+    # is the same shape as deposits.py's own _apply_confirmed_status():
+    # provider_settlement -amount / user_cash +amount, keyed on our_ref.
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT user_id, amount, our_ref, status FROM payments "
+                "WHERE id = $1 AND direction = 'in' AND provider = 'manual' FOR UPDATE",
+                payment_id,
+            )
+            if row is None or row["status"] != "review":
+                return False
+
+            provider_account = await ledger.get_or_create_account(conn, None, "provider_settlement")
+            cash_account = await ledger.get_or_create_account(conn, row["user_id"], "user_cash")
+            txn = await ledger.post(
+                conn,
+                "deposit",
+                [ledger.Entry(provider_account.id, -row["amount"]), ledger.Entry(cash_account.id, row["amount"])],
+                idempotency_key=row["our_ref"],
+                payment_id=payment_id,
+            )
+            await conn.execute(
+                "UPDATE payments SET status = 'succeeded', ledger_txn_id = $2, updated_at = now() "
+                "WHERE id = $1",
+                payment_id,
+                txn.id,
+            )
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="manual_deposits.approve",
+                target_type="payment",
+                target_id=str(payment_id),
+                before={"status": "review"},
+                after={"status": "succeeded"},
+                reason=reason,
+                ip_address=ip_address,
+            )
+            user_id = row["user_id"]
+            amount = row["amount"]
+        # Only reachable once the transaction above has actually
+        # committed -- see ledger.post()'s own comment for why it can't
+        # safely record this itself when called nested, which every real
+        # call is.
+        metrics.ledger_transactions_total.labels(kind=txn.kind).inc()
+        await ledger.publish_balance_update(pool, redis, user_id)
+
+    balance = await ledger.user_balance_snapshot(pool, user_id)
+    # Same notification key an automatic Chapa credit uses -- the same
+    # economic event (a deposit landed) regardless of which rail it came
+    # in on, matching how ledger_transactions.kind is already shared.
+    await notify_user(
+        pool, redis, user_id=user_id, key="notify.deposit_confirmed",
+        amount=str(amount), balance=balance["cash"],
+    )
+    return True
+
+
+async def reject_manual_deposit_admin(
+    pool: asyncpg.Pool, redis: Redis, *, admin_id: int, payment_id: int, reason: str, ip_address: str | None
+) -> bool:
+    # No ledger call at all -- nothing was ever credited for a request
+    # still sitting in 'review', so there's nothing to reverse.
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT user_id, amount, status FROM payments "
+                "WHERE id = $1 AND direction = 'in' AND provider = 'manual' FOR UPDATE",
+                payment_id,
+            )
+            if row is None or row["status"] != "review":
+                return False
+
+            await conn.execute(
+                "UPDATE payments SET status = 'rejected', failure_reason = $2, updated_at = now() "
+                "WHERE id = $1",
+                payment_id,
+                reason,
+            )
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="manual_deposits.reject",
+                target_type="payment",
+                target_id=str(payment_id),
+                before={"status": "review"},
+                after={"status": "rejected"},
+                reason=reason,
+                ip_address=ip_address,
+            )
+            user_id = row["user_id"]
+            amount = row["amount"]
+
+    await notify_user(
+        pool, redis, user_id=user_id, key="notify.manual_deposit_rejected", amount=str(amount), reason=reason
+    )
+    return True
+
+
 async def shared_payout_account_clusters(pool: asyncpg.Pool) -> list[dict[str, Any]]:
     """Risk screen, spec 8.4's first anti-fraud rule: "Same payout account
     across multiple accounts -> Link accounts, flag cluster." Multiple
