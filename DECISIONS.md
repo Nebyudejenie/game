@@ -5,6 +5,78 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-31 — Manual payment subsystem, Stage 1: foundation
+
+A P1/launch-critical product directive: Jo Bingo must keep taking deposits
+and paying out withdrawals even when Chapa (the only rail today) is down,
+not yet approved for a market, or simply not configured. Full design in
+the plan at the time this was written (schema, state-machine mapping onto
+`payments.status`'s existing vocabulary, RBAC, staged delivery) -- this
+entry covers Stage 1 only: the schema and the shared building blocks,
+nothing user-reachable yet.
+
+**Migration** (`60dc29201d1c_manual_payments`): `manual_payment_
+destinations` (the company's own receiving accounts, shown to a player
+making a manual deposit -- deposit-only by design, since a manual
+*withdrawal* pays out to the player's own already-existing
+`payment_methods` row, never to a company account) and
+`payment_provider_availability` (an admin-controlled per-provider,
+per-direction on/off flag, seeded in the same migration with Chapa+Manual
+enabled and SantimPay/ArifPay disabled, so a fresh migration run can never
+silently break the already-live Chapa flow). `payments` gains
+`manual_destination_id` and `receipt_telegram_file_id` -- no new column
+for the external transaction reference itself: `provider_ref` is reused,
+since it already means exactly that ("the external system's reference for
+this payment"); only the writer changes by direction (the player at
+creation time for a deposit, an admin at settlement time for a
+withdrawal). No ledger or provider-enum migration needed at all:
+`payments.provider` already allowed `'manual'` with zero code ever using
+it, and `ledger_transactions.kind`'s existing `deposit`/`withdrawal`/
+`payout`/`refund` values already describe the economic event, not the
+rail, so they cover manual payments exactly as they cover Chapa's.
+
+**`ManualProvider`** (`services/payments/manual_provider.py`): satisfies
+the existing `PaymentProvider` Protocol with every method raising
+`NotImplementedError` -- all four are genuinely unreachable for a manual
+withdrawal (it never auto-approves, so `payout_worker.py`'s automatic
+dispatch, the only caller of `create_payout()`, never sees one; no
+checkout, no webhook, nothing to poll). Needed only for withdrawals,
+since `request_withdrawal()`'s signature requires a real `PaymentProvider`
+object to store `.name` into `payments.provider`; manual deposit
+creation (Stage 2) never touches this Protocol at all and just writes the
+literal string `"manual"` directly, since there's no checkout step to
+model. Structurally identical to `tests/integration/
+test_admin_withdrawals.py`'s pre-existing `_NullProvider` test stub,
+promoted to production code now that "manual" is a real, live rail.
+
+**`services/payments/deposits.py`**: extracted the existing rate-limit/
+minimum check and the existing eligibility check (self-exclusion/ban/
+cooloff/daily-cap) out of `create_deposit_intent()` into two standalone
+functions, `_check_deposit_rate_limit_and_minimum()` and
+`_check_deposit_eligibility()` -- a pure lift, zero behavior change, so a
+manual deposit request (Stage 2) is gated by the exact same rules an
+automatic one is, rather than a second copy that could quietly drift.
+Verified as truly behavior-preserving by running the full existing
+`tests/integration/test_payments_deposits.py` suite (15 tests) unchanged
+against the refactored code -- all 15 still pass, byte-for-byte the same
+assertions as before the extraction.
+
+**Verification**: new migration applied and its `downgrade()` proven for
+real (tables/columns genuinely disappear, then re-`upgrade` restores them
+cleanly) against the live dev Postgres, not just eyeballed. mypy clean
+(70 source files, +2 over the prior count). Full suite:
+`pytest tests/` → 820 passed, 1 failed
+(`test_retention_cohorts_counts_a_user_active_in_their_signup_week`).
+That one failure is **confirmed pre-existing and unrelated**: reproduced
+identically after `git stash`-ing every file this stage touched and
+re-running against the exact unmodified `9409c4a` commit. It's a real,
+date-dependent bug in `services/admin/queries.py`'s `retention_cohorts()`
+-- today happens to be a Monday (the exact day `date_trunc('week', ...)`
+starts a new week on), and a freshly-created test user's own signup week
+is being computed as already `elapsed` when it should still be in
+progress. Left unfixed here as genuinely out of scope for this feature;
+flagged for a separate pass.
+
 ## 2026-08-28 — Nightly ledger reconciliation had no deploy-time way to actually run
 
 With the four-agent audit's whole gap map closed, went back to spec

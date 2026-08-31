@@ -21,6 +21,7 @@ import structlog
 from redis.asyncio import Redis
 
 from packages.core import ledger, metrics, rate_limit, responsible_gaming, tracing
+from packages.core.ledger import AsyncpgConnection
 from packages.core.notifications import notify_user
 from services.payments.provider import PaymentProvider
 
@@ -80,6 +81,66 @@ class DepositIntent:
     checkout_url: str
 
 
+async def _check_deposit_rate_limit_and_minimum(
+    redis: Redis, *, user_id: int, amount: Decimal, min_deposit: Decimal
+) -> None:
+    """Raises DepositRateLimited / BelowMinimumDeposit. No DB access needed
+    -- callable before a connection is even acquired, exactly where
+    create_deposit_intent() already ran these two checks. Shared with
+    services/payments/manual.py's create_manual_deposit_request() so a
+    manual deposit is gated by the exact same rules an automatic one is,
+    not a second copy that could quietly drift from this one.
+    """
+    # Rate-limited before anything else (spec section 9.2: "deposit
+    # 5/hour") -- a cheap Redis round-trip gates every DB write and
+    # provider call below it, the same rate-limit-first ordering
+    # services/gateway/connection.py's own _run_action() uses.
+    if not await rate_limit.allow(redis, "deposit", str(user_id), **rate_limit.DEPOSIT):
+        raise DepositRateLimited(f"user {user_id} exceeded the deposit rate limit")
+
+    if amount < min_deposit:
+        raise BelowMinimumDeposit(f"amount {amount} is below the minimum {min_deposit}")
+
+
+async def _check_deposit_eligibility(
+    conn: AsyncpgConnection, *, user_id: int, amount: Decimal, daily_cap: Decimal
+) -> None:
+    """Raises UnknownDepositor / DepositorSelfExcluded / DepositorBanned /
+    DepositorCoolingOff / DailyDepositCapExceeded. Must be called with
+    `conn` already acquired (a caller-owned transaction for the manual
+    path; create_deposit_intent()'s own bare `pool.acquire()` block for
+    the automatic path, unchanged from before this was extracted). See
+    _check_deposit_rate_limit_and_minimum's own docstring for why this is
+    split out at all.
+    """
+    user_status = await conn.fetchval("SELECT status FROM users WHERE id = $1", user_id)
+    if user_status is None:
+        raise UnknownDepositor(f"user {user_id} does not exist")
+    if user_status == "self_excluded":
+        raise DepositorSelfExcluded(f"user {user_id} is self-excluded")
+    if user_status == "banned":
+        raise DepositorBanned(f"user {user_id} is banned")
+
+    limits = await responsible_gaming.get_or_create_limits(conn, user_id)
+    if limits.cooloff_until is not None and datetime.now(UTC) < limits.cooloff_until:
+        raise DepositorCoolingOff(f"user {user_id} is cooling off until {limits.cooloff_until}")
+
+    user_cap = responsible_gaming.effective_deposit_cap(limits)
+    effective_cap = min(daily_cap, user_cap) if user_cap is not None else daily_cap
+
+    today_total = await conn.fetchval(
+        """
+        SELECT COALESCE(SUM(amount), 0) FROM payments
+        WHERE user_id = $1 AND direction = 'in'
+          AND status IN ('pending', 'processing', 'succeeded')
+          AND created_at >= date_trunc('day', now())
+        """,
+        user_id,
+    )
+    if today_total + amount > effective_cap:
+        raise DailyDepositCapExceeded(f"user {user_id} would exceed the daily cap {effective_cap}")
+
+
 async def create_deposit_intent(
     pool: asyncpg.Pool,
     redis: Redis,
@@ -95,43 +156,12 @@ async def create_deposit_intent(
     with _tracer.start_as_current_span(
         "deposit.create_intent", attributes={"user_id": user_id, "amount": str(amount)}
     ) as span:
-        # Rate-limited before anything else (spec section 9.2: "deposit
-        # 5/hour") -- a cheap Redis round-trip gates every DB write and
-        # provider call below it, the same rate-limit-first ordering
-        # services/gateway/connection.py's own _run_action() uses.
-        if not await rate_limit.allow(redis, "deposit", str(user_id), **rate_limit.DEPOSIT):
-            raise DepositRateLimited(f"user {user_id} exceeded the deposit rate limit")
-
-        if amount < min_deposit:
-            raise BelowMinimumDeposit(f"amount {amount} is below the minimum {min_deposit}")
+        await _check_deposit_rate_limit_and_minimum(
+            redis, user_id=user_id, amount=amount, min_deposit=min_deposit
+        )
 
         async with pool.acquire() as conn:
-            user_status = await conn.fetchval("SELECT status FROM users WHERE id = $1", user_id)
-            if user_status is None:
-                raise UnknownDepositor(f"user {user_id} does not exist")
-            if user_status == "self_excluded":
-                raise DepositorSelfExcluded(f"user {user_id} is self-excluded")
-            if user_status == "banned":
-                raise DepositorBanned(f"user {user_id} is banned")
-
-            limits = await responsible_gaming.get_or_create_limits(conn, user_id)
-            if limits.cooloff_until is not None and datetime.now(UTC) < limits.cooloff_until:
-                raise DepositorCoolingOff(f"user {user_id} is cooling off until {limits.cooloff_until}")
-
-            user_cap = responsible_gaming.effective_deposit_cap(limits)
-            effective_cap = min(daily_cap, user_cap) if user_cap is not None else daily_cap
-
-            today_total = await conn.fetchval(
-                """
-                SELECT COALESCE(SUM(amount), 0) FROM payments
-                WHERE user_id = $1 AND direction = 'in'
-                  AND status IN ('pending', 'processing', 'succeeded')
-                  AND created_at >= date_trunc('day', now())
-                """,
-                user_id,
-            )
-            if today_total + amount > effective_cap:
-                raise DailyDepositCapExceeded(f"user {user_id} would exceed the daily cap {effective_cap}")
+            await _check_deposit_eligibility(conn, user_id=user_id, amount=amount, daily_cap=daily_cap)
 
             ref_row = await conn.fetchrow(
                 "SELECT 'DEP-' || extract(year from now())::text || '-' || "
