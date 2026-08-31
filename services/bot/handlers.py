@@ -19,7 +19,12 @@ from packages.core import ledger, responsible_gaming
 from packages.core.config import Settings
 from services.bot import referral
 from services.bot.i18n import SUPPORTED_LANGUAGES, resolve_language, t
-from services.bot.keyboards import deposit_checkout_keyboard, main_menu_keyboard, registration_keyboard
+from services.bot.keyboards import (
+    deposit_checkout_keyboard,
+    main_menu_keyboard,
+    open_wallet_keyboard,
+    registration_keyboard,
+)
 from services.bot.notifier import Notifier
 from services.bot.registration import (
     ContactMismatch,
@@ -28,8 +33,10 @@ from services.bot.registration import (
     get_registered_user,
     register_from_contact,
 )
-from services.payments import deposits, manual, withdrawals
+from services.payments import availability, deposits, manual, withdrawals
 from services.payments.chapa import ChapaProvider
+from services.payments.manual_provider import ManualProvider
+from services.payments.provider import PaymentProvider
 
 router = Router(name="jobingo-bot")
 
@@ -261,8 +268,21 @@ async def cmd_deposit(
         await notifier.send(message.chat.id, t("error.not_registered", language))
         return
 
-    if not settings.chapa_api_key or not settings.public_base_url:
-        await notifier.send(message.chat.id, t("deposit.not_available", language))
+    # P1: keep taking deposits when Chapa is unavailable/not configured --
+    # availability.get_payment_availability() is the single source of
+    # truth the Mini App itself reads too (GET /api/payment-methods), so
+    # this bot gate and the Mini App's own dynamic show/hide can never
+    # silently disagree about what's actually live.
+    methods = await availability.get_payment_availability(pool, settings)
+    if ChapaProvider.name not in methods["deposit"]:
+        if ManualProvider.name in methods["deposit"] and settings.miniapp_url:
+            await notifier.send(
+                message.chat.id,
+                t("deposit.manual_only_available", language),
+                reply_markup=open_wallet_keyboard(language, miniapp_url=settings.miniapp_url),
+            )
+        else:
+            await notifier.send(message.chat.id, t("deposit.not_available", language))
         return
 
     raw_amount = (command.args or "").strip()
@@ -334,7 +354,15 @@ async def cmd_withdraw(
         await notifier.send(message.chat.id, t("error.not_registered", language))
         return
 
-    if not settings.chapa_api_key:
+    # P1: keep paying out withdrawals when Chapa is unavailable. Unlike
+    # /deposit, this never needs a Mini-App redirect -- a manual
+    # withdrawal needs nothing this command doesn't already collect (no
+    # destination picker, no reference number up front; an admin adds
+    # the real reference at settlement time). It just runs the exact
+    # same flow through ManualProvider() with force_review=True instead.
+    methods = await availability.get_payment_availability(pool, settings)
+    use_manual = ChapaProvider.name not in methods["withdraw"]
+    if use_manual and ManualProvider.name not in methods["withdraw"]:
         await notifier.send(message.chat.id, t("withdraw.not_available", language))
         return
 
@@ -353,7 +381,7 @@ async def cmd_withdraw(
         await notifier.send(message.chat.id, t("withdraw.invalid_amount", language))
         return
 
-    provider = ChapaProvider(settings.chapa_api_key)
+    provider: PaymentProvider = ManualProvider() if use_manual else ChapaProvider(settings.chapa_api_key)
     try:
         intent = await withdrawals.request_withdrawal(
             pool,
@@ -369,6 +397,7 @@ async def cmd_withdraw(
             kyc_threshold=settings.kyc_required_above_etb,
             chargeback_window_minutes=settings.withdraw_chargeback_window_minutes,
             max_withdrawals_per_day=settings.max_withdrawals_per_day,
+            force_review=use_manual,
         )
     except withdrawals.BelowMinimumWithdrawal:
         await notifier.send(

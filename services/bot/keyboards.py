@@ -31,6 +31,22 @@ def deposit_checkout_keyboard(language: str, *, checkout_url: str, amount: str) 
     )
 
 
+def open_wallet_keyboard(language: str, *, miniapp_url: str) -> InlineKeyboardMarkup:
+    """P1: when the automatic provider is unavailable, /deposit and
+    /withdraw point the player at the Mini App's own wallet screen
+    (destination picker, reference input) instead of trying to collect a
+    multi-field manual request as bot command args. Only ever called once
+    the caller has already confirmed miniapp_url is non-empty -- same
+    "never ship a button pointing nowhere" discipline main_menu_keyboard's
+    own play_button already follows.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t("wallet_open_button", language), web_app=WebAppInfo(url=miniapp_url))]
+        ]
+    )
+
+
 def main_menu_keyboard(language: str, *, miniapp_url: str = "") -> ReplyKeyboardMarkup:
     # Telegram requires a valid HTTPS URL for a web_app button -- until the
     # Mini App (Phase 4) is deployed and MINIAPP_URL is configured, Play is

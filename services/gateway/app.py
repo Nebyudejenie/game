@@ -29,7 +29,7 @@ from services.admin.queries import get_round_fairness
 from services.gateway import queries
 from services.gateway.connection import ConnectionHandler
 from services.gateway.fanout import FanoutHub
-from services.payments import deposits, manual, withdrawals
+from services.payments import availability, deposits, manual, withdrawals
 from services.payments.chapa import ChapaProvider
 from services.payments.manual_provider import ManualProvider
 
@@ -150,6 +150,12 @@ async def api_manual_payment_destinations(
 ) -> list[dict[str, Any]]:
     await _authenticated_user_id(authorization)
     return await queries.list_active_manual_payment_destinations(app.state.pool)
+
+
+@app.get("/api/payment-methods")
+async def api_payment_methods(authorization: str = Header(default="")) -> dict[str, list[str]]:
+    await _authenticated_user_id(authorization)
+    return await availability.get_payment_availability(app.state.pool, get_settings())
 
 
 # Every DepositRejected/WithdrawalRejected subclass maps to a short error

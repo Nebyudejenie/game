@@ -542,3 +542,70 @@ async def test_manual_withdraw_checkbox_forces_a_real_review_status(gateway_serv
 
     assert console_errors == [], f"JS errors during manual withdraw flow: {console_errors}"
     await page.close()
+
+
+async def _toggle_chapa(conn, *, direction: str, enabled: bool) -> None:
+    await conn.execute(
+        "UPDATE payment_provider_availability SET enabled = $1 WHERE provider = 'chapa' AND direction = $2",
+        enabled,
+        direction,
+    )
+
+
+async def test_wallet_shows_only_manual_when_chapa_deposit_is_disabled(gateway_server, browser, pool, conn):
+    # The backend, not this file, decides -- payment_provider_availability
+    # is real, shared state; this proves the Mini App genuinely reads it
+    # live rather than hardcoding "Chapa is always an option."
+    await _toggle_chapa(conn, direction="in", enabled=False)
+    try:
+        destination_row = await conn.fetchrow(
+            "INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name) "
+            "VALUES ('telebirr', '0911000000', 'Jo Bingo PLC') RETURNING id"
+        )
+
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('0.00')", timeout=10000
+        )
+
+        await _open_wallet_tab(page, "deposit")
+        # The manual panel shows up on its own -- no toggle click needed,
+        # since there's nothing else to toggle from.
+        await page.wait_for_selector("#deposit-manual-section:not(.hidden)", timeout=10000)
+        assert await page.is_hidden("#deposit-automatic-section")
+        assert await page.is_hidden("#deposit-manual-toggle-btn")
+
+        assert console_errors == [], f"JS errors while chapa deposit was disabled: {console_errors}"
+        await page.close()
+    finally:
+        await _toggle_chapa(conn, direction="in", enabled=True)
+
+
+async def test_wallet_locks_withdraw_to_manual_when_chapa_withdraw_is_disabled(gateway_server, browser, conn):
+    await _toggle_chapa(conn, direction="out", enabled=False)
+    try:
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('0.00')", timeout=10000
+        )
+
+        await _open_wallet_tab(page, "withdraw")
+        await page.wait_for_function(
+            "document.getElementById('withdraw-manual-toggle-row').classList.contains('hidden')",
+            timeout=10000,
+        )
+        assert await page.is_checked("#withdraw-manual-checkbox")
+        assert await page.is_disabled("#withdraw-manual-checkbox")
+
+        assert console_errors == [], f"JS errors while chapa withdraw was disabled: {console_errors}"
+        await page.close()
+    finally:
+        await _toggle_chapa(conn, direction="out", enabled=True)

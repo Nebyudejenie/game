@@ -20,6 +20,8 @@
   "balance.summary": "Cash: {cash} ETB\nBonus: {bonus} ETB\nLocked: {locked} ETB",
 
   "deposit.not_available": "Deposits are launching soon. Please check back shortly.",
+  "deposit.manual_only_available": "Automatic deposits aren't available right now. Tap below to open your wallet and deposit manually.",
+  "wallet_open_button": "💰 Open Wallet",
   "deposit.usage": "Usage: /deposit <amount>. Minimum {min} ETB.",
   "deposit.invalid_amount": "Please enter a valid amount, for example: /deposit 200",
   "deposit.rate_limited": "Too many deposit attempts. Please wait a bit and try again.",

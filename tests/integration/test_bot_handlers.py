@@ -20,10 +20,12 @@ from aiogram.types import Chat, Contact, Message, PhotoSize, TelegramObject, Upd
 
 from packages.core.config import Settings
 from packages.core.phone_crypto import decrypt_phone
+from services.admin import queries as admin_queries
 from services.bot.app import build_dispatcher
 from services.bot.notifier import Notifier
 from services.payments import manual
-from tests.integration.conftest import next_telegram_id
+from tests.integration.conftest import fund_user, next_telegram_id
+from tests.integration.test_admin_auth import create_test_admin
 
 # Randomized start, not itertools.count(1): update_ids feed the dedup
 # middleware's Redis keys (seen:tg:{update_id}, 10 minute TTL). A counter
@@ -401,8 +403,14 @@ async def test_deposit_command_rate_limited_after_five_in_a_row(pool, bot_ctx, m
     # silently no-op), and the spec section 9.2 "deposit 5/hour" rate
     # limit genuinely blocks a 6th rapid attempt end to end.
     class _FakeChapaProvider:
+        # A class attribute, matching the real ChapaProvider's own shape
+        # -- services/bot/handlers.py's availability check reads
+        # ChapaProvider.name off the class itself, before any instance
+        # exists, the same way it reads it off the real class.
+        name = "chapa"
+
         def __init__(self, api_key: str) -> None:
-            self.name = "chapa"
+            pass
 
         async def create_checkout(self, *, amount, user_ref, our_ref, return_url):
             from services.payments.provider import CheckoutResult
@@ -1162,3 +1170,96 @@ async def test_photo_attaches_to_the_players_most_recent_pending_manual_deposit(
         "SELECT receipt_telegram_file_id FROM payments WHERE id = $1", intent.payment_id
     )
     assert stored == "AgACAgQ-real-receipt"
+
+
+# --- dynamic provider availability in /deposit and /withdraw (P1) ------
+# payment_provider_availability is shared, session-wide state -- every
+# test below disables exactly the row it needs and restores it in a
+# finally block, the same discipline test_payment_availability.py's own
+# toggle tests already use.
+
+
+async def _set_chapa_availability(pool, *, direction: str, enabled: bool) -> None:
+    admin_id, *_ = await create_test_admin(pool)
+    updated = await admin_queries.set_payment_provider_availability_admin(
+        pool, admin_id=admin_id, provider="chapa", direction=direction, enabled=enabled,
+        reason="test toggle", ip_address=None,
+    )
+    assert updated is True
+
+
+async def test_deposit_redirects_to_the_wallet_when_only_manual_is_available(pool, bot_ctx, monkeypatch):
+    dp, bot, session = bot_ctx
+    settings = dp["settings"]
+    monkeypatch.setattr(settings, "miniapp_url", "https://miniapp.test/")
+
+    await _set_chapa_availability(pool, direction="in", enabled=False)
+    try:
+        telegram_id = await _register(dp, bot, session)
+        await dp.feed_update(bot, make_text_update(telegram_id, "/deposit 100"))
+        await _settle()
+
+        assert len(session.sent) == 1
+        sent = session.sent[0]
+        assert "manually" in sent.text or "በእጅ" in sent.text
+        assert sent.reply_markup is not None
+        button = sent.reply_markup.inline_keyboard[0][0]
+        assert button.web_app is not None
+        assert button.web_app.url == "https://miniapp.test/"
+    finally:
+        await _set_chapa_availability(pool, direction="in", enabled=True)
+
+
+async def test_deposit_shows_not_available_when_no_provider_and_no_miniapp_url(pool, bot_ctx):
+    dp, bot, session = bot_ctx
+    settings = dp["settings"]
+    assert not settings.miniapp_url  # bot_setup's own fixture leaves this empty
+
+    await _set_chapa_availability(pool, direction="in", enabled=False)
+    admin_id, *_ = await create_test_admin(pool)
+    await admin_queries.set_payment_provider_availability_admin(
+        pool, admin_id=admin_id, provider="manual", direction="in", enabled=False,
+        reason="test: simulate manual disabled too", ip_address=None,
+    )
+    try:
+        telegram_id = await _register(dp, bot, session)
+        await dp.feed_update(bot, make_text_update(telegram_id, "/deposit 100"))
+        await _settle()
+
+        assert len(session.sent) == 1
+        assert "launching soon" in session.sent[0].text or "በቅርቡ" in session.sent[0].text
+    finally:
+        await _set_chapa_availability(pool, direction="in", enabled=True)
+        await admin_queries.set_payment_provider_availability_admin(
+            pool, admin_id=admin_id, provider="manual", direction="in", enabled=True,
+            reason="test cleanup", ip_address=None,
+        )
+
+
+async def test_withdraw_uses_the_manual_rail_when_chapa_is_unavailable(pool, conn, bot_ctx):
+    # Proves the exact same command syntax seamlessly falls through to
+    # ManualProvider()+force_review=True -- no Mini-App redirect needed
+    # here, unlike deposit, since a manual withdrawal needs nothing this
+    # command doesn't already collect.
+    dp, bot, session = bot_ctx
+    await _set_chapa_availability(pool, direction="out", enabled=False)
+    try:
+        telegram_id = await _register(dp, bot, session)
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        await fund_user(conn, user_row["id"], Decimal("500.00"))
+
+        await dp.feed_update(bot, make_text_update(telegram_id, "/withdraw 100 0911223344 Abebe Kebede"))
+        await _settle()
+
+        assert len(session.sent) == 1
+        assert "under review" in session.sent[0].text or "እየተገመገመ" in session.sent[0].text
+
+        payment = await pool.fetchrow(
+            "SELECT amount, status, provider FROM payments WHERE user_id = $1", user_row["id"]
+        )
+        assert payment is not None
+        assert payment["provider"] == "manual"
+        assert payment["status"] == "review"  # always review for manual, regardless of amount
+        assert payment["amount"] == Decimal("100.00")
+    finally:
+        await _set_chapa_availability(pool, direction="out", enabled=True)

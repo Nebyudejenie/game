@@ -583,6 +583,66 @@ async function openWallet() {
   } catch {
     /* wallet screen just shows whatever it already had */
   }
+  await applyPaymentAvailability();
+}
+
+// P1: the backend, not this file, decides which rail is live --
+// payment_provider_availability, read fresh every time the wallet
+// opens, so an admin flipping a toggle takes effect for the very next
+// player who opens their wallet, not just on a future deploy.
+async function applyPaymentAvailability() {
+  try {
+    const response = await fetch("/api/payment-methods", { headers: authHeader() });
+    if (!response.ok) return;
+    const methods = await response.json();
+
+    const depositHasAutomatic = methods.deposit.includes("chapa");
+    const depositHasManual = methods.deposit.includes("manual");
+    if (!depositHasAutomatic) {
+      // Nothing to toggle *from* -- go straight to the manual panel,
+      // permanently, rather than showing a toggle button that would
+      // only ever lead to a dead automatic form.
+      el("deposit-automatic-section").classList.add("hidden");
+      el("deposit-manual-toggle-btn").classList.add("hidden");
+      el("deposit-automatic-toggle-btn").classList.add("hidden");
+      if (depositHasManual) {
+        el("deposit-manual-section").classList.remove("hidden");
+        if (!manualDestinationsLoaded) {
+          manualDestinationsLoaded = true;
+          await loadManualDestinations();
+        }
+      } else {
+        el("deposit-manual-section").classList.add("hidden");
+        setWalletStatus("deposit-status", "wallet.not_available", "error");
+      }
+    } else if (!depositHasManual) {
+      // Automatic works but manual doesn't (or isn't configured) --
+      // never offer a toggle to a dead end.
+      el("deposit-manual-toggle-btn").classList.add("hidden");
+    }
+
+    const withdrawHasAutomatic = methods.withdraw.includes("chapa");
+    const withdrawHasManual = methods.withdraw.includes("manual");
+    const manualToggleRow = el("withdraw-manual-toggle-row");
+    if (!withdrawHasAutomatic && withdrawHasManual) {
+      // Only manual works -- every withdrawal is manual regardless of
+      // the checkbox, so lock it checked and hide the now-meaningless
+      // choice rather than leave a togglable control with only one
+      // real answer.
+      el("withdraw-manual-checkbox").checked = true;
+      el("withdraw-manual-checkbox").disabled = true;
+      manualToggleRow.classList.add("hidden");
+    } else if (!withdrawHasAutomatic && !withdrawHasManual) {
+      setWalletStatus("withdraw-status", "wallet.not_available", "error");
+      el("withdraw-submit-btn").disabled = true;
+    } else if (!withdrawHasManual) {
+      manualToggleRow.classList.add("hidden");
+    }
+  } catch {
+    /* wallet screen just shows whatever it already had -- the submit
+       handlers' own error paths still catch a genuinely unavailable
+       provider server-side either way. */
+  }
 }
 
 function authHeader() {

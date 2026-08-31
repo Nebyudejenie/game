@@ -20,6 +20,8 @@
   "balance.summary": "ካሽ: {cash} ብር\nቦነስ: {bonus} ብር\nየተያዘ: {locked} ብር",
 
   "deposit.not_available": "ገቢ ማድረግ በቅርቡ ይጀምራል። እባክዎ ትንሽ ይታገሱ።",
+  "deposit.manual_only_available": "ራስ-ሰር ገቢ አሁን አይገኝም። የገንዘብ ቦርሳዎን ለመክፈት እና በእጅ ገቢ ለማድረግ ከታች ይጫኑ።",
+  "wallet_open_button": "💰 የገንዘብ ቦርሳ ክፈት",
   "deposit.usage": "አጠቃቀም፦ /deposit <መጠን>። ዝቅተኛው {min} ብር ነው።",
   "deposit.invalid_amount": "እባክዎ ትክክለኛ መጠን ያስገቡ፣ ለምሳሌ፦ /deposit 200",
   "deposit.rate_limited": "በጣም ብዙ የገቢ ሙከራዎች። እባክዎ ትንሽ ቆይተው እንደገና ይሞክሩ።",

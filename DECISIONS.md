@@ -5,6 +5,96 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-08-31 — Manual payment subsystem, Stage 6: dynamic provider availability
+
+Sixth and final feature stage of the P1 manual-payment directive. Every
+prior stage built a real, tested code path; this stage is what makes
+"which rail is live" a genuinely admin-controlled fact instead of a
+hardcoded assumption baked into the bot and the Mini App -- deliberately
+saved for last, once every path it could route to already existed and
+was tested (per the plan's own staging rationale).
+
+**`services/payments/availability.py`** (new): `get_payment_availability
+(pool, settings)` is the single source of truth both the Mini App (`GET
+/api/payment-methods`) and the bot (`/deposit`, `/withdraw`) now read --
+combining the admin's own `payment_provider_availability` toggle with
+whether a provider is *actually* wired up with real code. `chapa`
+additionally requires real credentials (`settings.chapa_api_key`, plus
+`public_base_url` specifically for deposits, mirroring the exact gate
+`services/gateway/app.py`'s `/api/deposit` already enforced on its own).
+`santimpay`/`arifpay` are hardcoded unavailable regardless of what the
+admin toggle says -- no adapter class exists for either, so an enabled
+toggle alone can't make a nonexistent adapter callable; this is the P1
+directive's own launch principle ("ship with Chapa + Manual, don't block
+on SantimPay/ArifPay") enforced in code, not just followed by omission.
+
+**Bot**: `/deposit` now redirects to the Mini App's wallet screen (a
+real inline `web_app` button, `keyboards.py`'s new `open_wallet_keyboard
+()`) when only manual is available -- deposit genuinely needs the
+richer form the bot's own single-line command args can't collect.
+`/withdraw` needs no redirect at all: manual withdrawal needs nothing
+the command doesn't already collect, so it just runs the identical flow
+through `ManualProvider()` + `force_review=True` instead of Chapa,
+transparently to the player.
+
+**Mini App**: `openWallet()` now fetches `/api/payment-methods` every
+time the wallet opens (not cached, not baked in at page load) and
+adjusts the deposit/withdraw panes accordingly: if only manual deposit
+is live, the manual panel shows directly with no dead-end toggle button
+offering a form that would just fail; if only manual withdrawal is
+live, the checkbox locks checked and disabled rather than presenting a
+choice with one real answer. An admin flipping a toggle takes effect
+for the very next player who opens their wallet.
+
+**A real bug caught while wiring this**: the AST-based no-hardcoded-
+strings checker (`test_bot_no_hardcoded_strings.py`) correctly flagged
+`"chapa"`/`"manual"` string-literal comparisons in the new
+`cmd_deposit`/`cmd_withdraw` availability checks. Fixed properly, not
+by adding an exemption to the checker: both provider classes already
+expose their own name as a real class attribute
+(`ChapaProvider.name`/`ManualProvider.name`, both already imported),
+so the comparisons read off those directly instead of a second,
+parallel set of literals that could drift from the actual provider
+tags -- the exact precedent `withdrawals.py`'s own `STATUS_APPROVED`/
+`STATUS_REVIEW` constants already established for this same class of
+problem. One existing test's `_FakeChapaProvider` stub had `.name` set
+as an instance attribute in `__init__` rather than a class attribute
+like the real `ChapaProvider` -- harmless before this change (nothing
+read `.name` off the bare class), a real break after, fixed to match
+the real class's own shape.
+
+**Verification**: mypy clean. 19 new tests: 4 covering
+`get_payment_availability()` itself directly (including that an admin
+enabling the santimpay toggle still doesn't make it appear, and that
+chapa deposit specifically needs `public_base_url` while chapa
+withdrawal doesn't), 3 covering the bot's new branching (the wallet
+redirect with a real inline `web_app` button, the "nothing available"
+fallback, and the seamless manual-withdrawal path), and 2 new
+real-browser Mini App e2e tests toggling `payment_provider_availability`
+directly and confirming the deposit/withdraw panes genuinely respond --
+all 19 confirmed to genuinely fail against the pre-Stage-6 tree via
+`git stash` (either an `ImportError` for the new module, or an assertion
+against the old hardcoded chapa-only behavior). Full clean-slate
+rebuild: fresh `alembic upgrade head` (14 migrations) → mypy clean →
+`pytest tests/` → 873 passed, 0 failed → `-m e2e` 27 passed clean (no
+flakes this run) → `-m chaos_infra` 2 passed → `-m load`'s multi-room
+latency test failed again under the same already-documented shared-CPU
+contention, unrelated to this change (no gateway/fanout code touched).
+
+**This closes the manual payment subsystem's six-stage build.** The
+product directive's own acceptance bar -- a player completing
+registration → deposit → wallet credit → play → win → payout →
+withdrawal via either automatic or manual payment, without breaking
+existing ledger/security/KYC/responsible-gaming/audit/reconciliation --
+now holds for both rails, verified end to end at every layer (domain
+functions, admin backend, admin frontend, gateway API, bot, Mini App)
+across six independently-committed, independently-verified stages. The
+one explicitly deferred item, per its own Stage-1 scope decision: two-
+person approval for high-risk manual payments, which needs a real
+threshold and approval shape from the business that was never invented.
+
+---
+
 ## 2026-08-31 — Manual payment subsystem, Stage 5: player-facing bot + Mini App UI
 
 Fifth stage of the P1 manual-payment directive. This is the first stage

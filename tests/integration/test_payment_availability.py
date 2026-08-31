@@ -8,7 +8,9 @@ comment on why).
 
 import httpx
 
+from packages.core.config import Settings, get_settings
 from services.admin import queries
+from services.payments.availability import get_payment_availability
 from tests.integration.test_admin_app import _auth_headers
 from tests.integration.test_admin_auth import create_test_admin
 
@@ -162,3 +164,74 @@ async def test_finance_cannot_create_manual_payment_destinations_over_http(admin
             json={"method_kind": "telebirr", "account_ref": "0911000000", "account_name": "Jo Bingo PLC"},
         )
     assert response.status_code == 403
+
+
+# --- get_payment_availability (services/payments/availability.py) --
+# the player-facing side: what the Mini App's GET /api/payment-methods
+# and the bot's /deposit and /withdraw commands actually see, combining
+# the admin toggle above with whether a provider is genuinely wired up
+# at all.
+
+
+async def test_chapa_and_manual_available_by_default_santimpay_arifpay_never_are(pool):
+    # The seeded defaults (chapa+manual live, santimpay/arifpay off) plus
+    # the real, already-configured test-environment Chapa credentials --
+    # this is "the platform as it would actually appear to a player
+    # today," not a synthetic scenario.
+    methods = await get_payment_availability(pool, get_settings())
+    assert "chapa" in methods["deposit"]
+    assert "manual" in methods["deposit"]
+    assert "chapa" in methods["withdraw"]
+    assert "manual" in methods["withdraw"]
+    assert "santimpay" not in methods["deposit"]
+    assert "arifpay" not in methods["deposit"]
+
+
+async def test_santimpay_stays_unavailable_even_if_an_admin_enables_the_toggle(pool):
+    # The whole point of hardcoding _IMPLEMENTED_PROVIDERS: no adapter
+    # class exists for santimpay, so an admin flipping the DB toggle on
+    # (maybe in anticipation of a future integration) must never make it
+    # appear to a player before real code actually backs it.
+    admin_id, *_ = await create_test_admin(pool)
+    await queries.set_payment_provider_availability_admin(
+        pool, admin_id=admin_id, provider="santimpay", direction="in", enabled=True,
+        reason="test: simulate a premature toggle", ip_address=None,
+    )
+    try:
+        methods = await get_payment_availability(pool, get_settings())
+        assert "santimpay" not in methods["deposit"]
+    finally:
+        await queries.set_payment_provider_availability_admin(
+            pool, admin_id=admin_id, provider="santimpay", direction="in", enabled=False,
+            reason="test cleanup", ip_address=None,
+        )
+
+
+async def test_chapa_deposit_unavailable_without_a_public_base_url_even_with_a_key(pool):
+    # Mirrors the exact real-world gate services/gateway/app.py's own
+    # /api/deposit already enforces (app.state.chapa is None or not
+    # settings.public_base_url) -- an admin toggle can't substitute for
+    # genuinely missing deploy-time config.
+    settings = Settings(chapa_api_key="a-real-looking-key", public_base_url="")
+    methods = await get_payment_availability(pool, settings)
+    assert "chapa" not in methods["deposit"]
+    # Withdrawals don't need public_base_url (no checkout/return_url
+    # involved), so chapa withdrawal stays available on key alone.
+    assert "chapa" in methods["withdraw"]
+
+
+async def test_no_providers_available_when_chapa_unconfigured_and_manual_disabled(pool):
+    admin_id, *_ = await create_test_admin(pool)
+    await queries.set_payment_provider_availability_admin(
+        pool, admin_id=admin_id, provider="manual", direction="in", enabled=False,
+        reason="test: simulate manual disabled too", ip_address=None,
+    )
+    try:
+        settings = Settings(chapa_api_key="", public_base_url="")
+        methods = await get_payment_availability(pool, settings)
+        assert methods["deposit"] == []
+    finally:
+        await queries.set_payment_provider_availability_admin(
+            pool, admin_id=admin_id, provider="manual", direction="in", enabled=True,
+            reason="test cleanup", ip_address=None,
+        )
