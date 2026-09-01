@@ -20,11 +20,14 @@ import json
 from typing import Any
 
 import asyncpg
+import structlog
 from redis.asyncio import Redis
 
 from packages.core.notifications import NOTIFICATIONS_STREAM
 from services.bot.i18n import resolve_language, t
 from services.bot.notifier import Notifier
+
+logger = structlog.get_logger()
 
 GROUP = "bot-notification-workers"
 
@@ -98,8 +101,24 @@ async def process_next(
 async def _drain_one_user(
     pool: asyncpg.Pool, redis: Redis, notifier: Notifier, entries: list[tuple[str, dict[str, str]]]
 ) -> None:
+    # A code-review pass caught two related gaps here: db_pool.py's new
+    # bounded pool.acquire() turns sustained-load pool exhaustion into a
+    # real TimeoutError (previously an indefinite hang), and this
+    # function's caller runs every user's own _drain_one_user()
+    # concurrently via asyncio.gather() -- without a try/except here, one
+    # user's failure would propagate into that gather() and (its default
+    # behavior, no return_exceptions=True) cancel every other user's
+    # still-in-flight delivery in the same batch too, not just skip the
+    # one that failed. process_one() only acks on a normal exit, so a
+    # message that raises here is simply picked back up by this same
+    # consumer's own pending-entries re-read next iteration -- the exact
+    # redelivery-on-crash guarantee this module's own docstring already
+    # promises, just without actually crashing anything.
     for msg_id, fields in entries:
-        await process_one(pool, redis, notifier, msg_id=msg_id, fields=fields)
+        try:
+            await process_one(pool, redis, notifier, msg_id=msg_id, fields=fields)
+        except Exception:
+            logger.exception("notification_relay_process_one_failed", msg_id=msg_id)
 
 
 async def _process_batch(
@@ -129,11 +148,23 @@ async def run_forever(
 ) -> None:
     await ensure_group(redis)
     while True:
-        pending = await redis.xreadgroup(GROUP, consumer_name, {NOTIFICATIONS_STREAM: "0"}, count=10)
-        entries = _flatten(pending)
-        if not entries:
-            fresh = await redis.xreadgroup(
-                GROUP, consumer_name, {NOTIFICATIONS_STREAM: ">"}, count=10, block=5000
-            )
-            entries = _flatten(fresh)
+        # Read-phase failures (Redis itself, say) get isolated the same
+        # way as services/payments/payout_worker.py's run_forever() --
+        # back off and retry the whole iteration rather than letting an
+        # exception escape this loop and silently kill the fire-and-forget
+        # relay_task with no automatic restart (services/bot/app.py only
+        # ever cancels it at shutdown, never checks its health in between).
+        try:
+            pending = await redis.xreadgroup(GROUP, consumer_name, {NOTIFICATIONS_STREAM: "0"}, count=10)
+            entries = _flatten(pending)
+            if not entries:
+                fresh = await redis.xreadgroup(
+                    GROUP, consumer_name, {NOTIFICATIONS_STREAM: ">"}, count=10, block=5000
+                )
+                entries = _flatten(fresh)
+        except Exception:
+            logger.exception("notification_relay_read_failed")
+            await asyncio.sleep(1)
+            continue
+
         await _process_batch(pool, redis, notifier, entries)

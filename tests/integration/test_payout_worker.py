@@ -6,7 +6,9 @@ call after a crash is not a double-pay), and a rejected payout returns the
 exact amount to user_cash.
 """
 
+import asyncio
 import collections
+import contextlib
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -291,3 +293,62 @@ async def test_a_second_job_for_an_already_settled_payment_is_a_safe_noop(pool, 
 async def test_empty_stream_returns_none(pool, redis):
     outcome = await payout_worker.process_next(pool, redis, FakePayoutProvider(), consumer_name="w-empty")
     assert outcome is None
+
+
+async def test_run_forever_survives_one_message_raising_and_still_settles_the_rest(pool, redis, conn, monkeypatch):
+    # The real regression a code-review pass caught: packages/core/
+    # db_pool.py's new bounded pool.acquire() turns a sustained-load pool
+    # exhaustion into a real TimeoutError (previously an indefinite hang)
+    # -- but run_forever()'s own loop had no exception isolation at all,
+    # so that exception (or any other uncaught one from inside
+    # process_one()) would silently kill this fire-and-forget background
+    # task for good, with nothing else in the process ever noticing.
+    # Simulates the uncaught-exception case directly (monkeypatching
+    # process_one, rather than actually exhausting a real pool, which
+    # would take the real 10s ACQUIRE_TIMEOUT_SECONDS to manifest) and
+    # proves the loop survives it, stays alive, and still settles a later
+    # message in the same batch.
+    user_id = await create_funded_user(conn, Decimal("500.00"))
+    our_ref_bad = await _approved_withdrawal(pool, redis, conn, user_id, Decimal("40.00"))
+    our_ref_good = await _approved_withdrawal(pool, redis, conn, user_id, Decimal("30.00"))
+
+    real_process_one = payout_worker.process_one
+
+    async def flaky_process_one(pool, redis, provider, *, msg_id, our_ref):
+        if our_ref == our_ref_bad:
+            raise TimeoutError("simulated pool exhaustion")
+        return await real_process_one(pool, redis, provider, msg_id=msg_id, our_ref=our_ref)
+
+    monkeypatch.setattr(payout_worker, "process_one", flaky_process_one)
+
+    provider = FakePayoutProvider()
+    task = asyncio.create_task(
+        payout_worker.run_forever(pool, redis, provider, consumer_name="w-resilience")
+    )
+    try:
+        for _ in range(50):
+            status = await conn.fetchval("SELECT status FROM payments WHERE our_ref = $1", our_ref_good)
+            if status == "succeeded":
+                break
+            await asyncio.sleep(0.1)
+        assert not task.done(), f"run_forever() task died: {task.exception() if task.done() else None}"
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    # The bad message never settled (still locked, still pending -- would
+    # be picked back up by this same consumer's own pending-entries
+    # re-read on a real restart, the crash-redelivery guarantee this
+    # module's own docstring promises).
+    assert await _locked(conn, user_id) == Decimal("40.00")
+    bad_status = await conn.fetchval(
+        "SELECT status FROM payments WHERE our_ref = $1", our_ref_bad
+    )
+    assert bad_status == "approved"
+
+    # The good message settled normally despite the other one raising.
+    good_status = await conn.fetchval(
+        "SELECT status FROM payments WHERE our_ref = $1", our_ref_good
+    )
+    assert good_status == "succeeded"

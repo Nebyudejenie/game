@@ -406,3 +406,62 @@ async def test_relay_preserves_per_user_order_when_processing_concurrently(pool,
         assert "3.00" in session.sent[2].text
     finally:
         await notifier.stop()
+
+
+async def test_process_batch_survives_one_users_failure_and_still_delivers_the_rest(pool, redis, conn):
+    # The real regression a code-review pass caught: packages/core/
+    # db_pool.py's new bounded pool.acquire() turns a sustained-load pool
+    # exhaustion into a real TimeoutError (previously an indefinite hang)
+    # -- and _process_batch() runs every user's own _drain_one_user()
+    # concurrently via asyncio.gather() with no per-user exception
+    # isolation, so (gather()'s own default behavior, no
+    # return_exceptions=True) one user's failure would cancel every OTHER
+    # user's still-in-flight delivery in the same batch too, not just
+    # skip the one that failed. Confirms the fix: user B's delivery still
+    # lands even though user A's process_one() raises.
+    telegram_id_a = next_telegram_id()
+    telegram_id_b = next_telegram_id()
+    user_a = await _register(conn, telegram_id_a)
+    user_b = await _register(conn, telegram_id_b)
+
+    await notify_user(pool, redis, user_id=user_a, key="notify.you_won", amount="1.00")
+    await notify_user(pool, redis, user_id=user_b, key="notify.you_won", amount="2.00")
+
+    await notification_relay.ensure_group(redis)
+    pending = await redis.xreadgroup(
+        notification_relay.GROUP, f"test-{telegram_id_a}", {NOTIFICATIONS_STREAM: ">"}, count=10
+    )
+    entries = notification_relay._flatten(pending)
+    assert len(entries) == 2
+
+    class _FlakyNotifier:
+        def __init__(self, real: Notifier, *, fail_chat_id: int) -> None:
+            self._real = real
+            self._fail_chat_id = fail_chat_id
+
+        async def send(self, chat_id: int, text: str, **kwargs: object) -> asyncio.Future[None]:
+            if chat_id == self._fail_chat_id:
+                raise RuntimeError("simulated pool exhaustion")
+            return await self._real.send(chat_id, text, **kwargs)
+
+    notifier, session = await _make_notifier()
+    try:
+        flaky = _FlakyNotifier(notifier, fail_chat_id=telegram_id_a)
+        await notification_relay._process_batch(pool, redis, flaky, entries)
+        await asyncio.sleep(0.2)
+
+        assert len(session.sent) == 1
+        assert "2.00" in session.sent[0].text
+
+        # A's message was never acked -- still pending for this same
+        # consumer, exactly the crash-redelivery guarantee this module's
+        # own docstring promises, just without anything actually crashing.
+        still_pending = notification_relay._flatten(
+            await redis.xreadgroup(
+                notification_relay.GROUP, f"test-{telegram_id_a}", {NOTIFICATIONS_STREAM: "0"}, count=10
+            )
+        )
+        assert len(still_pending) == 1
+        assert int(still_pending[0][1]["telegram_id"]) == telegram_id_a
+    finally:
+        await notifier.stop()

@@ -5,6 +5,139 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-01 — A `/code-review high` pass caught the pool-timeout fix's own real regression: bounded failures need somewhere to land
+
+The pool-acquire()-timeout fix above (same day) had never had an
+independent review -- a `/code-review high` pass over it (matching this
+project's own established precedent: an earlier full-platform pass found
+real bugs in exactly this shape of code) found a genuine, real regression
+it introduced, plus one it made materially more likely to matter. Both are
+the same underlying shape: turning an indefinite *hang* into a fast
+`TimeoutError` is correct for a synchronous HTTP request (the caller just
+gets a 500 and can retry), but for a fire-and-forget background loop with
+no supervision, an unhandled exception doesn't degrade gracefully the way
+a hang does -- a hang is bad (stuck) but self-healing once load clears; an
+unhandled exception kills the loop's `asyncio.Task` outright, and nothing
+in this codebase was checking on any of these tasks' health in between
+startup and shutdown.
+
+**1. `services/payments/payout_worker.py` and `services/bot/
+notification_relay.py`'s own `run_forever()` loops had zero exception
+isolation.** A single message's `pool.acquire()` timeout (or any other
+uncaught exception from inside `process_one()`) would propagate out of the
+bare `for`/`while` loop, silently killing the fire-and-forget
+`consumer_task`/`relay_task`. `main_async()` (payout worker) and
+`services/bot/app.py`'s `_on_startup()` only ever `await stop_event.wait()`
+or cancel these tasks at shutdown -- neither checks on them while running.
+Worse than the pre-fix hang: all payout dispatch, or all bot notification
+delivery, would stop *permanently* with no automatic recovery, only a
+generic "Task exception was never retrieved" warning nobody's watching
+for, until an operator notices and manually restarts the process.
+
+Fixed with two levels of isolation in both files' `run_forever()`, mirroring
+`payout_worker.py`'s own pre-existing `_run_periodic_sweep()` pattern (which
+already wraps its `sweep()` call in `try/except Exception: logger.exception
+(...)` for exactly this reason): a read-phase failure (Redis itself, say)
+backs off 1s and retries the whole iteration; a single message's failure is
+caught per-message (payout worker) or per-user (notification relay, since
+`_process_batch()` already runs every user's `_drain_one_user()`
+concurrently via `asyncio.gather()` -- without per-user isolation, one
+user's failure would (`gather()`'s own default behavior) cancel every
+*other* user's still-in-flight delivery in the same batch too, not just
+skip the one that failed). Both rely on the same existing guarantee
+`process_one()`'s own docstring already promises: it only acks on a normal
+exit, so a message that raises is simply picked back up by this same
+consumer's own pending-entries re-read next iteration -- the real
+crash-redelivery semantics this whole consumer-group design was already
+built around, just without anything actually needing to crash to get it.
+`services/bot/notification_relay.py` had no logger at all; added one
+matching its own sibling `services/bot/notifier.py`'s `structlog.
+get_logger()` convention.
+
+**2. A more severe version of the same gap in `services/engine/
+worker.py`, involving real player funds, not just delayed delivery.**
+`RoundEngine.run_forever()` (one task per room) also has no exception
+isolation, and its own `finally` block still correctly releases the room
+lock even when it dies from an uncaught exception -- but
+`EngineWorker.run_active_rooms()`'s periodic reclaim (`services/engine/
+worker.py`'s own 30-second poll) treats a room whose task is `.done()` as
+simply available to reclaim, unconditionally starting a **brand-new**
+`RoundEngine` whose `__init__` hardcodes `self._status = "idle"` with no
+database read at all -- no memory of whatever round the previous engine
+instance was in the middle of. `services/engine/recovery.py`'s
+`recover_orphaned_rounds()` -- the function that exists specifically to
+void and refund exactly this situation -- was only ever wired to run once,
+at `EngineWorker.start()`. A room's engine dying mid-session (any uncaught
+exception; `db_pool.py`'s new bounded `pool.acquire()` timeout under
+sustained load is one concrete new way that can now happen, where it
+previously would have just hung -- and a hung engine, unlike a dead one,
+never releases its lock, so it was never silently reclaimed by a
+confused fresh engine in the first place) would leave that round's real
+player stakes sitting in `pot_escrow`, permanently orphaned with no
+refund, until the entire process restarted.
+
+Fixed by calling `recover_orphaned_rounds(pool, redis)` at the top of
+every `run_active_rooms()` poll, not just once at startup -- the function
+itself is already genuinely idempotent and safe to call repeatedly
+(queries live DB/Redis state each call, no "already ran" flag;
+`refund_round()`'s own docstring states its idempotency guarantee
+explicitly), so this is reusing already-trusted, already-chaos-tested
+logic on a tighter cadence, not new refund logic. Also wrapped `main()`'s
+own outer polling loop's call to `run_active_rooms()` in a
+`try/except Exception: logger.exception(...)` -- a transient failure
+there (that same acquire timeout, a Postgres blip) must not silently kill
+the *entire* claim-scanning loop for every room this worker might ever
+own, even though already-running rooms' own engine tasks are independent
+and keep working regardless.
+
+**Deliberately not touched**: `RoundEngine.run_forever()`/`_run_lobby()`
+itself stays without a try/except of its own. `services/engine/
+recovery.py`'s own module docstring states the design principle directly:
+"Never restart a game blindly after a crash: recover the authoritative
+state from Postgres." Blindly catching-and-continuing inside the engine's
+own loop (the same pattern that's correct for the payout/notification
+consumer loops above) would be *wrong* here -- a caught mid-transaction
+exception could leave the engine's in-memory state inconsistent with the
+database in a way a queue message's per-item retry never risks, since a
+game round isn't a series of independent, individually-idempotent items.
+Letting it die cleanly (the lock release already works correctly) and
+recovering the resulting orphaned round from authoritative DB state on the
+very next poll is the actually-safe fix, not a compromise.
+
+**Verified for real**: three new tests, each simulating the uncaught-
+exception scenario directly (monkeypatching/wrapping the relevant function
+to raise for one specific message/room, rather than actually exhausting a
+real pool, which would take the real 10s `ACQUIRE_TIMEOUT_SECONDS` to
+manifest) --
+`test_run_forever_survives_one_message_raising_and_still_settles_the_rest`
+(payout worker: a bad message never settles and stays locked/pending,
+a good one in the same run still settles, the loop task itself never
+dies), `test_process_batch_survives_one_users_failure_and_still_delivers_
+the_rest` (notification relay: user B's delivery lands and gets acked
+despite user A's `send()` raising, user A's message stays unacked/
+pending), and `test_run_active_rooms_recovers_a_room_that_dies_mid_session`
+(engine worker: cancels a live engine task and deletes its lock key --
+the same crash-simulation technique `test_recovery.py`'s own tests already
+establish -- then confirms one `run_active_rooms()` call both refunds the
+abandoned round to the exact centavo and reclaims the room with a working
+fresh engine, no process restart needed). Full verification: mypy clean,
+stash-and-confirm all three new tests genuinely fail pre-change (all three
+did, with the exact expected symptoms -- an assertion failure, a
+`RuntimeError` propagating out of the test's own await, and a round still
+`'running'` instead of `'voided'`), full `pytest` (895 passed, zero
+regressions) + `-m chaos_infra` (2 passed) + `-m e2e` (29 passed after one
+rerun -- both individual failures during this stage's runs, a Playwright
+timeout and a balance-race in an unrelated pre-existing test that directly
+instantiates its own `RoundEngine` with no `EngineWorker` involvement at
+all, passed cleanly in isolation and are structurally impossible to
+attribute to this stage's diff). `-m load` continued showing the same
+already-well-documented host-contention pattern from this file's other
+two entries dated today (`test_gateway_fanout.py`/`test_load_multiroom.py`,
+up to 606ms against a 300ms budget) -- re-confirmed unrelated via `git
+diff --stat` against `services/gateway/`/`packages/` (empty; this stage's
+diff never touches that code) rather than repeating the full stash-
+comparison a third time in one day for an already firmly established fact.
+
 ## 2026-09-01 — Postgres pool acquire() now fails fast instead of hanging forever
 
 The same audit pass that found the WAL/PITR gap (below) found a second
@@ -70,19 +203,26 @@ fixture teardown or a chaos test intentionally holding connections
 tripping a spurious `TimeoutError` in test infrastructure, not production
 code) that the audit finding never asked for.
 
-**Not touched: what happens after the timeout fires.** `Pool.acquire()`
-raises a plain `TimeoutError` on expiry (confirmed directly, not
-assumed -- `asyncio.wait_for` under the hood). This is deliberately left
-to propagate as an ordinary unhandled exception (a 500 from the three
-FastAPI apps, an already-existing outer-loop exception handler in each
-background worker) rather than added as a new global exception handler
-mapping it to a specific status code -- `TimeoutError` is too generic a
-type to safely catch pool-wide without risking mislabeling an unrelated
-timeout (an outbound HTTP call to Chapa/Telegram, say) as "database pool
-exhausted." The audit's own finding was specifically "unbounded hangs, not
-graceful failure" -- turning an infinite hang into a fast, bounded failure
-closes that gap; a nicer-shaped error response for this specific,
-exceptional scenario is a legitimate but separate future polish item.
+**What happens after the timeout fires.** `Pool.acquire()` raises a plain
+`TimeoutError` on expiry (confirmed directly, not assumed --
+`asyncio.wait_for` under the hood). This is deliberately left to propagate
+as an ordinary unhandled exception for the three FastAPI apps (a 500,
+correct and sufficient for a single request) rather than added as a new
+global exception handler mapping it to a specific status code --
+`TimeoutError` is too generic a type to safely catch pool-wide without
+risking mislabeling an unrelated timeout (an outbound HTTP call to Chapa/
+Telegram, say) as "database pool exhausted." A nicer-shaped error response
+for this specific, exceptional scenario is a legitimate but separate
+future polish item.
+
+*Correction, same day*: this entry originally also claimed background
+workers were covered by "an already-existing outer-loop exception
+handler" -- a `/code-review high` pass caught that claim was simply wrong
+for the two actual message-consumer loops this change touches
+(`services/payments/payout_worker.py`'s and `services/bot/
+notification_relay.py`'s own `run_forever()`), which had no exception
+handling at all. See the dedicated entry below for the real regression
+that gap caused and the fix.
 
 **Verified for real, not just by code review**: `tests/integration/
 test_db_pool.py` saturates a real `max_size=1` pool against the actual

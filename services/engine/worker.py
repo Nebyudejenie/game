@@ -17,6 +17,7 @@ import signal
 import uuid
 
 import asyncpg
+import structlog
 from redis.asyncio import Redis
 
 from packages.core import metrics
@@ -28,6 +29,8 @@ from packages.core.redis_conn import get_redis
 from packages.core.tracing import configure_tracing
 from services.engine.recovery import recover_orphaned_rounds
 from services.engine.round_engine import RoundEngine, load_card_pool, load_room_config
+
+logger = structlog.get_logger()
 
 METRICS_PORT = 8004
 
@@ -86,7 +89,24 @@ class EngineWorker:
         a lock it can only lose. Skips anything still genuinely running;
         reclaims anything whose task already finished (lock never won, or
         the room went terminal and the engine returned on its own).
+
+        Runs recover_orphaned_rounds() first, every call -- not just the
+        one start() already does at process startup. A code-review pass
+        caught that a room whose engine task dies *mid-session* (any
+        unhandled exception, packages/core/db_pool.py's new bounded
+        pool.acquire() timeout under sustained load being one concrete new
+        way that can now happen) releases its room lock in RoundEngine.
+        run_forever()'s own finally block, gets silently reclaimed by the
+        next poll below with a brand-new RoundEngine -- whose __init__
+        hardcodes self._status = "idle" with no DB read at all -- and its
+        actual in-flight round (real player stakes still in pot_escrow)
+        would sit orphaned with no refund until the entire process
+        eventually restarts, since recover_orphaned_rounds() was only ever
+        wired to run once. It's a cheap, indexed, genuinely idempotent
+        query (see its own docstring/refund_round()'s idempotency
+        guarantee) safe to call on every poll, not just once.
         """
+        await recover_orphaned_rounds(self._pool, self._redis)
         rows = await self._pool.fetch("SELECT id FROM rooms WHERE is_active = true")
         for row in rows:
             room_id = row["id"]
@@ -133,7 +153,20 @@ def main() -> None:
         try:
             await worker.start()
             while not stop_event.is_set():
-                await worker.run_active_rooms()
+                try:
+                    await worker.run_active_rooms()
+                except Exception:
+                    # A transient failure here (a pool.acquire() timeout
+                    # under load, a Postgres blip) must not silently kill
+                    # this whole scanning loop -- already-running rooms'
+                    # own engine tasks are independent and keep working
+                    # regardless, but nothing would ever notice a newly
+                    # activated room or reclaim a newly dead one again
+                    # until a full process restart. Matches the same
+                    # per-iteration isolation services/payments/
+                    # payout_worker.py's and services/bot/
+                    # notification_relay.py's run_forever() loops now use.
+                    logger.exception("engine_worker_run_active_rooms_failed")
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(stop_event.wait(), timeout=CLAIM_POLL_INTERVAL_SECONDS)
         finally:

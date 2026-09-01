@@ -363,19 +363,44 @@ async def run_forever(
 ) -> None:
     await ensure_group(redis)
     while True:
-        pending = await redis.xreadgroup(GROUP, consumer_name, {PAYOUT_STREAM: "0"}, count=10)
-        entries = _flatten(pending)
-        if not entries:
-            entries = await _claim_stale_entries(
-                redis, consumer_name, count=10, min_idle_time=claim_stale_after_ms
-            )
-        if not entries:
-            fresh = await redis.xreadgroup(
-                GROUP, consumer_name, {PAYOUT_STREAM: ">"}, count=10, block=5000
-            )
-            entries = _flatten(fresh)
+        # A code-review pass caught that this loop had no exception
+        # isolation at all: db_pool.py's new bounded pool.acquire()
+        # turns a sustained-load pool exhaustion into a real TimeoutError
+        # (previously an indefinite hang) -- correct for an HTTP handler,
+        # but an unguarded `for` loop here let that exception escape
+        # run_forever() entirely, silently killing this fire-and-forget
+        # task with no automatic restart (main_async() only awaits a
+        # shutdown signal, never checks this task's health). Two levels
+        # of isolation: a read-phase failure (Redis itself, say) backs off
+        # and retries the whole iteration; a single message's failure
+        # doesn't stop the rest of its own batch from being processed --
+        # process_one() only acks on a normal exit, so a message that
+        # raises here is simply picked back up by this same consumer's
+        # own pending-entries re-read next iteration, the exact
+        # redelivery-on-crash guarantee this module's own docstring
+        # already promises, just without the crash.
+        try:
+            pending = await redis.xreadgroup(GROUP, consumer_name, {PAYOUT_STREAM: "0"}, count=10)
+            entries = _flatten(pending)
+            if not entries:
+                entries = await _claim_stale_entries(
+                    redis, consumer_name, count=10, min_idle_time=claim_stale_after_ms
+                )
+            if not entries:
+                fresh = await redis.xreadgroup(
+                    GROUP, consumer_name, {PAYOUT_STREAM: ">"}, count=10, block=5000
+                )
+                entries = _flatten(fresh)
+        except Exception:
+            logger.exception("payout_worker_read_failed")
+            await asyncio.sleep(1)
+            continue
+
         for msg_id, fields in entries:
-            await process_one(pool, redis, provider, msg_id=msg_id, our_ref=fields["our_ref"])
+            try:
+                await process_one(pool, redis, provider, msg_id=msg_id, our_ref=fields["our_ref"])
+            except Exception:
+                logger.exception("payout_worker_process_one_failed", our_ref=fields["our_ref"])
 
 
 DEPOSIT_POLL_INTERVAL_SECONDS = 30
