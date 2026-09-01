@@ -8282,6 +8282,37 @@ This machine already runs another project's Postgres (5432) and Redis
 to those. Purely a local-dev accommodation, has no bearing on production
 deployment.
 
+## 2026-09-01 — Production checklist + first-admin CLI
+
+Two gaps found while preparing for a real production deploy: (1) nothing
+tied together the manual, one-time infra steps (DNS, self-hosted GitHub
+Actions runner, `deploy/.env`, Cloudflare Tunnel, first deploy, first
+end-to-end dry run) into a single ordered runbook — added
+`deploy/PRODUCTION_CHECKLIST.md`. (2) `services/admin/auth.py`'s own
+docstring says admin accounts are "provisioned out-of-band by a trusted
+operator," but no such script existed — there was no way to create the
+*first* admin account on a fresh production DB at all (no self-registration
+path, on purpose). Added `services/admin/create_admin_cli.py`: prompts for
+the password via `getpass` (never a CLI arg, which would land in shell
+history and `ps`), validates the role against `rbac.PERMISSIONS`' own key
+set (never a second hand-kept role list), and prints the TOTP secret once
+on success per `create_admin_user()`'s existing contract. Covered by
+`tests/integration/test_create_admin_cli.py`, real subprocess invocations
+with real piped stdin (matching `test_reconcile_job.py`'s established
+pattern), including a full login round-trip with a real generated TOTP
+code.
+
+Infra access note: this machine has SSH access configured for a different
+project's infrastructure (MarketPOS/Proxmox), not Jo Bingo's. Did not
+assume it was reusable — asked the user directly; they chose to run the
+server-side steps themselves, which is why this landed as a checklist
+rather than direct remote execution.
+
+One step in the checklist (GitHub environment "required reviewers") needed
+a `gh api` write that this session's own permission gate blocked — not
+retried via a workaround; the checklist documents the two-minute manual
+equivalent instead.
+
 ## Pre-existing repo state noted, not touched
 
 This directory already had a `.git` folder with `origin` pointing to
