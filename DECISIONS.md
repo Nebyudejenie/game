@@ -8313,6 +8313,79 @@ a `gh api` write that this session's own permission gate blocked — not
 retried via a workaround; the checklist documents the two-minute manual
 equivalent instead.
 
+## 2026-09-01 — Amharic Bingo voice-calling system
+
+Added an automatic voice announcement ("B! ሰባት!" -- English letter,
+Amharic number) on every call, entirely client-side: the server already
+sends `letter` in the `"call"` WS message (`packages/core/bingo.py`'s
+`letter_for()`, unchanged), so nothing on the backend or in game logic
+changed. New files: `web/miniapp/js/amharic_numbers.js` (the 1-75 word
+map), `web/miniapp/js/voice.js` (`VoiceCaller`: FIFO queue, dedup by
+call index, `unlock()` for mobile autoplay policy, graceful handling of
+missing audio), `web/miniapp/audio/calls/MANIFEST.json` + `README.md`
+(the file-naming/text contract for real audio, dropped in later). The
+only change to `app.js`'s existing gameplay code is one line inside the
+existing `ws.on("call", ...)` handler, alongside the existing
+`haptics.mediumTap()` call.
+
+**No real MP3 files exist** -- this sandbox has no TTS engine and no way
+to record/hire a voice actor. `.gitignore` excludes
+`web/miniapp/audio/calls/*.mp3` on purpose; a missing clip degrades to a
+silent skip + one deduped console warning, never breaking gameplay. To
+go from "system built" to "system sounds real": generate or record the
+75 clips per `MANIFEST.json`'s exact scripts and drop them into that
+directory -- zero code changes needed.
+
+**Settings persisted via `localStorage`, a deliberate exception** to
+this codebase's only other client preference (`auto_mark`), which is
+server-side (a `users` column + WS round-trip) because it's real
+gameplay state other logic needs to know. Voice on/off/volume/speed
+affects nothing but this one browser tab's own audio output -- no
+server-side consumer would ever exist for it, and a player reasonably
+wants a different volume on their phone than their desktop, which
+per-device storage supports and a synced server value would not. This
+is the first `localStorage` use in this codebase; confirmed no others
+exist before adding it.
+
+**Deliberately no speech-synthesis fallback.** Browser `speechSynthesis`
+Amharic support is inconsistent-to-absent on real devices; a
+mispronounced/garbled fallback would be worse than the silent skip this
+module already does when a clip is missing.
+
+**No separate "automatic calling" setting**, despite the original
+request listing it alongside "Voice: ON/OFF" -- this codebase has no
+manual per-call trigger anywhere; when voice is on, every call is
+always auto-announced. A second toggle for a state that can never
+differ from the first would be a control with no real effect.
+
+**Verification**: `tests/unit/test_amharic_number_mapping.py` cross-checks
+three real sources against each other for all 75 numbers -- the JS word
+map (read via a `node` subprocess, `tests/frontend/dump_amharic_numbers.mjs`,
+never re-implemented in Python), `packages/core/bingo.py`'s real
+`letter_for()`, and `MANIFEST.json` -- plus the request's own five worked
+examples. `tests/frontend/test_amharic_numbers.mjs` is a plain-node smoke
+test on the JS module itself, matching `test_reconnect_backoff.mjs`'s
+established no-framework pattern. Two new Playwright e2e tests in
+`test_miniapp_e2e.py` join a real room against a real `RoundEngine` and
+use `page.on("request")` to confirm a live call requests the exact right
+`/audio/calls/{LETTER}_{NN}.mp3` path, and that disabling voice makes
+zero such requests -- proving the JS wiring without needing real MP3s to
+exist. Full suite run clean on a fresh `docker compose down -v && up -d`
++ migration replay; two pre-existing `test_miniapp_e2e.py` tests were
+seen to fail on `#screen-game.active` timeouts under the full sequential
+run and pass individually -- confirmed via `git stash` that one of them
+(`test_verify_draw_button_shows_a_verified_seed`) fails identically with
+none of this feature's changes present, so this is pre-existing
+sequential-run resource contention in this sandbox, not a regression;
+a second clean full run passed all 8/8.
+
+**Flagged for native-speaker review before treating as production-final**:
+the Amharic number-word construction and the four new `am.json` strings
+(`voice.title/volume/speed/replay`) were built from the request's own
+five worked examples plus standard numeral-construction rules, not
+independently verified against a native speaker -- same discipline this
+codebase's other Amharic strings already carry.
+
 ## Pre-existing repo state noted, not touched
 
 This directory already had a `.git` folder with `origin` pointing to

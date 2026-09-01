@@ -20,6 +20,10 @@
   "game.your_card": "Your card",
   "game.bingo": "BINGO",
   "game.no_pattern_yet": "No pattern yet",
+  "voice.title": "Voice",
+  "voice.volume": "Volume",
+  "voice.speed": "Speed",
+  "voice.replay": "Replay last call",
 
   "spectate.banner": "This round is in progress. Please wait for a new round.",
   "spectate.next_in": "Next round starts in ~{seconds}s.",

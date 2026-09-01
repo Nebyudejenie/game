@@ -20,6 +20,10 @@
   "game.your_card": "ካርድዎ",
   "game.bingo": "ቢንጎ",
   "game.no_pattern_yet": "ገና ንድፍ የለም",
+  "voice.title": "ድምፅ",
+  "voice.volume": "የድምፅ መጠን",
+  "voice.speed": "ፍጥነት",
+  "voice.replay": "የመጨረሻውን ጥሪ ድገም",
 
   "spectate.banner": "የዚህ ዙር ጨዋታ ተጀምሯል። አዲስ ዙር እስኪጀመር ይጠብቁ።",
   "spectate.next_in": "ቀጣይ ዙር በ~{seconds}ሰ ይጀምራል።",

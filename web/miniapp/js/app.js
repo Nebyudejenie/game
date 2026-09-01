@@ -4,6 +4,7 @@ import * as ws from "./ws.js";
 import * as haptics from "./haptics.js";
 import * as board from "./render/board.js";
 import * as card from "./render/card.js";
+import { voiceCaller } from "./voice.js";
 
 const tg = window.Telegram && window.Telegram.WebApp;
 
@@ -173,6 +174,10 @@ function tickRoomCountdowns() {
 
 function enterRoom(roomId) {
   hasClaimedThisRound = false;
+  // Earliest reliable user gesture in the join flow -- satisfies mobile
+  // Safari / Telegram WebView's autoplay policy for every announce()
+  // later in this session, without needing a gesture on every call.
+  voiceCaller.unlock();
   ws.joinRoom(roomId);
 }
 
@@ -353,6 +358,7 @@ ws.on("round_start", (sync) => {
   // by a unit test -- see DECISIONS.md).
   const merged = { ...getState().round, ...sync, called: [] };
   setState({ round: merged });
+  voiceCaller.resetRound();
   if (getState().screen === "lobby" || getState().screen === "game") {
     if (merged.your_card) enterGame(merged);
     else enterSpectate(merged);
@@ -374,6 +380,7 @@ ws.on("call", (msg) => {
   void badge.offsetWidth; // restart the CSS animation
   badge.classList.add("show");
   haptics.mediumTap();
+  voiceCaller.announce(msg.letter, msg.number, msg.index);
 
   pushRecentCall(msg);
   el("stat-call").textContent = `${msg.index}/75`;
@@ -419,6 +426,84 @@ makeKeyboardActivatable(el("auto-switch"), () => {
   el("auto-switch").classList.toggle("on", next);
   el("auto-switch").setAttribute("aria-checked", String(next));
   if (state.currentRoomId !== null) ws.setAuto(state.currentRoomId, next);
+});
+
+// --- voice caller settings -------------------------------------------
+// localStorage, not the server-synced pattern auto_mark uses above --
+// this is a per-device audio-playback preference with zero gameplay
+// impact (a player reasonably wants different volume on phone vs.
+// desktop), so there's no server-side consumer for it to round-trip
+// through. See DECISIONS.md for why this is a deliberate exception.
+
+const VOICE_STORAGE_KEYS = {
+  enabled: "jobingo_voice_enabled",
+  volume: "jobingo_voice_volume",
+  speed: "jobingo_voice_speed",
+};
+
+function loadVoiceSettings() {
+  try {
+    const enabled = localStorage.getItem(VOICE_STORAGE_KEYS.enabled);
+    const volume = localStorage.getItem(VOICE_STORAGE_KEYS.volume);
+    const speed = localStorage.getItem(VOICE_STORAGE_KEYS.speed);
+    if (enabled !== null) voiceCaller.setEnabled(enabled === "true");
+    if (volume !== null) voiceCaller.setVolume(parseFloat(volume));
+    if (speed !== null) voiceCaller.setSpeed(parseFloat(speed));
+  } catch {
+    // Private-mode/unavailable localStorage -- voice defaults stand,
+    // never blocks boot.
+  }
+}
+
+function saveVoiceSetting(key, value) {
+  try {
+    localStorage.setItem(key, String(value));
+  } catch {
+    // Best-effort; nothing to recover from here.
+  }
+}
+
+function syncVoiceToggleUI() {
+  const on = voiceCaller.isEnabled();
+  for (const id of ["voice-switch", "voice-switch-settings"]) {
+    const node = el(id);
+    node.classList.toggle("on", on);
+    node.setAttribute("aria-checked", String(on));
+  }
+}
+
+function setVoiceEnabled(next) {
+  voiceCaller.setEnabled(next);
+  saveVoiceSetting(VOICE_STORAGE_KEYS.enabled, next);
+  syncVoiceToggleUI();
+}
+
+loadVoiceSettings();
+
+for (const id of ["voice-switch", "voice-switch-settings"]) {
+  el(id).setAttribute("role", "switch");
+  makeKeyboardActivatable(el(id), () => setVoiceEnabled(!voiceCaller.isEnabled()));
+}
+syncVoiceToggleUI();
+
+el("voice-volume-slider").value = String(Math.round(voiceCaller.getVolume() * 100));
+el("voice-volume-slider").addEventListener("input", () => {
+  const volume = Number(el("voice-volume-slider").value) / 100;
+  voiceCaller.setVolume(volume);
+  saveVoiceSetting(VOICE_STORAGE_KEYS.volume, volume);
+});
+
+el("voice-speed-slider").value = String(Math.round(voiceCaller.getSpeed() * 100));
+el("voice-speed-slider").addEventListener("input", () => {
+  const speed = Number(el("voice-speed-slider").value) / 100;
+  voiceCaller.setSpeed(speed);
+  saveVoiceSetting(VOICE_STORAGE_KEYS.speed, speed);
+});
+
+el("voice-replay-btn").addEventListener("click", () => voiceCaller.replayLast());
+
+el("voice-settings-btn").addEventListener("click", () => {
+  el("voice-settings-panel").classList.toggle("hidden");
 });
 
 ws.on("claim_result", (msg) => {

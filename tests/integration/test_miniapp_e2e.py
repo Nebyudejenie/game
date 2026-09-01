@@ -33,6 +33,7 @@ from decimal import Decimal
 
 import pytest
 
+from packages.core.bingo import letter_for
 from services.engine.round_engine import RoundEngine, load_room_config
 from tests.integration.conftest import (
     build_init_data,
@@ -405,6 +406,183 @@ async def test_verify_draw_button_shows_a_verified_seed(gateway_server, browser,
 
         await page.screenshot(path="/tmp/miniapp-fairness.png")
         assert console_errors == [], f"JS errors during verify-draw flow: {console_errors}"
+        await page.close()
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
+async def test_voice_announcement_requests_the_correct_audio_file_for_a_call(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    """The Amharic voice-caller feature's own explicit closing bar --
+    "test all 75 numbers and verify... the correct Bingo letter" -- for
+    the one piece only a real browser can prove: that a live call
+    actually triggers a request for the right
+    /audio/calls/{LETTER}_{NN}.mp3 file. No real MP3s exist yet (see
+    web/miniapp/audio/calls/README.md) -- this only needs to observe the
+    *request* Playwright's own page.on("request") sees, not decode audio,
+    so it proves the JS wiring is correct independent of whether real
+    audio assets have been recorded.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=8, call_interval_ms=15,
+        is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    try:
+        other_player = await create_funded_user(conn)
+        assert (await engine.join(other_player, 2)).ok
+
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+
+        audio_requests: list[str] = []
+        page.on("request", lambda req: audio_requests.append(req.url) if "/audio/calls/" in req.url else None)
+
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('0.00')", timeout=10000
+        )
+
+        # Visual check of the settings panel this feature adds, not just
+        # the request-interception assertions below.
+        await page.click("#voice-settings-btn")
+        await page.wait_for_selector("#voice-settings-panel:not(.hidden)", timeout=5000)
+        await page.screenshot(path="/tmp/miniapp-voice-settings.png")
+        await page.click("#voice-settings-btn")
+        await page.wait_for_function(
+            "document.getElementById('voice-settings-panel').classList.contains('hidden')", timeout=5000
+        )
+
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        assert user_row is not None, "authed handshake did not create the user row"
+        await fund_user(conn, user_row["id"], Decimal("100.00"))
+        await page.reload()
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('100.00')", timeout=10000
+        )
+
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page.wait_for_selector(room_selector, timeout=10000)
+        await page.click(room_selector)
+        await page.wait_for_selector("#screen-lobby.active", timeout=10000)
+        cells = await page.query_selector_all(".card-grid-cell")
+        await cells[9].click()  # card #10
+        await page.click("#lobby-cta")
+        await page.wait_for_function(
+            "document.getElementById('lobby-cta').textContent.includes('10')", timeout=5000
+        )
+
+        await page.wait_for_selector("#screen-game.active", timeout=25000)
+        await page.wait_for_function(
+            "document.getElementById('call-badge').textContent.length > 0", timeout=15000
+        )
+        # This test's own fast call_interval_ms=15 (real rooms space calls
+        # seconds apart) makes voiceCaller's playback queue fall behind the
+        # live call stream, since each missing clip only advances the
+        # queue after a real network round-trip (a 404) -- so the *current*
+        # call badge races ahead of what's actually been requested by now.
+        # That's correct queueing behavior under this test's artificially
+        # fast pace, not a bug -- wait for a handful of requests to land
+        # instead of chasing the latest badge value.
+        for _ in range(50):
+            if len(audio_requests) >= 5:
+                break
+            await page.wait_for_timeout(100)
+
+        assert audio_requests, "no /audio/calls/ requests observed during a live call sequence"
+        for url in audio_requests:
+            filename = url.rsplit("/", 1)[-1]
+            stem = filename.removesuffix(".mp3")
+            letter, number_str = stem.split("_")
+            number = int(number_str)
+            assert letter_for(number) == letter, (
+                f"{filename}: requested letter {letter!r} but bingo.letter_for({number}) is {letter_for(number)!r}"
+            )
+        await page.screenshot(path="/tmp/miniapp-voice-game.png")
+        assert console_errors == [], f"JS errors during voice announce flow: {console_errors}"
+        await page.close()
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
+async def test_disabling_voice_makes_zero_audio_requests(gateway_server, browser, pool, redis, card_pool, conn):
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=8, call_interval_ms=15,
+        is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    try:
+        other_player = await create_funded_user(conn)
+        assert (await engine.join(other_player, 2)).ok
+
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+
+        audio_requests: list[str] = []
+        page.on("request", lambda req: audio_requests.append(req.url) if "/audio/calls/" in req.url else None)
+
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('0.00')", timeout=10000
+        )
+
+        # Turn voice off via the settings panel before ever joining a room.
+        await page.click("#voice-settings-btn")
+        await page.wait_for_selector("#voice-settings-panel:not(.hidden)", timeout=5000)
+        await page.click("#voice-switch-settings")
+        assert not await page.evaluate(
+            "document.getElementById('voice-switch-settings').classList.contains('on')"
+        )
+
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        assert user_row is not None, "authed handshake did not create the user row"
+        await fund_user(conn, user_row["id"], Decimal("100.00"))
+        await page.reload()
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('100.00')", timeout=10000
+        )
+        # The setting's own persistence (localStorage) must have survived
+        # the reload above -- otherwise this test would prove nothing
+        # about the setting actually being off during gameplay.
+        assert await page.evaluate("localStorage.getItem('jobingo_voice_enabled')") == "false"
+
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page.wait_for_selector(room_selector, timeout=10000)
+        await page.click(room_selector)
+        await page.wait_for_selector("#screen-lobby.active", timeout=10000)
+        cells = await page.query_selector_all(".card-grid-cell")
+        await cells[9].click()  # card #10
+        await page.click("#lobby-cta")
+        await page.wait_for_function(
+            "document.getElementById('lobby-cta').textContent.includes('10')", timeout=5000
+        )
+
+        await page.wait_for_selector("#screen-game.active", timeout=25000)
+        # Same proof-of-liveness the other gameplay tests use -- at least
+        # one call actually rendered, so silence below is because voice is
+        # off, not because no calls happened yet.
+        await page.wait_for_function(
+            "document.getElementById('call-badge').textContent.length > 0", timeout=15000
+        )
+        await page.wait_for_timeout(200)
+
+        assert audio_requests == [], f"voice is off but audio was requested: {audio_requests}"
+        assert console_errors == [], f"JS errors with voice disabled: {console_errors}"
         await page.close()
     finally:
         await engine.stop()

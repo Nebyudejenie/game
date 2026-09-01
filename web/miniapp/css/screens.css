@@ -46,6 +46,46 @@
   line-height: 1;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.icon-fab {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  font-size: var(--fs-md);
+  line-height: 1;
+}
+
+.voice-settings-panel {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.voice-settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.voice-settings-row input[type="range"] {
+  flex: 1;
+  max-width: 140px;
+  accent-color: var(--accent);
+}
+
 .room-card {
   background: var(--surface);
   border-radius: var(--radius-lg);

@@ -21,7 +21,25 @@
         <span>💰</span>
         <span class="amount" id="balance-amount">-- ETB</span>
       </div>
-      <button id="open-wallet-btn" class="deposit-fab">+</button>
+      <div class="header-actions">
+        <button id="voice-settings-btn" class="icon-fab">🔊</button>
+        <button id="open-wallet-btn" class="deposit-fab">+</button>
+      </div>
+    </div>
+    <div id="voice-settings-panel" class="voice-settings-panel hidden">
+      <div class="voice-settings-row">
+        <span data-i18n="voice.title"></span>
+        <div id="voice-switch-settings" class="switch on"><div class="switch-knob"></div></div>
+      </div>
+      <div class="voice-settings-row">
+        <span data-i18n="voice.volume"></span>
+        <input id="voice-volume-slider" type="range" min="0" max="100" value="100" />
+      </div>
+      <div class="voice-settings-row">
+        <span data-i18n="voice.speed"></span>
+        <input id="voice-speed-slider" type="range" min="50" max="150" value="100" />
+      </div>
+      <button id="voice-replay-btn" class="btn-secondary" data-i18n="voice.replay"></button>
     </div>
     <div id="room-list"></div>
   </main>
@@ -73,6 +91,10 @@
         <div class="auto-toggle">
           <span data-i18n="game.auto"></span>
           <div id="auto-switch" class="switch on"><div class="switch-knob"></div></div>
+        </div>
+        <div class="auto-toggle">
+          <span data-i18n="voice.title"></span>
+          <div id="voice-switch" class="switch on"><div class="switch-knob"></div></div>
         </div>
       </div>
     </div>
