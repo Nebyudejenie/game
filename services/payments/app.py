@@ -11,12 +11,12 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import asyncpg
 from fastapi import FastAPI, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from packages.core import metrics
 from packages.core.config import get_settings
+from packages.core.db_pool import create_pool
 from packages.core.redis_conn import get_redis
 from packages.core.tracing import configure_tracing
 from services.payments import deposits
@@ -29,7 +29,7 @@ from services.payments.withdrawals import PAYOUT_STREAM
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_tracing("payments", settings.otel_exporter_endpoint)
-    app.state.pool = await asyncpg.create_pool(dsn=settings.database_url, min_size=2, max_size=20)
+    app.state.pool = await create_pool(dsn=settings.database_url, min_size=2, max_size=20)
     app.state.redis = get_redis()
     app.state.chapa = ChapaProvider(settings.chapa_api_key)
     try:

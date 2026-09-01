@@ -49,6 +49,7 @@ from redis.exceptions import ResponseError
 
 from packages.core import ledger, metrics, tracing
 from packages.core.config import get_settings
+from packages.core.db_pool import create_pool
 from packages.core.logging import configure_logging
 from packages.core.notifications import notify_user
 from packages.core.redis_conn import get_redis
@@ -422,7 +423,7 @@ async def main_async() -> None:
     configure_logging(settings.log_level)
     tracing.configure_tracing("payout-worker", settings.otel_exporter_endpoint)
 
-    pool = await asyncpg.create_pool(dsn=settings.database_url, min_size=2, max_size=20)
+    pool = await create_pool(dsn=settings.database_url, min_size=2, max_size=20)
     redis = get_redis()
     provider = ChapaProvider(settings.chapa_api_key)
     metrics_runner = await metrics.start_metrics_server(METRICS_PORT)

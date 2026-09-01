@@ -14,7 +14,6 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated, Any
 
-import asyncpg
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
@@ -24,6 +23,7 @@ from pydantic import BaseModel
 ADMIN_WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web" / "admin"
 
 from packages.core.config import get_settings
+from packages.core.db_pool import create_pool
 from packages.core.redis_conn import get_redis
 from services.admin import auth, queries
 from services.admin.auth import AdminSession
@@ -33,7 +33,7 @@ from services.admin.rbac import has_permission
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
-    app.state.pool = await asyncpg.create_pool(dsn=settings.database_url, min_size=2, max_size=20)
+    app.state.pool = await create_pool(dsn=settings.database_url, min_size=2, max_size=20)
     app.state.redis = get_redis()
     app.state.ip_allowlist = [
         ip.strip() for ip in settings.admin_ip_allowlist.split(",") if ip.strip()

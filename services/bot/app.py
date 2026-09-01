@@ -26,6 +26,7 @@ from prometheus_client import generate_latest
 from redis.asyncio import Redis
 
 from packages.core.config import Settings, get_settings
+from packages.core.db_pool import create_pool
 from packages.core.logging import configure_logging
 from packages.core.redis_conn import get_redis
 from packages.core.tracing import configure_tracing
@@ -134,7 +135,7 @@ def main() -> None:
 
     async def _build() -> web.Application:
         nonlocal pool, redis, notifier
-        pool = await asyncpg.create_pool(dsn=settings.database_url, min_size=2, max_size=10)
+        pool = await create_pool(dsn=settings.database_url, min_size=2, max_size=10)
         redis = get_redis()
         notifier = Notifier(bot)
         dp = build_dispatcher(pool, redis, notifier, settings)

@@ -15,7 +15,6 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-import asyncpg
 from fastapi import FastAPI, Header, HTTPException, Response, WebSocket
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -23,6 +22,7 @@ from pydantic import BaseModel
 
 from packages.core import telegram_auth
 from packages.core.config import get_settings
+from packages.core.db_pool import create_pool
 from packages.core.ledger import user_balance_snapshot
 from packages.core.redis_conn import get_redis
 from services.admin.queries import get_round_fairness
@@ -42,9 +42,7 @@ MINIAPP_DIR = Path(__file__).resolve().parent.parent.parent / "web" / "miniapp"
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
-    app.state.pool = await asyncpg.create_pool(
-        dsn=settings.database_url, min_size=5, max_size=50
-    )
+    app.state.pool = await create_pool(dsn=settings.database_url, min_size=5, max_size=50)
     app.state.redis = get_redis()
     app.state.bot_token = settings.telegram_bot_token
     app.state.chapa = ChapaProvider(settings.chapa_api_key) if settings.chapa_api_key else None

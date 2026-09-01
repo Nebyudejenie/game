@@ -5,6 +5,112 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-01 — Postgres pool acquire() now fails fast instead of hanging forever
+
+The same audit pass that found the WAL/PITR gap (below) found a second
+real one, already half-flagged and never picked back up: this file's own
+2026-08-24 Phase-8 entry named "a genuine Postgres-connection-pool-
+exhaustion chaos scenario" as "a good candidate for a focused follow-up,"
+and it sat untouched since. Confirmed for real: every one of the seven
+`asyncpg.create_pool()` call sites in this codebase (`services/gateway/
+app.py`, `services/admin/app.py`, `services/payments/app.py`, `services/
+payments/payout_worker.py`, `services/engine/worker.py`, `services/bot/
+app.py`, `packages/core/reconcile_job.py`) leaves `Pool.acquire()`'s own
+`timeout` at asyncpg's default of `None` -- meaning a genuinely exhausted
+pool (every connection checked out, under sustained load or a slow-query
+pile-up) hangs every subsequent caller indefinitely rather than failing
+fast. The exact same class of bug `packages/core/redis_conn.py` already
+fixed for Redis, for the exact same reason stated in that module's own
+comment: "a hang isn't graceful degradation, it's an outage this client
+itself manufactures."
+
+**Fix: `packages/core/db_pool.py`**, a thin `asyncpg.Pool` subclass
+(`_BoundedPool`) overriding only `acquire()` to supply a default timeout
+(`ACQUIRE_TIMEOUT_SECONDS = 10.0`, matching `redis_conn.py`'s own
+`SOCKET_TIMEOUT_SECONDS` -- same order of magnitude, same reasoning)
+whenever a caller doesn't pass their own. `Pool.fetch()`/`fetchval()`/
+`fetchrow()`/`execute()`/`executemany()` all call `self.acquire()`
+internally (confirmed by reading this project's installed asyncpg
+version's own `pool.py`, not assumed) -- so this one override protects
+every call site in the codebase automatically: the ~40 places doing
+`async with pool.acquire() as conn:` directly, and the many more calling
+`pool.fetch()`/`fetchval()`/etc. without ever touching `acquire()`
+themselves. **Zero changes needed at any of those call sites** -- only the
+seven pool-*creation* sites were touched, each swapping `asyncpg.
+create_pool(...)` for `db_pool.create_pool(...)`. Every existing
+`pool: asyncpg.Pool` type annotation across the codebase keeps working
+unchanged, since the returned object is a genuine `Pool` subclass
+instance, not a duck-typed facade.
+
+**Two dead ends hit and ruled out before landing on direct subclass
+construction**, both worth recording since asyncpg's own docs don't
+mention either: `asyncpg.pool.Pool` uses `__slots__` with no `__dict__`,
+so (1) reassigning `pool.__class__` on an already-`create_pool()`'d vanilla
+`Pool` raises `TypeError: object layout differs`, and (2) binding a
+replacement method directly onto that instance raises `AttributeError` --
+both confirmed by actually running them, not assumed from reading the
+source. `asyncpg.create_pool()` itself also has no `pool_class`-style
+parameter to inject a subclass through. The only clean path left is
+constructing `_BoundedPool(...)` directly rather than calling `asyncpg.
+create_pool()` at all -- which means `db_pool.create_pool()` duplicates
+the handful of `Pool.__init__` defaults `create_pool()` normally supplies
+(`max_queries=50000`, `max_inactive_connection_lifetime=300.0`,
+`connection_class`/`record_class` defaults) rather than reading them from
+asyncpg itself, since `Pool.__init__` carries no defaults of its own --
+only `create_pool()`'s free function does. A real, accepted, one-time
+drift risk against a future asyncpg version, no worse in kind than
+`redis_conn.py`'s own precedent of reading redis-py's installed-version
+internals directly.
+
+**Deliberately scoped to production call sites only** -- `tests/
+integration/conftest.py`'s shared session-pool fixture still calls
+`asyncpg.create_pool()` directly, unchanged. Applying a 10s acquire
+ceiling there risks a new, unrelated class of test flakiness (a slow
+fixture teardown or a chaos test intentionally holding connections
+tripping a spurious `TimeoutError` in test infrastructure, not production
+code) that the audit finding never asked for.
+
+**Not touched: what happens after the timeout fires.** `Pool.acquire()`
+raises a plain `TimeoutError` on expiry (confirmed directly, not
+assumed -- `asyncio.wait_for` under the hood). This is deliberately left
+to propagate as an ordinary unhandled exception (a 500 from the three
+FastAPI apps, an already-existing outer-loop exception handler in each
+background worker) rather than added as a new global exception handler
+mapping it to a specific status code -- `TimeoutError` is too generic a
+type to safely catch pool-wide without risking mislabeling an unrelated
+timeout (an outbound HTTP call to Chapa/Telegram, say) as "database pool
+exhausted." The audit's own finding was specifically "unbounded hangs, not
+graceful failure" -- turning an infinite hang into a fast, bounded failure
+closes that gap; a nicer-shaped error response for this specific,
+exceptional scenario is a legitimate but separate future polish item.
+
+**Verified for real, not just by code review**: `tests/integration/
+test_db_pool.py` saturates a real `max_size=1` pool against the actual
+dev-compose Postgres (a held connection, then a second `acquire()`) and
+asserts a bounded `TimeoutError` -- both for the applied default and for
+an explicit caller-supplied override -- plus confirms `pool.fetchval()`
+inherits the same protection with no `acquire()` call of its own, and that
+the returned pool is a real `isinstance(pool, asyncpg.Pool)`. Full
+verification: mypy clean, stash-and-confirm the new test genuinely fails
+pre-change (`ImportError: cannot import name 'db_pool'`), full `pytest`
+(892 passed, zero regressions across all seven touched services) + `-m
+chaos_infra` (2 passed) + `-m e2e` (29 passed). `-m load` showed
+significant additional latency-budget misses during this stage's own
+verification (`test_gateway_fanout.py`/`test_load_multiroom.py`, up to
+831ms against a 300ms budget, worse than the milder misses noted in this
+file's WAL/PITR entry below) -- decisively confirmed unrelated by directly
+stashing every change in this stage and rerunning the identical batch
+against unmodified `HEAD`, which failed the same way (350ms on one run,
+clean on another) purely from real host contention: only 4 CPUs and under
+1GB free memory on this sandbox while running a 1000-concurrent-socket
+test, exactly the sensitivity `pytest.ini`'s own `load` marker description
+already warns about, and structurally impossible to explain by this
+stage's diff regardless, since the timed hot path in both failing tests
+(Redis pub/sub fan-out to already-connected WebSockets) never calls
+`pool.acquire()` at all.
+
+---
+
 ## 2026-09-01 — WAL archiving + real point-in-time recovery (PITR)
 
 An audit pass (cross-referencing idea.md's Definition-of-Done section

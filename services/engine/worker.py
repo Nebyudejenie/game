@@ -22,6 +22,7 @@ from redis.asyncio import Redis
 from packages.core import metrics
 from packages.core.bingo import Grid
 from packages.core.config import get_settings
+from packages.core.db_pool import create_pool
 from packages.core.logging import configure_logging
 from packages.core.redis_conn import get_redis
 from packages.core.tracing import configure_tracing
@@ -120,7 +121,7 @@ def main() -> None:
     configure_tracing("engine-worker", settings.otel_exporter_endpoint)
 
     async def _run() -> None:
-        pool = await asyncpg.create_pool(dsn=settings.database_url, min_size=2, max_size=20)
+        pool = await create_pool(dsn=settings.database_url, min_size=2, max_size=20)
         redis = get_redis()
         worker = EngineWorker(pool, redis)
         metrics_runner = await metrics.start_metrics_server(METRICS_PORT)

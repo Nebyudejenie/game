@@ -35,6 +35,7 @@ from prometheus_client import push_to_gateway
 
 from packages.core import ledger, metrics
 from packages.core.config import get_settings
+from packages.core.db_pool import create_pool
 from packages.core.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
@@ -50,7 +51,7 @@ async def reconcile_all(pool: asyncpg.Pool) -> list[tuple[int, Decimal, Decimal]
 
 async def run_reconciliation() -> list[tuple[int, Decimal, Decimal]]:
     settings = get_settings()
-    pool = await asyncpg.create_pool(dsn=settings.database_url, min_size=1, max_size=2)
+    pool = await create_pool(dsn=settings.database_url, min_size=1, max_size=2)
     try:
         return await reconcile_all(pool)
     finally:
