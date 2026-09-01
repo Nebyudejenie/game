@@ -8484,6 +8484,147 @@ against current code rather than trusting old prose:
   without either real Chapa sandbox credentials to observe a live
   response, or a support channel that can hand over the actual schema.
 
+## 2026-09-01 — A `/code-review high` pass over the manual-payment subsystem: 3 real bugs fixed, a duplication catalogue for later
+
+Ran `/code-review high 92184c2~1..4db7eb3` -- the full manual-payment
+subsystem (7 stages) plus two-person approval, 8 commits across two days
+that had never had an independent structured review, unlike most other
+money-moving code in this platform. Eight finder agents (conventions,
+simplification, altitude, efficiency, reuse, removed-behavior audit,
+line-by-line diff scan, cross-file tracer). Three real, independently
+-corroborated bugs fixed; a fourth (a wrong config field in
+`chapa_deposit_configured`) turned out to already be fixed by a later,
+unrelated commit (`5384925`) two finders both separately confirmed. A
+large duplication catalogue (four finders converged on the same two
+themes) is recorded below for a dedicated follow-up, not fixed now --
+matching this session's own established discipline of fixing the
+clearest/safest/most-severe findings fully rather than rushing everything
+through under time pressure.
+
+**1. An admin's live payment-availability toggle was UI/bot-only, never
+enforced by the endpoints that actually move money (found independently
+by 3 of 8 finders).** `GET /api/payment-methods` and the bot's `/deposit`
+and `/withdraw` commands both already read
+`availability.get_payment_availability()` (the documented single source
+of truth), but the three gateway endpoints that actually execute a
+transaction -- `POST /api/deposit`, `POST /api/deposit/manual`, `POST
+/api/withdraw` -- never did. `/api/deposit` only checked static
+process-startup config (`app.state.chapa is None`); `/api/deposit/manual`
+checked nothing at all; `/api/withdraw` checked chapa's static config but
+had no check whatsoever for manual. An admin disabling a rail (a
+compromised destination account, a fraud investigation, a provider
+outage) had zero effect on any of the three -- the Mini App JS correctly
+hid the disabled option, but a client with the page already open, or any
+direct POST, could still complete a "disabled" deposit or withdrawal.
+Real severity: this is the exact lever the payment-availability feature
+exists to be ("the single highest-leverage lever a compromised/rogue
+admin account could pull," per its own docstring), except it didn't
+actually stop anything reaching the Mini App's REST API.
+
+Fixed: all three endpoints now call `get_payment_availability()` and
+refuse (503) unless the requested rail is in the returned list, exactly
+mirroring the bot's own established pattern.
+`get_payment_availability()` already folds in every static reachability
+check `/api/deposit`'s old ad hoc check used to do separately
+(`chapa_api_key`, `miniapp_url`, `payments_public_base_url`), so this
+replaces that check rather than adding a second one that could drift
+from it. Three new tests in `test_gateway_rest.py`
+(`test_api_deposit_refuses_when_admin_disables_chapa`,
+`_deposit_manual_refuses_when_admin_disables_manual`,
+`_withdraw_refuses_when_admin_disables_the_requested_provider`), each
+confirmed to return 200 instead of 503 against the reverted code before
+trusting them.
+
+**2. The daily deposit cap never counted a manual deposit sitting in
+`review` (found by 1 of 8 finders, via a cross-file trace).**
+`_check_deposit_eligibility()`'s cap query only summed
+`pending`/`processing`/`succeeded` -- the automatic (Chapa) rail's own
+lifecycle. A manual deposit spends its entire pre-approval life at
+`status='review'` (`manual.py`'s `create_manual_deposit_request()`),
+which was never in that list. A player could submit any number of manual
+deposits while they sat unreviewed -- none of them counted -- and get
+credited far past their configured daily cap the moment an admin worked
+through the backlog. This is a real responsible-gaming/anti-fraud
+control bypass, not a display bug.
+
+Fixed: added `'review'` and `'approved'` (the two pre-credit manual
+states -- `approved` is where a deposit sits briefly between admin
+sign-off and the ledger post that finally marks it `succeeded`) to the
+counted-statuses list. `'rejected'`/`'failed'` stay excluded on purpose --
+neither ever gets credited. New test in
+`test_payments_manual_deposits.py`
+(`test_daily_cap_counts_deposits_still_sitting_in_review`): two 200.00
+manual deposits against a 300.00 cap, the second must raise
+`DailyDepositCapExceeded` purely from the first sitting in `review` --
+confirmed to pass (wrongly) against the reverted code before trusting it.
+
+**3. `sweep_stuck_approved_payouts()` had no `provider != 'manual'`
+filter (found independently by 2 of 8 finders).** A manual withdrawal
+also reaches `status='approved'` (`approve_manual_withdrawal_admin`),
+where it's meant to sit -- often far longer than the sweep's 60s
+threshold -- until an admin has actually sent the transfer by hand and
+calls `settle_manual_withdrawal_admin`. Without the filter, every pending
+manual withdrawal got re-enqueued onto the shared `PAYOUT_STREAM` on
+every single sweep tick, forever, for its whole time awaiting
+settlement. `payout_worker.process_one()`'s provider-mismatch guard
+caught and skipped these -- so no money-safety impact -- but each one
+cost a wasted `XADD`/ack cycle and a spurious `payout_provider_mismatch`
+error log, every 60 seconds, indefinitely. Fixed with the same
+`provider != 'manual'` exclusion `admin/queries.py`'s
+`list_pending_withdrawals()`/`approve_withdrawal_admin()` already apply
+to their own automatic-rail-only queues. New test in
+`test_payments_withdrawals.py`
+(`test_sweep_never_touches_a_manual_withdrawal_awaiting_settlement`),
+confirmed to fail against the reverted query first.
+
+All three fixes verified with a full clean-slate rebuild: mypy clean
+across 75 source files, full `pytest tests/` green (912+ passed).
+
+### Catalogued, not fixed -- a real duplication pattern, four finders converged independently
+
+Two themes came up across simplification, altitude, reuse, and the
+cross-file tracer, all pointing at the same root cause: this diff added
+a second thing needing the same treatment as an existing one, without a
+shared abstraction for either.
+
+1. **The two-person-approval maker-checker gate is copy-pasted between
+   `approve_manual_deposit_admin` and `approve_manual_withdrawal_admin`**
+   (`services/admin/queries.py`) -- row-lock, `amount >=
+   two_person_threshold` check, stamp `first_approved_by_admin_id`, raise
+   `SameAdminCannotProvideSecondApproval` on same-admin double-approve,
+   ~20-25 lines duplicated almost verbatim, already showing minor drift
+   (different audit `action` strings/payloads between the two copies).
+   The exception-to-HTTP-409 translation in `services/admin/app.py` is
+   duplicated the same way at both endpoints. A future gated action (a
+   manual refund, a balance adjustment) means copying this a third time;
+   a future policy tweak (a cooldown, different audit shape) has to be
+   found and applied in every copy or silently drifts.
+2. **Manual withdrawal settle/fail (`settle_manual_withdrawal_admin`/
+   `fail_manual_withdrawal_admin`) reimplement `payout_worker.py`'s
+   private `_settle_success`/`_reverse` ledger-transition shape** instead
+   of sharing it (they're underscore-prefixed, so couldn't be imported
+   as-is) -- same accounts, same `ledger.post`/status-update/metrics/
+   `publish_balance_update` sequence, already diverging in idempotency
+   -key-prefix naming (`payout-settle-` vs `manual-payout-settle-`).
+3. Provider selection/`force_review` derivation (`"manual"` string
+   comparisons) is duplicated independently in `services/gateway/app.py`
+   and `services/bot/handlers.py` rather than living on the
+   `PaymentProvider` Protocol itself (no `requires_manual_review`
+   attribute exists); `services/payments/manual.py`'s reference
+   -generation SQL duplicates `deposits.py`'s verbatim (a third,
+   `'WD-'`-prefixed copy already exists in `withdrawals.py`); several
+   admin-frontend JS files (`manual_withdrawals.js`,
+   `manual_deposits.js`, `provider_availability.js`,
+   `payment_destinations.js`) repeat a `window.prompt` + empty-string
+   -guard pattern seven times, with the guard already missing in one
+   copy.
+
+None of these are bugs -- every call site was independently verified
+correct -- but the maker-checker duplication (#1) is the one worth
+prioritizing first in a follow-up: it's the most security-sensitive
+logic in this feature, freshly introduced (not inherited from an older
+pattern), and already showing drift after a single diff.
+
 ## Pre-existing repo state noted, not touched
 
 This directory already had a `.git` folder with `origin` pointing to

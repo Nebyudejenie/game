@@ -13,7 +13,7 @@ import pytest
 
 from packages.core import ledger
 from services.admin import queries as admin_queries
-from services.payments import manual
+from services.payments import deposits, manual
 from tests.integration.conftest import create_funded_user, create_user
 from tests.integration.test_admin_auth import create_test_admin
 
@@ -56,6 +56,37 @@ async def test_manual_deposit_request_starts_pending_review_no_credit(pool, redi
     status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", intent.payment_id)
     assert status == "review"
     assert await _cash(conn, user_id) == Decimal("0.00")  # not credited merely for submitting
+
+
+async def test_daily_cap_counts_deposits_still_sitting_in_review(pool, redis, conn):
+    # A code-review pass caught that _check_deposit_eligibility()'s cap
+    # query only counted the automatic rail's own lifecycle statuses
+    # (pending/processing/succeeded) -- a manual deposit spends its
+    # entire pre-approval life at status='review', which wasn't in that
+    # list. A player could submit any number of manual deposits while
+    # they sat unreviewed, none of them counting against the cap, and
+    # end up credited far past it the moment an admin worked through the
+    # backlog. This proves the fix without needing an admin to actually
+    # approve anything: two 'review' deposits alone must already trip a
+    # cap the second one alone wouldn't exceed.
+    user_id = await create_user(conn)
+    destination_id = await _active_destination(conn)
+    cap = Decimal("300.00")
+
+    first = await manual.create_manual_deposit_request(
+        pool, redis, user_id=user_id, amount=Decimal("200.00"),
+        manual_destination_id=destination_id, external_reference="FT26-first",
+        receipt_telegram_file_id=None, min_deposit=MIN_DEPOSIT, daily_cap=cap,
+    )
+    status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", first.payment_id)
+    assert status == "review"  # still unreviewed -- exactly the state the bug ignored
+
+    with pytest.raises(deposits.DailyDepositCapExceeded):
+        await manual.create_manual_deposit_request(
+            pool, redis, user_id=user_id, amount=Decimal("200.00"),
+            manual_destination_id=destination_id, external_reference="FT26-second",
+            receipt_telegram_file_id=None, min_deposit=MIN_DEPOSIT, daily_cap=cap,
+        )
 
 
 async def test_manual_deposit_below_minimum_is_rejected(pool, redis, conn):

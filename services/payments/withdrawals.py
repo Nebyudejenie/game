@@ -319,10 +319,24 @@ async def sweep_stuck_approved_payouts(
     already settled, and Chapa's own our_ref idempotency covers a
     still-pending one being dispatched to create_payout() more than once.
     Returns the payment ids this pass actually re-enqueued.
+
+    provider != 'manual': a code-review pass caught that a manual
+    withdrawal also reaches status='approved' (approve_manual_withdrawal_
+    admin), where it's meant to sit -- often far longer than
+    older_than_seconds -- until an admin has actually sent the transfer
+    by hand and calls settle_manual_withdrawal_admin. Without this
+    filter, every pending manual withdrawal got re-enqueued onto
+    PAYOUT_STREAM on every single sweep tick, forever, for its entire
+    time awaiting settlement -- caught and skipped by payout_worker.
+    process_one()'s provider-mismatch guard, but only after a wasted
+    XADD/ack cycle and a spurious payout_provider_mismatch error log
+    each time. Matches the exact same exclusion admin/queries.py's
+    list_pending_withdrawals()/approve_withdrawal_admin() already apply
+    to the automatic-rail-only 'approved'/'review' queues.
     """
     rows = await pool.fetch(
         "SELECT id, our_ref FROM payments WHERE direction = 'out' AND status = $1 "
-        "AND updated_at < now() - make_interval(secs => $2)",
+        "AND provider != 'manual' AND updated_at < now() - make_interval(secs => $2)",
         STATUS_APPROVED,
         older_than_seconds,
     )

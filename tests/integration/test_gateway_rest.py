@@ -14,9 +14,11 @@ import httpx
 import pytest
 
 from packages.core.phone_crypto import encrypt_phone, phone_lookup_hash
+from services.admin import queries as admin_queries
 from services.engine.round_engine import RoundEngine, load_room_config
 from services.gateway.app import app as gateway_app
 from tests.integration.conftest import build_init_data, create_funded_user, create_room, fund_user, next_telegram_id
+from tests.integration.test_admin_auth import create_test_admin
 from tests.integration.test_payments_deposits import FakePaymentProvider
 from tests.integration.test_payout_worker import FakePayoutProvider
 from tests.integration.test_round_engine import wait_until
@@ -281,6 +283,113 @@ async def test_api_withdraw_succeeds_and_locks_funds(gateway_server, pool, conn,
     body = response.json()
     assert body["our_ref"].startswith("WD-")
     assert body["status"] in ("approved", "review")
+
+
+# --- admin availability toggle enforced server-side, not just client-side --
+# A code-review pass caught that GET /api/payment-methods and the bot's own
+# /deposit and /withdraw commands already honored an admin's live
+# payment_provider_availability toggle, but the three endpoints that
+# actually *move money* (/api/deposit, /api/deposit/manual, /api/withdraw)
+# never checked it at all -- only the static app.state.chapa/None check.
+# The Mini App JS hid the disabled option, but a client with the page
+# already open (or any direct POST) could still complete a "disabled"
+# deposit/withdrawal.
+
+
+async def test_api_deposit_refuses_when_admin_disables_chapa(gateway_server, pool, conn, fake_chapa):
+    admin_id, *_ = await create_test_admin(pool)
+    await admin_queries.set_payment_provider_availability_admin(
+        pool, admin_id=admin_id, provider="chapa", direction="in", enabled=False,
+        reason="test: simulate an admin disabling chapa deposits", ip_address=None,
+    )
+    try:
+        telegram_id = next_telegram_id()
+        init_data = build_init_data(telegram_id)
+        async with httpx.AsyncClient() as client:
+            await client.get(f"{http_base(gateway_server)}/api/me", headers={"Authorization": f"tma {init_data}"})
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        await _set_phone(conn, user_row["id"], f"+2519{telegram_id % 100_000_000:08d}")
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{http_base(gateway_server)}/api/deposit",
+                headers={"Authorization": f"tma {init_data}"},
+                json={"amount": "150"},
+            )
+        assert response.status_code == 503
+    finally:
+        await admin_queries.set_payment_provider_availability_admin(
+            pool, admin_id=admin_id, provider="chapa", direction="in", enabled=True,
+            reason="test cleanup", ip_address=None,
+        )
+
+
+async def test_api_deposit_manual_refuses_when_admin_disables_manual(gateway_server, pool, conn):
+    admin_id, *_ = await create_test_admin(pool)
+    destination_id = await admin_queries.create_manual_payment_destination_admin(
+        pool, admin_id=admin_id, method_kind="telebirr", account_ref="0911000000",
+        account_name="Jo Bingo PLC", instructions=None, ip_address="10.0.0.1",
+    )
+    await admin_queries.set_payment_provider_availability_admin(
+        pool, admin_id=admin_id, provider="manual", direction="in", enabled=False,
+        reason="test: simulate an admin disabling manual deposits", ip_address=None,
+    )
+    try:
+        telegram_id = next_telegram_id()
+        init_data = build_init_data(telegram_id)
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{http_base(gateway_server)}/api/deposit/manual",
+                headers={"Authorization": f"tma {init_data}"},
+                json={"amount": "150", "manual_destination_id": destination_id, "external_reference": "FT26-x"},
+            )
+        assert response.status_code == 503
+
+        # Never even reached manual.create_manual_deposit_request() --
+        # confirms this is a real refusal, not a downstream rejection
+        # that happens to also return a 4xx/5xx.
+        row = await pool.fetchval(
+            "SELECT id FROM payments WHERE user_id = (SELECT id FROM users WHERE telegram_id = $1) "
+            "AND direction = 'in' AND provider = 'manual'",
+            telegram_id,
+        )
+        assert row is None
+    finally:
+        await admin_queries.set_payment_provider_availability_admin(
+            pool, admin_id=admin_id, provider="manual", direction="in", enabled=True,
+            reason="test cleanup", ip_address=None,
+        )
+
+
+async def test_api_withdraw_refuses_when_admin_disables_the_requested_provider(gateway_server, pool, conn):
+    admin_id, *_ = await create_test_admin(pool)
+    await admin_queries.set_payment_provider_availability_admin(
+        pool, admin_id=admin_id, provider="manual", direction="out", enabled=False,
+        reason="test: simulate an admin disabling manual withdrawals", ip_address=None,
+    )
+    try:
+        telegram_id = next_telegram_id()
+        init_data = build_init_data(telegram_id)
+        async with httpx.AsyncClient() as client:
+            await client.get(f"{http_base(gateway_server)}/api/me", headers={"Authorization": f"tma {init_data}"})
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        await fund_user(conn, user_row["id"], Decimal("500.00"))
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{http_base(gateway_server)}/api/withdraw",
+                headers={"Authorization": f"tma {init_data}"},
+                json={
+                    "amount": "200", "account_ref": "0911223344", "holder_name": "Test Holder",
+                    "provider": "manual",
+                },
+            )
+        assert response.status_code == 503
+    finally:
+        await admin_queries.set_payment_provider_availability_admin(
+            pool, admin_id=admin_id, provider="manual", direction="out", enabled=True,
+            reason="test cleanup", ip_address=None,
+        )
 
 
 async def test_api_round_fairness_requires_auth(gateway_server):

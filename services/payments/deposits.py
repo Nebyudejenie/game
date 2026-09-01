@@ -133,11 +133,25 @@ async def _check_deposit_eligibility(
     # mismatch" entry; a bare date_trunc('day', now()) resets this cap
     # three hours early/late every night against the calendar day players
     # actually experience.
+    #
+    # A code-review pass caught that this status list only covered the
+    # automatic (Chapa) rail's lifecycle (pending -> processing ->
+    # succeeded) and left out manual deposits' own pre-credit states
+    # ('review', then 'approved' once an admin signs off, before the
+    # ledger post that finally marks it 'succeeded' -- see manual.py's
+    # create_manual_deposit_request() and admin/queries.py's
+    # approve_manual_deposit_admin()). Without 'review'/'approved' here,
+    # a player could submit unlimited manual deposits while they sat
+    # unreviewed -- none of them counted against the cap -- and get
+    # credited far past it the moment an admin worked through the
+    # backlog. 'rejected'/'failed' stay excluded on purpose: those never
+    # get credited, so they must never count toward "how much is already
+    # spoken for today."
     today_total = await conn.fetchval(
         """
         SELECT COALESCE(SUM(amount), 0) FROM payments
         WHERE user_id = $1 AND direction = 'in'
-          AND status IN ('pending', 'processing', 'succeeded')
+          AND status IN ('pending', 'processing', 'review', 'approved', 'succeeded')
           AND created_at >= date_trunc('day', now() AT TIME ZONE 'Africa/Addis_Ababa') AT TIME ZONE 'Africa/Addis_Ababa'
         """,
         user_id,

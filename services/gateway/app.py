@@ -188,16 +188,24 @@ async def api_create_deposit(
 ) -> dict[str, str]:
     user_id = await _authenticated_user_id(authorization)
     settings = get_settings()
-    # miniapp_url is where the player's browser returns to after paying;
-    # payments_public_base_url is where Chapa's own server-to-server
-    # webhook actually needs to land (services/payments/app.py's real
-    # POST /webhooks/chapa route, a different service/subdomain than this
-    # one in a real deployment). Both must be real before honestly
-    # offering a deposit, same "not available yet" discipline as every
-    # other empty-setting gate in this codebase -- see DECISIONS.md for
-    # the bug this split fixed (both used to collapse into one shared,
-    # unreachable URL).
-    if app.state.chapa is None or not settings.miniapp_url or not settings.payments_public_base_url:
+    # A code-review pass caught that this only ever checked static
+    # process-startup config (app.state.chapa/miniapp_url/
+    # payments_public_base_url), never the admin's own live
+    # payment_provider_availability toggle -- GET /api/payment-methods
+    # and the bot's /deposit both already gate on
+    # availability.get_payment_availability() (the documented single
+    # source of truth), but this endpoint, the one that actually moves
+    # money, didn't. An admin disabling Chapa deposits (a compromised
+    # merchant account, a provider outage) had no effect here: the UI
+    # hid the button, but a client that already had the page open (or
+    # any direct POST) could still complete a "disabled" deposit.
+    # get_payment_availability() already folds in every static
+    # reachability check this used to do ad hoc (chapa_api_key,
+    # miniapp_url, payments_public_base_url -- see its own
+    # chapa_deposit_configured), so this single call replaces the old
+    # check rather than adding a second one to drift from it.
+    methods = await availability.get_payment_availability(app.state.pool, settings)
+    if "chapa" not in methods["deposit"]:
         raise HTTPException(status_code=503, detail="deposits are not available yet")
 
     try:
@@ -244,6 +252,13 @@ async def api_create_manual_deposit(
     user_id = await _authenticated_user_id(authorization)
     settings = get_settings()
 
+    # Same gap as api_create_deposit's: an admin's live availability
+    # toggle was only ever enforced by the UI hiding the button, never by
+    # this endpoint, the one that actually creates the review-queue row.
+    methods = await availability.get_payment_availability(app.state.pool, settings)
+    if "manual" not in methods["deposit"]:
+        raise HTTPException(status_code=503, detail="deposits are not available yet")
+
     try:
         amount = Decimal(body.amount)
     except InvalidOperation:
@@ -288,7 +303,11 @@ async def api_create_withdrawal(
 
     if body.provider not in ("chapa", "manual"):
         raise HTTPException(status_code=422, detail="unknown_provider")
-    if body.provider == "chapa" and app.state.chapa is None:
+    # Same gap as api_create_deposit's, for both rails: this used to only
+    # check chapa's own static config, with no check at all for manual --
+    # an admin's live availability toggle had no effect on either.
+    methods = await availability.get_payment_availability(app.state.pool, settings)
+    if body.provider not in methods["withdraw"]:
         raise HTTPException(status_code=503, detail="withdrawals are not available yet")
 
     try:

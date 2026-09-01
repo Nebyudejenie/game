@@ -46,6 +46,10 @@ class _AlwaysSucceedsProvider(_NullProvider):
         return PayoutResult(provider_ref=f"chapa-{our_ref}", status="succeeded", raw_response={})
 
 
+class _ManualNullProvider(_NullProvider):
+    name = "manual"
+
+
 async def _cash(conn, user_id: int) -> Decimal:
     account = await ledger.get_or_create_account(conn, user_id, "user_cash")
     return await ledger.balance(conn, account.id)
@@ -242,6 +246,50 @@ async def test_sweep_re_enqueues_an_approved_payout_that_never_got_queued(pool, 
     status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", intent.payment_id)
     assert status == "succeeded"
     assert await _locked(conn, user_id) == Decimal("0.00")
+
+
+async def test_sweep_never_touches_a_manual_withdrawal_awaiting_settlement(pool, redis, conn):
+    # A code-review pass caught that sweep_stuck_approved_payouts()'s
+    # query had no provider != 'manual' filter, unlike admin/queries.py's
+    # list_pending_withdrawals()/approve_withdrawal_admin() which already
+    # exclude manual rows from the automatic-rail-only queues. A manual
+    # withdrawal legitimately sits at status='approved' for as long as it
+    # takes an admin to actually send the transfer by hand -- often much
+    # longer than older_than_seconds -- so without the filter, every
+    # pending manual withdrawal got repeatedly re-enqueued onto the
+    # automatic payout stream on every sweep tick, forever.
+    admin_id, *_ = await create_test_admin(pool)
+    user_id = await create_funded_user(conn, Decimal("1000.00"))
+    # Not routed through _request() -- its own provider is hardcoded
+    # positionally, so a manual-rail provider needs a direct call here.
+    intent = await withdrawals.request_withdrawal(
+        pool, redis, _ManualNullProvider(),
+        user_id=user_id, amount=Decimal("100.00"), method_kind="telebirr",
+        account_ref="0911223344", holder_name="Test Holder",
+        min_withdraw=MIN_WITHDRAW, auto_approve_limit=AUTO_APPROVE_LIMIT,
+        kyc_threshold=KYC_THRESHOLD, chargeback_window_minutes=CHARGEBACK_MINUTES,
+        min_account_age_hours=0, force_review=True,
+    )
+    assert intent.status == withdrawals.STATUS_REVIEW
+
+    outcome = await admin_queries.approve_manual_withdrawal_admin(
+        pool, redis, admin_id=admin_id, payment_id=intent.payment_id, reason=None,
+        ip_address="10.0.0.1", two_person_threshold=Decimal("2000.00"),
+    )
+    assert outcome == "approved"
+
+    # Old enough that the automatic-rail sweep would normally re-enqueue
+    # it -- proves this is genuinely excluded by provider, not merely
+    # too-recent-to-match.
+    await conn.execute(
+        "UPDATE payments SET updated_at = now() - interval '2 hours' WHERE id = $1", intent.payment_id
+    )
+
+    swept = await withdrawals.sweep_stuck_approved_payouts(pool, redis, older_than_seconds=3600)
+    assert intent.payment_id not in swept
+
+    status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", intent.payment_id)
+    assert status == "approved"  # untouched -- still correctly awaiting manual settlement
 
 
 async def test_amount_above_auto_approve_limit_goes_to_review(pool, redis, conn):
