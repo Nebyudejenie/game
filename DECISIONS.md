@@ -5,6 +5,61 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-01 — Dependency lockfiles, flagged five days ago and never picked back up
+
+The 2026-08-27 dependency vulnerability audit (elsewhere in this file)
+found the vulnerability scan itself clean but flagged something it
+couldn't fix in the same pass: every dependency in `pyproject.toml` uses
+a bare `>=` with no upper bound and no lockfile anywhere in the repo --
+"flagged, not invented a solution for." Five days and several major
+features later, still unaddressed. A fresh audit re-surfaced it as
+exactly the "flagged as a follow-up, never picked back up" pattern that
+also produced the pool-acquire()-timeout fix earlier today.
+
+**The real risk**: without a lockfile, `pip install -e ".[dev]"` (CI, the
+production `Dockerfile`, and the README's own quick-start, before this
+change) resolves whatever the loosest-possible constraints in
+`pyproject.toml` allow *on the day the install runs* -- a build today can
+silently pull a different, possibly newly-vulnerable transitive
+dependency set than yesterday's with zero code change and no record of
+what was actually tested. It also undermines the point of the
+vulnerability audit itself: nothing pins what was actually scanned.
+
+**Fix**: `requirements.lock` (production) and `requirements-dev.lock`
+(adds pytest/mypy/playwright) via `uv pip compile pyproject.toml
+[--extra dev] -o <file> --python-version 3.12` -- ordinary
+`requirements.txt`-format output, installable with plain `pip` (no `uv`
+dependency added to CI or the Dockerfile; `uv` is just the fast compiler
+used to *generate* them). `CI` (`.github/workflows/ci.yml`, both the
+`test` and `load-test` jobs), the `Dockerfile`, and `README.md`'s
+quick-start all now install from the lockfile first (`pip install -r
+requirements.lock`), then the project itself with `--no-deps` (the
+lockfile already installed every dependency; this step only adds this
+package). `README.md` documents the regeneration command for whenever
+`pyproject.toml` changes.
+
+**Verified for real, with one real, confirmed sandbox limitation**: a
+fresh scratch venv installing from each lockfile (`uv pip install -r
+requirements.lock` / `-dev.lock`) resolves and installs cleanly; mypy and
+a representative slice of the real integration test suite pass against
+the dev-lockfile venv; every one of the six real production entrypoints
+(`services.gateway.app`, `admin.app`, `payments.app`, `bot.app`,
+`engine.worker`, `payments.payout_worker`) imports cleanly against the
+production-only lockfile venv, with zero dev dependencies present. A real
+`docker build` of the updated `Dockerfile` could not be completed in this
+sandbox -- confirmed directly, not assumed: even a bare `docker run
+python:3.12-slim` trying to reach pypi.org fails DNS resolution inside
+the container, while the *host* itself reaches pypi.org fine (`curl`
+succeeds) -- this sandbox's Docker containers have no outbound network
+access at all, unrelated to anything in this change. The exact install
+sequence the Dockerfile now runs (`pip install -r requirements.lock &&
+pip install -e . --no-deps`) is the same one already verified working via
+its `uv` equivalent above, so this is a real, if indirect, verification
+of the Dockerfile's own correctness -- but the literal `docker build`
+itself is an honestly-unverifiable gap in this environment, the same
+category of gap this project already documents elsewhere (live Chapa API
+access, SantimPay/ArifPay docs) rather than silently assuming it works.
+
 ## 2026-09-01 — arada.fun domain, Cloudflare Tunnel, and a real webhook-routing bug it surfaced
 
 Jo Bingo deploys on a Proxmox VM with no public IP, reached through

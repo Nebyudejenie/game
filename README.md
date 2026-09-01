@@ -55,7 +55,8 @@ Requires Docker, Docker Compose, and Python 3.12.
 ```bash
 # 1. Create a virtualenv and install dependencies
 python3 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
+.venv/bin/pip install -r requirements-dev.lock
+.venv/bin/pip install -e . --no-deps
 
 # 2. Start Postgres and Redis
 #    (mapped to host ports 5433 / 6380, not the defaults, in case another
@@ -137,6 +138,22 @@ function without it) — `.env.example` ships a real, working dev key, but
 you do need the actual `.env` file copied over for anything that touches
 registration to run outside the test suite (which sets its own fixed key
 directly, so `pytest` works with no `.env` at all).
+
+**Dependency lockfiles**: `requirements.lock` (production) and
+`requirements-dev.lock` (adds pytest/mypy/playwright) pin the exact
+resolved dependency tree, not just `pyproject.toml`'s own loose `>=`
+constraints — CI, the production `Dockerfile`, and the quick-start above
+all install from one of these two, not from `pyproject.toml` directly, so
+what actually runs is always the exact set of versions that was actually
+tested. After changing a dependency in `pyproject.toml`, regenerate both
+with [`uv`](https://docs.astral.sh/uv/) (a plain `pip install --upgrade
+pip-tools`-style compiler works too, since these are ordinary
+`requirements.txt`-format files — `uv` is just faster):
+
+```bash
+uv pip compile pyproject.toml -o requirements.lock --python-version 3.12
+uv pip compile pyproject.toml --extra dev -o requirements-dev.lock --python-version 3.12
+```
 
 ## CI/CD
 

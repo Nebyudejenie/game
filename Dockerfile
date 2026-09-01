@@ -19,16 +19,21 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 # network dependency on the distro's own package mirror) to install.
 COPY . .
 
-# Editable install -- the exact same method this project's own README
-# documents for local dev (`pip install -e ".[dev]"`, just without the
-# dev-only extras: pytest/mypy/playwright have no place in a production
-# image). Deliberately not a "real" wheel build: services/gateway/app.py
-# locates web/miniapp/ by a path relative to its own file location, which
-# only survives if the source tree stays laid out exactly as it is in the
-# repo -- an editable install (a .pth file pointing straight back at
-# /app) preserves that; a real build installing into site-packages would
-# not.
-RUN pip install --no-cache-dir -e .
+# requirements.lock pins the exact resolved dependency tree (generated
+# via `uv pip compile pyproject.toml`, no dev-only extras -- pytest/mypy/
+# playwright have no place in a production image) -- without it, a plain
+# `pip install -e .` would resolve whatever the loosest-possible `>=`
+# constraints in pyproject.toml allow on whatever day this image happens
+# to build, silently different from yesterday's image with zero code
+# change. --no-deps on the editable install below: the lockfile already
+# installed every dependency, this step only adds this package itself.
+#
+# Editable, not a "real" wheel build: services/gateway/app.py locates
+# web/miniapp/ by a path relative to its own file location, which only
+# survives if the source tree stays laid out exactly as it is in the repo
+# -- an editable install (a .pth file pointing straight back at /app)
+# preserves that; a real build installing into site-packages would not.
+RUN pip install --no-cache-dir -r requirements.lock && pip install --no-cache-dir -e . --no-deps
 
 # A real non-root user -- the base image's own default is root, which
 # means every one of this monorepo's six deployed services (a real
