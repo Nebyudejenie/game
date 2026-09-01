@@ -8784,6 +8784,61 @@ is itself the next real diagnostic signal -- its absence would point
 at a JS bundle/serving problem instead of a connectivity one, and this
 session has no way to observe which without production access.
 
+## 2026-09-01 — WS handshake rejections were never logged server-side, only sent to the client
+
+Direct follow-up to the blank-screen P0 above: after the previous fix
+deployed, the user reported actually seeing a real banner in
+production -- "የእርስዎ ክፍለ ጊዜ አልቋል...", the `connection.expired` text --
+meaning the WebSocket genuinely opens and the gateway's `_handshake()`
+actively *rejects* it with a terminal close code (4000/4001/4003), a
+different, more specific failure than the "never connects at all" gap
+just fixed. Investigating this immediately surfaced a real observability
+gap that would have blocked diagnosing it either way: `_handshake()`'s
+every rejection branch built a reason string (`bad_hash`,
+`stale_auth_date`, `auth_timeout`, etc.) and sent it *only* as the WS
+close frame's reason -- visible in a browser's own devtools, but never
+logged in this process at all. Even with real production log access,
+there was no way to tell "one player's genuinely stale session" apart
+from "every single connection failing identically" (the signature of a
+misconfigured `TELEGRAM_BOT_TOKEN` -- every hash check fails the same
+way for every user's otherwise-perfectly-fresh initData).
+
+**Fixed**: added `structlog` logging (`ws_handshake_rejected`, with
+`reason=`) at all four rejection points in `_handshake()` --
+`auth_timeout`, `bad_frame`, `expected_auth`, and
+`invalid_init_data:{reason}` (the specific sub-reason from
+`telegram_auth.validate_init_data()`: `bad_hash`, `stale_auth_date`,
+`auth_date_in_future`, `missing_user`, `malformed_user`, etc.). Only the
+short reason string is logged, per `telegram_auth.py`'s own module
+docstring ("never log the raw initData string or the bot token") --
+verified directly, not just by omission: a new test asserts the raw
+tampered initData never appears in any captured log line.
+
+**Leading hypothesis for the actual production incident** (not
+confirmed -- still no log/server access to check directly): a real
+player opening the Mini App fresh should never hit `stale_auth_date`
+(their `auth_date` is current) or `missing_user`/`malformed_user`
+(Telegram itself constructs `initData` correctly) -- overwhelmingly the
+most likely real-world cause of every real player seeing this
+identically is `bad_hash`: `TELEGRAM_BOT_TOKEN` in production's
+`deploy/.env` not matching `@aradabbot`'s actual token (wrong value, a
+copy-paste from testing, stray quoting/whitespace changing the effective
+string). This fix doesn't correct that by itself -- it makes the actual
+reason visible in gateway logs on the next real connection attempt,
+which is the concrete next diagnostic step handed back to the user
+rather than a guess this session has no way to confirm.
+
+**Verified**: a new integration test,
+`test_handshake_rejection_is_logged_server_side_with_the_real_reason`
+(`tests/integration/test_gateway_auth.py`), drives a real tampered-hash
+WebSocket connection against the real running gateway app (same pattern
+as this file's existing `test_tampered_hash_is_rejected`) wrapped in
+`structlog.testing.capture_logs()`, and asserts the specific
+`ws_handshake_rejected`/`invalid_init_data:bad_hash` log event appears --
+confirmed to fail against the code before this fix (an empty log list)
+before trusting it. Full clean-slate rebuild: mypy clean across 75
+source files, `pytest tests/` 919 passed / 39 deselected.
+
 ## Pre-existing repo state noted, not touched
 
 This directory already had a `.git` folder with `origin` pointing to

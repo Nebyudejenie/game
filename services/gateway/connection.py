@@ -16,6 +16,7 @@ import time
 from typing import Any
 
 import asyncpg
+import structlog
 from fastapi import WebSocket, WebSocketDisconnect
 from redis.asyncio import Redis
 
@@ -26,6 +27,8 @@ from services.engine import commands
 from services.engine.commands import CommandTimeout
 from services.gateway import queries
 from services.gateway.fanout import ConnectionQueue, FanoutHub
+
+logger = structlog.get_logger()
 
 AUTH_TIMEOUT_SECONDS = 5.0
 GOING_AWAY_RECONNECT_CODE = 1012  # "service restart" -- reconnect now, don't back off
@@ -80,19 +83,33 @@ class ConnectionHandler:
     # --- handshake -------------------------------------------------------
 
     async def _handshake(self) -> bool:
+        # Every rejection here also gets a server-side log line -- a
+        # production incident (every real player's Mini App stuck on
+        # "session expired") caught that _safe_close()'s reason string
+        # only ever reached the *client's* WS close frame, never this
+        # process's own logs, leaving no way to tell a genuinely stale
+        # session apart from every player hitting the exact same
+        # rejection (a misconfigured TELEGRAM_BOT_TOKEN, most commonly --
+        # every hash check fails identically for every user) without
+        # production browser devtools access. Only the short reason
+        # string is logged, per telegram_auth.py's own module docstring
+        # -- never the raw init_data or the bot token.
         try:
             raw = await asyncio.wait_for(self._ws.receive_text(), timeout=AUTH_TIMEOUT_SECONDS)
         except (TimeoutError, WebSocketDisconnect):
+            logger.warning("ws_handshake_rejected", reason="auth_timeout")
             await self._safe_close(4001, "auth_timeout")
             return False
 
         try:
             frame = json.loads(raw)
         except json.JSONDecodeError:
+            logger.warning("ws_handshake_rejected", reason="bad_frame")
             await self._safe_close(4000, "bad_frame")
             return False
 
         if not isinstance(frame, dict) or frame.get("t") != "auth":
+            logger.warning("ws_handshake_rejected", reason="expected_auth")
             await self._safe_close(4000, "expected_auth")
             return False
 
@@ -101,6 +118,7 @@ class ConnectionHandler:
                 frame.get("init_data", ""), self._bot_token
             )
         except InvalidInitData as exc:
+            logger.warning("ws_handshake_rejected", reason=f"invalid_init_data:{exc.reason}")
             await self._safe_close(4003, f"invalid_init_data:{exc.reason}")
             return False
 
