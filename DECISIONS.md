@@ -8625,6 +8625,54 @@ prioritizing first in a follow-up: it's the most security-sensitive
 logic in this feature, freshly introduced (not inherited from an older
 pattern), and already showing drift after a single diff.
 
+## 2026-09-01 — Extracted the duplicated two-person-approval gate into one shared helper
+
+Follow-up to the code-review pass above, picking off the item flagged as
+"worth prioritizing first": the maker-checker gate (row-lock already
+done by the caller, check `amount >= two_person_threshold`, stamp
+`first_approved_by_admin_id`/`first_approved_at` and return
+`awaiting_second_approval` on a first approval, raise
+`SameAdminCannotProvideSecondApproval` if the same admin tries to
+provide both) was copy-pasted nearly verbatim between
+`approve_manual_deposit_admin` and `approve_manual_withdrawal_admin` --
+the single most security-sensitive logic either function has,
+duplicated within the same diff that introduced it, already showing
+minor drift in audit action-string naming.
+
+**Fixed**: extracted `_apply_two_person_gate(conn, *, row, admin_id,
+payment_id, two_person_threshold, action_prefix, reason, ip_address)`.
+The row-fetching `SELECT` stays in each caller (the two functions need
+different columns -- deposits need `user_id`/`our_ref` for the credit
+that follows; withdrawals only need `amount`/`status`/
+`first_approved_by_admin_id`), and the completely different final
+action each caller takes once the gate clears (a real ledger credit for
+deposits vs. a bare status flip to `'approved'` for withdrawals) also
+stays put -- only the gate itself moved. Returns `"no_op"` /
+`"awaiting_second_approval"` (the caller returns this immediately,
+unchanged) or `None` (the caller proceeds with its own final action);
+raises `SameAdminCannotProvideSecondApproval` exactly as before. Both
+callers' own docstrings/behavior are otherwise untouched, and the
+`services/admin/app.py` HTTP layer needed zero changes -- it already
+just awaits the query function and catches the same exception type.
+
+Deliberately left the queries.py exception-to-HTTP-409 translation in
+`services/admin/app.py` (2 lines, duplicated twice) and the manual
+-withdrawal settle/fail vs. `payout_worker.py`'s private ledger-shape
+duplication alone for now -- the first is small enough that a new
+app-wide FastAPI exception-handler pattern (with no existing precedent
+in this codebase) would be a bigger change than the duplication it
+removes; the second needs an actual API decision (exporting
+`payout_worker.py`'s `_settle_success`/`_reverse`, or moving them
+somewhere both modules can import from) that's worth its own focused
+pass rather than folding into this one.
+
+Verified behavior is byte-for-byte unchanged: all 60 manual-payment
+-related tests pass unmodified, including every two-person-approval edge
+case (`test_at_threshold_first_approval_awaits_second_without_crediting`/
+`_without_approving`, both `same_admin_cannot_provide_second_approval`
+tests, both concurrent-double-approval tests). mypy clean across 75
+source files.
+
 ## Pre-existing repo state noted, not touched
 
 This directory already had a `.git` folder with `origin` pointing to

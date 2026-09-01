@@ -1142,6 +1142,71 @@ class SameAdminCannotProvideSecondApproval(Exception):
     """
 
 
+async def _apply_two_person_gate(
+    conn: ledger.AsyncpgConnection,
+    *,
+    row: asyncpg.Record | None,
+    admin_id: int,
+    payment_id: int,
+    two_person_threshold: Decimal,
+    action_prefix: str,
+    reason: str | None,
+    ip_address: str | None,
+) -> Literal["no_op", "awaiting_second_approval"] | None:
+    """The maker-checker gate shared by approve_manual_deposit_admin and
+    approve_manual_withdrawal_admin -- a code-review pass caught this
+    ~20-line block (the single most security-sensitive logic either
+    function has) copy-pasted between the two nearly verbatim, already
+    showing minor drift in audit action-string naming.
+
+    Returns a terminal outcome the caller should return immediately as
+    -is ('no_op' if the row's gone or already moved past 'review',
+    'awaiting_second_approval' if this is a first approval on a
+    >= two_person_threshold payment -- the caller's own final action
+    must NOT run yet), or None if the row cleared every two-person check
+    and the caller should proceed with its own final action (credit the
+    ledger, or flip status to 'approved'). Raises
+    SameAdminCannotProvideSecondApproval if the same admin tries to
+    provide both approvals on a gated payment -- a real policy
+    violation, not a quiet no-op.
+
+    Must be called with `row` already fetched `FOR UPDATE` inside the
+    caller's own transaction -- the row shape differs between callers
+    (deposits need user_id/our_ref for the credit that follows; this
+    gate only ever reads amount/status/first_approved_by_admin_id), so
+    the SELECT itself stays with each caller rather than moving here.
+    """
+    if row is None or row["status"] != "review":
+        return "no_op"
+
+    if row["amount"] >= two_person_threshold:
+        if row["first_approved_by_admin_id"] is None:
+            await conn.execute(
+                "UPDATE payments SET first_approved_by_admin_id = $2, first_approved_at = now() "
+                "WHERE id = $1",
+                payment_id,
+                admin_id,
+            )
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action=f"{action_prefix}.first_approve",
+                target_type="payment",
+                target_id=str(payment_id),
+                after={"first_approved_by_admin_id": admin_id},
+                reason=reason,
+                ip_address=ip_address,
+            )
+            return "awaiting_second_approval"
+
+        if row["first_approved_by_admin_id"] == admin_id:
+            raise SameAdminCannotProvideSecondApproval(
+                f"admin {admin_id} already provided the first approval for payment {payment_id}"
+            )
+
+    return None
+
+
 ManualDepositApprovalOutcome = Literal["credited", "awaiting_second_approval", "no_op"]
 
 
@@ -1170,33 +1235,14 @@ async def approve_manual_deposit_admin(
                 "WHERE id = $1 AND direction = 'in' AND provider = 'manual' FOR UPDATE",
                 payment_id,
             )
-            if row is None or row["status"] != "review":
-                return "no_op"
-
-            if row["amount"] >= two_person_threshold:
-                if row["first_approved_by_admin_id"] is None:
-                    await conn.execute(
-                        "UPDATE payments SET first_approved_by_admin_id = $2, first_approved_at = now() "
-                        "WHERE id = $1",
-                        payment_id,
-                        admin_id,
-                    )
-                    await audit.record(
-                        conn,
-                        admin_id=admin_id,
-                        action="manual_deposits.first_approve",
-                        target_type="payment",
-                        target_id=str(payment_id),
-                        after={"first_approved_by_admin_id": admin_id},
-                        reason=reason,
-                        ip_address=ip_address,
-                    )
-                    return "awaiting_second_approval"
-
-                if row["first_approved_by_admin_id"] == admin_id:
-                    raise SameAdminCannotProvideSecondApproval(
-                        f"admin {admin_id} already provided the first approval for payment {payment_id}"
-                    )
+            gate_outcome = await _apply_two_person_gate(
+                conn, row=row, admin_id=admin_id, payment_id=payment_id,
+                two_person_threshold=two_person_threshold, action_prefix="manual_deposits",
+                reason=reason, ip_address=ip_address,
+            )
+            if gate_outcome is not None:
+                return gate_outcome
+            assert row is not None  # _apply_two_person_gate already returned "no_op" for None
 
             # The credit itself is the same shape as deposits.py's own
             # _apply_confirmed_status(): provider_settlement -amount /
@@ -1377,33 +1423,14 @@ async def approve_manual_withdrawal_admin(
                 "WHERE id = $1 AND direction = 'out' AND provider = 'manual' FOR UPDATE",
                 payment_id,
             )
-            if row is None or row["status"] != "review":
-                return "no_op"
-
-            if row["amount"] >= two_person_threshold:
-                if row["first_approved_by_admin_id"] is None:
-                    await conn.execute(
-                        "UPDATE payments SET first_approved_by_admin_id = $2, first_approved_at = now() "
-                        "WHERE id = $1",
-                        payment_id,
-                        admin_id,
-                    )
-                    await audit.record(
-                        conn,
-                        admin_id=admin_id,
-                        action="manual_withdrawals.first_approve",
-                        target_type="payment",
-                        target_id=str(payment_id),
-                        after={"first_approved_by_admin_id": admin_id},
-                        reason=reason,
-                        ip_address=ip_address,
-                    )
-                    return "awaiting_second_approval"
-
-                if row["first_approved_by_admin_id"] == admin_id:
-                    raise SameAdminCannotProvideSecondApproval(
-                        f"admin {admin_id} already provided the first approval for payment {payment_id}"
-                    )
+            gate_outcome = await _apply_two_person_gate(
+                conn, row=row, admin_id=admin_id, payment_id=payment_id,
+                two_person_threshold=two_person_threshold, action_prefix="manual_withdrawals",
+                reason=reason, ip_address=ip_address,
+            )
+            if gate_outcome is not None:
+                return gate_outcome
+            assert row is not None  # _apply_two_person_gate already returned "no_op" for None
 
             await conn.execute(
                 "UPDATE payments SET status = 'approved', updated_at = now() WHERE id = $1", payment_id
