@@ -301,6 +301,12 @@ async def check_stake_allowed(conn: AsyncpgConnection, user_id: int, stake: Deci
 async def today_net_loss(conn: AsyncpgConnection, user_id: int) -> Decimal:
     """Stakes debited from user_cash today minus payouts credited to it
     today -- a positive number means the player is net down for the day.
+
+    "Today" means the Ethiopian calendar day, not the Postgres session's
+    ambient (UTC-by-default) one -- a bare `date_trunc('day', now())`
+    would reset this loss-cap window three hours early/late every night
+    (see DECISIONS.md's "day-boundary timezone mismatch" entry, the same
+    class of bug already fixed for the admin dashboard's daily figures).
     """
     row = await conn.fetchrow(
         """
@@ -311,7 +317,7 @@ async def today_net_loss(conn: AsyncpgConnection, user_id: int) -> Decimal:
         JOIN accounts a ON a.id = e.account_id
         JOIN ledger_transactions t ON t.id = e.transaction_id
         WHERE a.user_id = $1 AND a.kind = 'user_cash' AND t.kind IN ('stake', 'payout')
-          AND e.created_at >= date_trunc('day', now())
+          AND e.created_at >= date_trunc('day', now() AT TIME ZONE 'Africa/Addis_Ababa') AT TIME ZONE 'Africa/Addis_Ababa'
         """,
         user_id,
     )

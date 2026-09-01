@@ -299,6 +299,37 @@ async def test_today_net_loss_reflects_stakes_and_payouts(pool, conn):
     assert net_loss == Decimal("70.00")
 
 
+async def test_today_net_loss_uses_the_ethiopian_calendar_day_not_utc(pool, conn):
+    # today_net_loss() used a bare date_trunc('day', now()) -- the
+    # Postgres session's ambient (UTC-by-default) day boundary, not the
+    # Ethiopian one this loss cap is actually meant to reset at. EAT is
+    # UTC+3, so EAT's midnight falls three hours before UTC's -- a stake
+    # placed one hour before *UTC* midnight is still within *today's*
+    # Ethiopian calendar day and must count toward the cap, even though a
+    # UTC-ambient boundary would wrongly place it in "yesterday" and miss
+    # it. This mismatch window exists every single night this platform
+    # runs, not a contrived edge case (see DECISIONS.md's day-boundary
+    # timezone entries for the admin dashboard's equivalent bug/fix).
+    user_id = await create_funded_user(conn, Decimal("1000.00"))
+    cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
+    pot = await ledger.get_or_create_account(conn, None, "pot_escrow")
+
+    before = await responsible_gaming.today_net_loss(conn, user_id)
+
+    txn = await ledger.post(
+        conn, "stake", [ledger.Entry(cash.id, Decimal("-40.00")), ledger.Entry(pot.id, Decimal("40.00"))],
+        idempotency_key=f"tz-boundary-loss-{user_id}",
+    )
+    boundary = (await conn.fetchrow("SELECT date_trunc('day', now()) - interval '1 hour' AS ts"))["ts"]
+    await conn.execute(
+        "UPDATE ledger_entries SET created_at = $1 WHERE transaction_id = $2 AND account_id = $3",
+        boundary, txn.id, cash.id,
+    )
+
+    after = await responsible_gaming.today_net_loss(conn, user_id)
+    assert after - before == Decimal("40.00")
+
+
 # --- deposit-side enforcement ----------------------------------------------
 
 
@@ -330,6 +361,32 @@ async def test_per_user_deposit_cap_under_global_still_allows_a_smaller_deposit(
         pool, redis, conn, user_id, Decimal("30.00"), daily_cap=Decimal("1000000.00"), provider=FakePaymentProvider()
     )
     assert intent.our_ref.startswith("DEP-")
+
+
+async def test_deposit_daily_cap_uses_the_ethiopian_calendar_day_not_utc(pool, redis, conn):
+    # Same class of bug as today_net_loss()'s -- _check_deposit_eligibility()
+    # also used a bare date_trunc('day', now()). A payment created one hour
+    # before *UTC* midnight is still within *today's* Ethiopian calendar day
+    # (EAT is UTC+3) and must count toward today's cap; a UTC-ambient
+    # boundary would wrongly exclude it.
+    user_id = await create_user(conn)
+    first = await _deposit(
+        pool, redis, conn, user_id, Decimal("60.00"),
+        daily_cap=Decimal("100.00"), provider=FakePaymentProvider(),
+    )
+    boundary = (await conn.fetchrow("SELECT date_trunc('day', now()) - interval '1 hour' AS ts"))["ts"]
+    await conn.execute("UPDATE payments SET created_at = $1 WHERE id = $2", boundary, first.payment_id)
+
+    # A second 60.00 deposit only exceeds the 100.00 cap if the first
+    # deposit above is still correctly counted as part of today's total --
+    # FakePaymentProvider() (not the default _NullProvider) so that if the
+    # cap check wrongly lets this through, the failure is a clean "no
+    # exception raised" rather than an unrelated provider error masking it.
+    with pytest.raises(deposits.DailyDepositCapExceeded):
+        await _deposit(
+            pool, redis, conn, user_id, Decimal("60.00"),
+            daily_cap=Decimal("100.00"), provider=FakePaymentProvider(),
+        )
 
 
 # --- marketing audience query ------------------------------------------

@@ -8386,6 +8386,104 @@ five worked examples plus standard numeral-construction rules, not
 independently verified against a native speaker -- same discipline this
 codebase's other Amharic strings already carry.
 
+## 2026-09-01 — Two more day-boundary timezone mismatches fixed: the loss cap and the deposit cap
+
+The 2026-08-25 full-platform review's catalogue (this file's "Catalogued,
+not fixed" section) flagged a day-boundary timezone mismatch that got
+fixed for the admin dashboard's daily figures (`dashboard_summary()`,
+`daily_ggr()`, `retention_cohorts()`) but never for the two other places
+with the exact same bug: `packages/core/responsible_gaming.py`'s
+`today_net_loss()` (the daily loss-cap gate) and
+`services/payments/deposits.py`'s `_check_deposit_eligibility()` (the
+daily deposit-cap gate). Both used a bare `date_trunc('day', now())` --
+the Postgres session's ambient (UTC-by-default) day boundary -- instead
+of the Ethiopian calendar day these player-facing limits are actually
+meant to describe. Found by re-auditing the original catalogue against
+current code rather than trusting the prose was still accurate (7 of the
+catalogue's 10 highest-severity items turned out to already be fixed by
+later follow-ups; these two, plus payout reconciliation below, were not).
+
+Unlike the dashboard fix (which needed a matching Python-side `date.today()`
+correction), both of these compute the boundary entirely in SQL with no
+separate Python "today" to keep in sync -- so the fix is SQL-only:
+`date_trunc('day', now() AT TIME ZONE 'Africa/Addis_Ababa') AT TIME ZONE
+'Africa/Addis_Ababa'`, replacing the bare `date_trunc('day', now())` in
+both queries. Verified the exact semantics of this double-conversion
+idiom directly against the running Postgres instance before trusting it
+(`now() AT TIME ZONE 'Africa/Addis_Ababa'` converts the current instant
+to a naive Ethiopia-wall-clock timestamp; `date_trunc('day', ...)`
+truncates that to Ethiopia midnight, still naive; the second `AT TIME
+ZONE` reinterprets that naive value as Ethiopia local time and converts
+it back to the real UTC instant -- confirmed `2026-09-01 00:00:00 EAT` =
+`2026-08-31 21:00:00 UTC`, exactly the expected 3-hour offset).
+
+**Real-world impact of the bug**: for `today_net_loss()`, a player
+already at (or just under) their configured daily loss cap between
+21:00-24:00 UTC (00:00-03:00 EAT, a real 3-hour window every single
+night) could have a stake wrongly excluded from "today's" total and
+exceed their own self-set responsible-gaming limit -- the exact
+compliance-adjacent risk this control exists to prevent, not merely a
+reporting inaccuracy. For the deposit cap, the same window could let a
+player exceed their configured daily deposit limit.
+
+**Regression tests, and why the first draft of one needed a fix before
+trusting it**: both new tests (`test_today_net_loss_uses_the_ethiopian_
+calendar_day_not_utc`, `test_deposit_daily_cap_uses_the_ethiopian_
+calendar_day_not_utc` in `tests/integration/test_responsible_gaming.py`)
+insert a real row with `created_at` set to `date_trunc('day', now()) -
+interval '1 hour'` -- always inside the fixed 3-hour EAT/UTC mismatch
+window relative to whatever real instant the test happens to run at,
+avoiding any dependency on a fixed calendar date (unlike the `daily_ggr`
+precedent this reused, `today_net_loss()`/`_check_deposit_eligibility()`
+don't take an explicit date parameter, they always mean live "today").
+The deposit-cap test's first draft used the default `_NullProvider` for
+its second `_deposit()` call and initially failed with an unrelated
+`DepositProviderError` instead of a clean "did not raise" -- because
+under the still-reverted buggy code the cap check wrongly passed and
+execution reached the provider step, which `_NullProvider` doesn't
+implement. Fixed by using `FakePaymentProvider()` there too, so a wrongly
+-passing cap check surfaces as an unambiguous `DID NOT RAISE
+DailyDepositCapExceeded` instead of a confusing, differently-typed crash.
+Both tests confirmed to fail exactly as described against the reverted
+(pre-fix) SQL before trusting them, then confirmed to pass again once the
+fix was restored -- the same discipline as every other regression test
+in this codebase.
+
+Full responsible-gaming + deposits suite (51 tests) passed clean.
+
+## 2026-09-01 — Re-checked the payout-reconciliation gap and the phone.py gap; both still genuinely blocked, not re-attempted
+
+While auditing the 2026-08-25 catalogue for what's still open (see the
+entry above), re-verified the two highest-severity remaining items
+against current code rather than trusting old prose:
+
+- **`phone.py`'s non-Ethiopian-number gap**: confirmed unchanged, and
+  the earlier entry documenting why a fix was attempted and reverted
+  (`search_users()` depends on the same loose matching) still holds. Not
+  re-attempted -- no new information changes that trade-off.
+- **Payout reconciliation** (`payout_worker.py`'s `"processing"` gap):
+  made a fresh, real attempt at the exact thing that's blocked this since
+  the 16th follow-up entry -- fetching Chapa's actual `GET /v1/transfers/
+  verify/<tx_ref>` response shape, this time via `WebFetch` against
+  `developer.chapa.co` directly. Got further than before (confirmed the
+  endpoint path/method/auth header, and a payment-status vocabulary of
+  success/pending/failed from the *deposit*-side verify endpoint), but
+  the same wall as documented four times previously: the transfer
+  -specific verify response's real JSON shape and status vocabulary
+  still didn't render through the fetch tooling (the docs site's example
+  responses are behind a JS-driven tabbed UI). One page did surface a
+  telling fragment -- "Transfer/Payout Status Values: success (Transfer
+  *queued* successfully), failed" -- which if accurate would mean even a
+  terminal-looking `"success"` on the *initiate* call doesn't mean
+  "delivered," reinforcing rather than resolving the exact ambiguity
+  this gap is about. Did not guess a mapping from a paraphrased fragment
+  with real money on the line. This remains the single most severe open
+  item in the whole platform, genuinely blocked on external
+  documentation access, not on unwritten code -- same category as
+  [[project-santimpay-arifpay-blocked]], not a task to pick back up
+  without either real Chapa sandbox credentials to observe a live
+  response, or a support channel that can hand over the actual schema.
+
 ## Pre-existing repo state noted, not touched
 
 This directory already had a `.git` folder with `origin` pointing to

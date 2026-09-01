@@ -128,12 +128,17 @@ async def _check_deposit_eligibility(
     user_cap = responsible_gaming.effective_deposit_cap(limits)
     effective_cap = min(daily_cap, user_cap) if user_cap is not None else daily_cap
 
+    # Ethiopian calendar day, not the Postgres session's ambient
+    # (UTC-by-default) one -- see DECISIONS.md's "day-boundary timezone
+    # mismatch" entry; a bare date_trunc('day', now()) resets this cap
+    # three hours early/late every night against the calendar day players
+    # actually experience.
     today_total = await conn.fetchval(
         """
         SELECT COALESCE(SUM(amount), 0) FROM payments
         WHERE user_id = $1 AND direction = 'in'
           AND status IN ('pending', 'processing', 'succeeded')
-          AND created_at >= date_trunc('day', now())
+          AND created_at >= date_trunc('day', now() AT TIME ZONE 'Africa/Addis_Ababa') AT TIME ZONE 'Africa/Addis_Ababa'
         """,
         user_id,
     )
