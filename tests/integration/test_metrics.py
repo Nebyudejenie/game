@@ -315,7 +315,7 @@ class _FakeCheckoutProvider:
     name: str = "chapa"
     checkouts: dict[str, object] = field(default_factory=dict)
 
-    async def create_checkout(self, *, amount, user_ref, our_ref, return_url):
+    async def create_checkout(self, *, amount, user_ref, our_ref, return_url, callback_url):
         return CheckoutResult(
             checkout_url=f"https://pay.test/{our_ref}", provider_ref=our_ref, raw_response={}
         )
@@ -331,6 +331,7 @@ async def test_deposit_outcomes_counter_increments_on_a_real_credit(pool, redis,
         amount=Decimal("25.00"),
         phone_e164="+251911000111",
         return_url="https://example.test/return",
+        callback_url="https://payments.test/webhooks/chapa",
         min_deposit=Decimal("10.00"),
         daily_cap=Decimal("50000.00"),
     )

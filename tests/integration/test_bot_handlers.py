@@ -124,7 +124,16 @@ async def bot_setup(pool, redis):
     """
     settings = Settings(
         telegram_bot_token="123456:FAKE-TEST-TOKEN",
-        miniapp_url="",
+        # Truthy by default -- most of this file's deposit-command tests
+        # need Chapa deposits to actually be "available" (services/
+        # payments/availability.py's chapa_deposit_configured now requires
+        # both miniapp_url and payments_public_base_url, the latter
+        # already resolving from conftest.py's PAYMENTS_PUBLIC_BASE_URL
+        # env default). The two tests that specifically want this empty
+        # (test_play_command_reports_not_available_when_miniapp_url_unset,
+        # test_deposit_shows_not_available_when_no_provider_and_no_
+        # miniapp_url) monkeypatch it back to "" for themselves.
+        miniapp_url="https://miniapp.test",
         telegram_bot_username="jobingo_bot",
     )
     bot, session = make_bot()
@@ -412,7 +421,7 @@ async def test_deposit_command_rate_limited_after_five_in_a_row(pool, bot_ctx, m
         def __init__(self, api_key: str) -> None:
             pass
 
-        async def create_checkout(self, *, amount, user_ref, our_ref, return_url):
+        async def create_checkout(self, *, amount, user_ref, our_ref, return_url, callback_url):
             from services.payments.provider import CheckoutResult
 
             return CheckoutResult(
@@ -911,14 +920,14 @@ async def test_play_command_rejects_unregistered_user(bot_ctx):
     assert "register first" in session.sent[0].text or "ይመዝገቡ" in session.sent[0].text
 
 
-async def test_play_command_reports_not_available_when_miniapp_url_unset(bot_ctx):
-    # bot_setup's shared Settings has miniapp_url="" for the whole test
-    # file/session (built once, since services.bot.handlers.router can
-    # only ever attach to one Dispatcher -- see bot_setup's own
-    # docstring), so this is the only branch of cmd_play reachable here;
-    # the "available" branch's keyboard is already covered directly by
-    # test_keyboards.py's own tests of main_menu_keyboard().
+async def test_play_command_reports_not_available_when_miniapp_url_unset(bot_ctx, monkeypatch):
+    # bot_setup's shared Settings defaults miniapp_url to a real value (most
+    # of this file's deposit-command tests need it truthy) -- forced back
+    # to empty here for this one test's own scenario; the "available"
+    # branch's keyboard is already covered directly by test_keyboards.py's
+    # own tests of main_menu_keyboard().
     dp, bot, session = bot_ctx
+    monkeypatch.setattr(dp["settings"], "miniapp_url", "")
     telegram_id = await _register(dp, bot, session)
 
     await dp.feed_update(bot, make_text_update(telegram_id, "/play"))
@@ -1210,10 +1219,10 @@ async def test_deposit_redirects_to_the_wallet_when_only_manual_is_available(poo
         await _set_chapa_availability(pool, direction="in", enabled=True)
 
 
-async def test_deposit_shows_not_available_when_no_provider_and_no_miniapp_url(pool, bot_ctx):
+async def test_deposit_shows_not_available_when_no_provider_and_no_miniapp_url(pool, bot_ctx, monkeypatch):
     dp, bot, session = bot_ctx
     settings = dp["settings"]
-    assert not settings.miniapp_url  # bot_setup's own fixture leaves this empty
+    monkeypatch.setattr(settings, "miniapp_url", "")
 
     await _set_chapa_availability(pool, direction="in", enabled=False)
     admin_id, *_ = await create_test_admin(pool)

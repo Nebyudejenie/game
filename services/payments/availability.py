@@ -35,7 +35,16 @@ async def get_payment_availability(pool: asyncpg.Pool, settings: Settings) -> di
     rows = await pool.fetch("SELECT provider, direction, enabled FROM payment_provider_availability")
 
     chapa_configured = bool(settings.chapa_api_key)
-    chapa_deposit_configured = chapa_configured and bool(settings.public_base_url)
+    # A real return_url (miniapp_url) AND a real callback_url base
+    # (payments_public_base_url) both have to be known before a deposit
+    # checkout can honestly be offered -- see DECISIONS.md for the bug
+    # this two-value split fixed (both used to collapse into one shared,
+    # unreachable URL built from public_base_url, which has no bearing on
+    # the deposit flow at all -- that setting is the bot's own webhook
+    # base).
+    chapa_deposit_configured = (
+        chapa_configured and bool(settings.miniapp_url) and bool(settings.payments_public_base_url)
+    )
 
     availability: dict[str, list[str]] = {"deposit": [], "withdraw": []}
     for row in rows:

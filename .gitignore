@@ -17,3 +17,9 @@ node_modules/
 .DS_Store
 
 /backups/
+
+# Real tunnel routing + credentials -- deploy/cloudflared/config.yml.example
+# is the committed template, same relationship as deploy/.env.prod.example
+# vs deploy/.env.
+/deploy/cloudflared/config.yml
+/deploy/cloudflared/tunnel-credentials.json

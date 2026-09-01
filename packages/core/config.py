@@ -39,12 +39,23 @@ class Settings(BaseSettings):
     chapa_api_key: str = ""
     santimpay_api_key: str = ""
     arifpay_api_key: str = ""
-    # Public HTTPS base URL this deployment is reachable at -- used to build
-    # the webhook/return URLs handed to a payment provider at checkout
-    # creation. Empty means honestly refuse to start a deposit rather than
-    # hand a provider a URL pointing nowhere (same "not available yet"
-    # discipline as miniapp_url before Phase 4).
+    # The bot process's own externally-reachable base URL -- used only to
+    # build the Telegram webhook URL it registers with set_webhook()
+    # (services/bot/app.py). Empty means honestly refuse to start a
+    # deposit rather than hand a provider a URL pointing nowhere (same
+    # "not available yet" discipline as miniapp_url before Phase 4).
     public_base_url: str = ""
+    # The payments service's own externally-reachable base URL -- used to
+    # build the real callback_url a payment provider's webhook actually
+    # calls back to (services/payments/app.py's POST /webhooks/chapa).
+    # Deliberately a separate setting from public_base_url: in a real
+    # deployment these are two different subdomains on two different
+    # services (e.g. bot.example.com vs pay.example.com), not one shared
+    # value -- a code review-shaped finding caught that this codebase used
+    # to conflate them, sending Chapa's server-to-server webhook at the
+    # same URL as the player's browser-return redirect, a path with no
+    # route at all. See DECISIONS.md.
+    payments_public_base_url: str = ""
     min_deposit_etb: Decimal = Decimal("10.00")
     daily_deposit_cap_etb: Decimal = Decimal("50000.00")
     min_withdraw_etb: Decimal = Decimal("50.00")

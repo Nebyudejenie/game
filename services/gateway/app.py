@@ -188,7 +188,16 @@ async def api_create_deposit(
 ) -> dict[str, str]:
     user_id = await _authenticated_user_id(authorization)
     settings = get_settings()
-    if app.state.chapa is None or not settings.public_base_url:
+    # miniapp_url is where the player's browser returns to after paying;
+    # payments_public_base_url is where Chapa's own server-to-server
+    # webhook actually needs to land (services/payments/app.py's real
+    # POST /webhooks/chapa route, a different service/subdomain than this
+    # one in a real deployment). Both must be real before honestly
+    # offering a deposit, same "not available yet" discipline as every
+    # other empty-setting gate in this codebase -- see DECISIONS.md for
+    # the bug this split fixed (both used to collapse into one shared,
+    # unreachable URL).
+    if app.state.chapa is None or not settings.miniapp_url or not settings.payments_public_base_url:
         raise HTTPException(status_code=503, detail="deposits are not available yet")
 
     try:
@@ -210,7 +219,8 @@ async def api_create_deposit(
             user_id=user_id,
             amount=amount,
             phone_e164=phone,
-            return_url=f"{settings.public_base_url}/deposit/return",
+            return_url=settings.miniapp_url,
+            callback_url=f"{settings.payments_public_base_url}/webhooks/chapa",
             min_deposit=settings.min_deposit_etb,
             daily_cap=settings.daily_deposit_cap_etb,
         )

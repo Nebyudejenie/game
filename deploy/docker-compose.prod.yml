@@ -1,11 +1,19 @@
 name: jobingo-prod
 
-# Production stack: Postgres + Redis, a one-shot migration job, and all six
+# Production stack: Postgres + Redis, a one-shot migration job, all six
 # deployable units (Dockerfile builds one shared image; each service below
-# just picks its own command against it) -- run by the self-hosted GitHub
-# Actions runner on the Proxmox server this deploys to (see
-# .github/workflows/cd.yml), not by a developer's own machine the way
+# just picks its own command against it), and cloudflared -- run by the
+# self-hosted GitHub Actions runner on the Proxmox server this deploys to
+# (see .github/workflows/cd.yml), not by a developer's own machine the way
 # deploy/docker-compose.yml is.
+#
+# This server has no public IP of its own -- cloudflared is the only
+# ingress path in, tunnelling app./admin./pay./bot.arada.fun to the
+# gateway/admin/payments/bot containers by their plain Compose service
+# name (see deploy/cloudflared/config.yml.example and README.md's "Domain
+# and Cloudflare Tunnel" section for the one-time setup). engine-worker/
+# payout-worker are never tunnelled -- their /metrics ports are for
+# internal Prometheus scraping only, not public traffic.
 #
 # Needs a real .env file next to this one (never committed -- see
 # .env.prod.example for every variable this reads, and README.md's
@@ -162,6 +170,27 @@ services:
     <<: *app-env
     depends_on: *app-depends-on
     command: ["python", "-m", "packages.core.reconcile_job"]
+
+  # The only ingress path onto this server (no public IP of its own) --
+  # always on, not profile-gated like deploy/docker-compose.yml's own
+  # optional observability services, since this *is* production ingress,
+  # not an add-on. Routing rules live in config.yml (see deploy/
+  # cloudflared/config.yml.example), never in the Cloudflare dashboard --
+  # both files, and the tunnel's own credentials, are real secrets and
+  # deliberately gitignored like deploy/.env; README.md's "Domain and
+  # Cloudflare Tunnel" section has the one-time setup that creates them.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: ["tunnel", "--config", "/etc/cloudflared/config.yml", "run"]
+    volumes:
+      - ./cloudflared/config.yml:/etc/cloudflared/config.yml:ro
+      - ./cloudflared/tunnel-credentials.json:/etc/cloudflared/tunnel-credentials.json:ro
+    depends_on:
+      - gateway
+      - admin
+      - payments
+      - bot
 
 volumes:
   jobingo_prod_postgres_data:

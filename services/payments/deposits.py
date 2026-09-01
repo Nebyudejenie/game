@@ -150,6 +150,7 @@ async def create_deposit_intent(
     amount: Decimal,
     phone_e164: str,
     return_url: str,
+    callback_url: str,
     min_deposit: Decimal,
     daily_cap: Decimal,
 ) -> DepositIntent:
@@ -189,7 +190,11 @@ async def create_deposit_intent(
             with _tracer.start_as_current_span("deposit.provider_checkout") as checkout_span:
                 checkout_span.set_attribute("provider.name", provider.name)
                 checkout = await provider.create_checkout(
-                    amount=amount, user_ref=phone_e164, our_ref=our_ref, return_url=return_url
+                    amount=amount,
+                    user_ref=phone_e164,
+                    our_ref=our_ref,
+                    return_url=return_url,
+                    callback_url=callback_url,
                 )
         except Exception as exc:
             await pool.execute(

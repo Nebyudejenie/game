@@ -32,8 +32,10 @@ class FakePaymentProvider:
     checkouts: dict[str, dict[str, object]] = field(default_factory=dict)
     statuses: dict[str, StatusResult] = field(default_factory=dict)
 
-    async def create_checkout(self, *, amount, user_ref, our_ref, return_url):
-        self.checkouts[our_ref] = {"amount": amount, "user_ref": user_ref, "return_url": return_url}
+    async def create_checkout(self, *, amount, user_ref, our_ref, return_url, callback_url):
+        self.checkouts[our_ref] = {
+            "amount": amount, "user_ref": user_ref, "return_url": return_url, "callback_url": callback_url,
+        }
         return CheckoutResult(
             checkout_url=f"https://pay.test/{our_ref}", provider_ref=our_ref, raw_response={"our_ref": our_ref}
         )
@@ -82,6 +84,7 @@ async def test_deposit_below_minimum_is_rejected(pool, redis, conn):
             amount=Decimal("5.00"),
             phone_e164="+251911000000",
             return_url="https://app.test/return",
+            callback_url="https://payments.test/webhooks/chapa",
             min_deposit=MIN_DEPOSIT,
             daily_cap=DAILY_CAP,
         )
@@ -100,6 +103,7 @@ async def test_self_excluded_user_cannot_deposit(pool, redis, conn):
             amount=Decimal("100.00"),
             phone_e164="+251911000000",
             return_url="https://app.test/return",
+            callback_url="https://payments.test/webhooks/chapa",
             min_deposit=MIN_DEPOSIT,
             daily_cap=DAILY_CAP,
         )
@@ -117,6 +121,7 @@ async def test_daily_cap_exceeded_on_second_deposit(pool, redis, conn):
         amount=Decimal("100.00"),
         phone_e164="+251911000000",
         return_url="https://app.test/return",
+        callback_url="https://payments.test/webhooks/chapa",
         min_deposit=MIN_DEPOSIT,
         daily_cap=small_cap,
     )
@@ -129,6 +134,7 @@ async def test_daily_cap_exceeded_on_second_deposit(pool, redis, conn):
             amount=Decimal("100.00"),
             phone_e164="+251911000000",
             return_url="https://app.test/return",
+            callback_url="https://payments.test/webhooks/chapa",
             min_deposit=MIN_DEPOSIT,
             daily_cap=small_cap,
         )
@@ -145,6 +151,7 @@ async def test_checkout_creation_marks_payment_processing(pool, redis, conn):
         amount=Decimal("200.00"),
         phone_e164="+251911000000",
         return_url="https://app.test/return",
+        callback_url="https://payments.test/webhooks/chapa",
         min_deposit=MIN_DEPOSIT,
         daily_cap=DAILY_CAP,
     )
@@ -165,6 +172,7 @@ async def test_valid_webhook_credits_the_ledger_exactly_once(pool, redis, conn):
         amount=Decimal("200.00"),
         phone_e164="+251911000000",
         return_url="https://app.test/return",
+        callback_url="https://payments.test/webhooks/chapa",
         min_deposit=MIN_DEPOSIT,
         daily_cap=DAILY_CAP,
     )
@@ -191,6 +199,7 @@ async def test_same_webhook_delivered_100_times_concurrently_credits_exactly_onc
         amount=Decimal("50.00"),
         phone_e164="+251911000000",
         return_url="https://app.test/return",
+        callback_url="https://payments.test/webhooks/chapa",
         min_deposit=MIN_DEPOSIT,
         daily_cap=DAILY_CAP,
     )
@@ -225,6 +234,7 @@ async def test_invalid_signature_is_rejected_and_does_not_credit(pool, redis, co
         amount=Decimal("200.00"),
         phone_e164="+251911000000",
         return_url="https://app.test/return",
+        callback_url="https://payments.test/webhooks/chapa",
         min_deposit=MIN_DEPOSIT,
         daily_cap=DAILY_CAP,
     )
@@ -250,6 +260,7 @@ async def test_mismatched_amount_does_not_credit_and_flags_for_review(pool, redi
         amount=Decimal("200.00"),
         phone_e164="+251911000000",
         return_url="https://app.test/return",
+        callback_url="https://payments.test/webhooks/chapa",
         min_deposit=MIN_DEPOSIT,
         daily_cap=DAILY_CAP,
     )
@@ -280,6 +291,7 @@ async def test_webhook_arriving_after_a_successful_poll_is_a_noop(pool, redis, c
         amount=Decimal("75.00"),
         phone_e164="+251911000000",
         return_url="https://app.test/return",
+        callback_url="https://payments.test/webhooks/chapa",
         min_deposit=MIN_DEPOSIT,
         daily_cap=DAILY_CAP,
     )
@@ -318,6 +330,7 @@ async def test_failed_status_marks_payment_failed_without_crediting(pool, redis,
         amount=Decimal("30.00"),
         phone_e164="+251911000000",
         return_url="https://app.test/return",
+        callback_url="https://payments.test/webhooks/chapa",
         min_deposit=MIN_DEPOSIT,
         daily_cap=DAILY_CAP,
     )
@@ -350,6 +363,7 @@ async def test_a_still_pending_poll_does_not_touch_the_payment_or_the_metric(poo
         amount=Decimal("40.00"),
         phone_e164="+251911000000",
         return_url="https://app.test/return",
+        callback_url="https://payments.test/webhooks/chapa",
         min_deposit=MIN_DEPOSIT,
         daily_cap=DAILY_CAP,
     )

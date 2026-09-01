@@ -166,7 +166,11 @@ works:
    the deploy job's checkout step deliberately skips its usual clean-working
    -tree behavior so this file survives every future deploy instead of
    being wiped.
-3. Optional but recommended for a real-money system: **Settings →
+3. Set up the domain and Cloudflare Tunnel — see the dedicated section
+   right below. Do this before filling in `deploy/.env`'s `PUBLIC_BASE_URL`/
+   `PAYMENTS_PUBLIC_BASE_URL`/`MINIAPP_URL`, since those need the real
+   subdomains this step creates.
+4. Optional but recommended for a real-money system: **Settings →
    Environments → New environment** named `production`, with required
    reviewers turned on. This gates the deploy job behind manual approval
    even after CI passes — genuinely worth it before this is handling real
@@ -174,11 +178,59 @@ works:
    through once CI is green.
 
 `deploy/docker-compose.prod.yml` is the actual production stack: Postgres,
-Redis, a one-shot migration job every other service waits on, and all six
+Redis, a one-shot migration job every other service waits on, all six
 deployable units (`Dockerfile` builds one shared image; each service just
 picks its own command against it) — gateway/admin/payments/bot on ports
 8000-8003, engine-worker/payout-worker's `/metrics` endpoints (the only
-HTTP surface those two have) on 8004-8005.
+HTTP surface those two have) on 8004-8005 — and `cloudflared`, the only
+ingress path onto a Proxmox VM with no public IP of its own.
+
+### Domain and Cloudflare Tunnel
+
+This deploys to a local server (a Proxmox VM) with no public IP, reached
+through the domain **arada.fun** via a **Cloudflare Tunnel** — DNS and the
+tunnel are both managed through Cloudflare regardless of where the domain
+itself was purchased. Four subdomains, one per public-facing service
+(`engine-worker`/`payout-worker` are never exposed — their `/metrics`
+ports are for internal Prometheus scraping only):
+
+| Subdomain | Routes to | Serves |
+|---|---|---|
+| `app.arada.fun` | `gateway:8000` | Mini App, player REST API, WebSocket |
+| `admin.arada.fun` | `admin:8001` | Admin console (IP-allowlisted at the app layer — `ADMIN_IP_ALLOWLIST` is the real boundary, not the subdomain) |
+| `pay.arada.fun` | `payments:8002` | Chapa's real webhook, `POST /webhooks/chapa` |
+| `bot.arada.fun` | `bot:8003` | Telegram's webhook, `POST /webhook` |
+
+Routing is defined in a committed config file, not clicked together in
+the Cloudflare dashboard — see `deploy/cloudflared/config.yml.example`.
+One-time setup, on the Proxmox server itself:
+
+1. Install the `cloudflared` CLI ([Cloudflare's own instructions](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) — a `.deb`/`.rpm` for the server's OS).
+2. `cloudflared tunnel login` — opens a browser to authorize against your
+   Cloudflare account (the one arada.fun's DNS is managed under).
+3. `cloudflared tunnel create jobingo` — creates the tunnel and writes a
+   credentials JSON file (path printed on success) and prints the tunnel's
+   id. Copy that credentials file to
+   `deploy/cloudflared/tunnel-credentials.json` (gitignored, like
+   `deploy/.env`).
+4. `cloudflared tunnel route dns jobingo app.arada.fun`, repeated for
+   `admin.arada.fun`, `pay.arada.fun`, and `bot.arada.fun` — this is what
+   actually creates the DNS records; nothing to add by hand in the
+   Cloudflare dashboard.
+5. Copy `deploy/cloudflared/config.yml.example` to
+   `deploy/cloudflared/config.yml` (gitignored) and replace `<TUNNEL_ID>`
+   with the id step 3 printed. The four `ingress:` rules already match the
+   table above — no other edits needed unless a subdomain changes.
+
+Once `deploy/.env` has real values for `PUBLIC_BASE_URL`
+(`https://bot.arada.fun`), `PAYMENTS_PUBLIC_BASE_URL`
+(`https://pay.arada.fun`), and `MINIAPP_URL` (`https://app.arada.fun`),
+`docker compose -f docker-compose.prod.yml up -d` brings up `cloudflared`
+alongside everything else and the tunnel starts routing real traffic —
+same lifecycle as every other service in the stack, restarted automatically
+on failure (`restart: unless-stopped`), never profile-gated (unlike the
+dev compose file's optional observability services, this tunnel *is*
+production ingress, not an add-on).
 
 **Verified against the real repo, not assumed:** a status-audit pass
 checked GitHub's own run history (`gh run list`) rather than trusting

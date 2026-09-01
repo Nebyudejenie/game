@@ -207,15 +207,22 @@ async def test_santimpay_stays_unavailable_even_if_an_admin_enables_the_toggle(p
         )
 
 
-async def test_chapa_deposit_unavailable_without_a_public_base_url_even_with_a_key(pool):
+async def test_chapa_deposit_unavailable_without_a_return_or_callback_url_even_with_a_key(pool):
     # Mirrors the exact real-world gate services/gateway/app.py's own
     # /api/deposit already enforces (app.state.chapa is None or not
-    # settings.public_base_url) -- an admin toggle can't substitute for
-    # genuinely missing deploy-time config.
-    settings = Settings(chapa_api_key="a-real-looking-key", public_base_url="")
+    # settings.miniapp_url or not settings.payments_public_base_url) --
+    # an admin toggle can't substitute for genuinely missing deploy-time
+    # config. Either URL being empty is enough to refuse -- checked
+    # separately, not just "both empty at once".
+    settings = Settings(chapa_api_key="a-real-looking-key", miniapp_url="", payments_public_base_url="https://pay.test")
     methods = await get_payment_availability(pool, settings)
     assert "chapa" not in methods["deposit"]
-    # Withdrawals don't need public_base_url (no checkout/return_url
+
+    settings = Settings(chapa_api_key="a-real-looking-key", miniapp_url="https://app.test", payments_public_base_url="")
+    methods = await get_payment_availability(pool, settings)
+    assert "chapa" not in methods["deposit"]
+
+    # Withdrawals don't need either URL (no checkout/return_url
     # involved), so chapa withdrawal stays available on key alone.
     assert "chapa" in methods["withdraw"]
 
@@ -227,7 +234,7 @@ async def test_no_providers_available_when_chapa_unconfigured_and_manual_disable
         reason="test: simulate manual disabled too", ip_address=None,
     )
     try:
-        settings = Settings(chapa_api_key="", public_base_url="")
+        settings = Settings(chapa_api_key="", miniapp_url="", payments_public_base_url="")
         methods = await get_payment_availability(pool, settings)
         assert methods["deposit"] == []
     finally:

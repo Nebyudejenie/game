@@ -20,10 +20,17 @@ os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-bot-token-for-suite")
 # ChapaProvider from settings.chapa_api_key at startup, so a webhook test
 # needs to know the exact secret to sign its test payloads with.
 os.environ.setdefault("CHAPA_API_KEY", "test-chapa-secret-for-suite")
-# gateway/app.py's /api/deposit route refuses to start a deposit at all
-# unless a public base URL is configured (same "not available yet"
-# discipline as the bot's own /deposit command) -- tests need one set.
-os.environ.setdefault("PUBLIC_BASE_URL", "https://app.test")
+# The bot's own webhook-registration base -- unrelated to deposit
+# availability since the callback_url/return_url split (see
+# DECISIONS.md), but still read by services/bot/app.py's own set_webhook().
+os.environ.setdefault("PUBLIC_BASE_URL", "https://bot.test")
+# gateway/app.py's /api/deposit route (and services/payments/
+# availability.py's chapa_deposit_configured check the bot's /deposit
+# command also relies on) refuses to start a deposit at all unless both
+# of these are configured -- same "not available yet" discipline as
+# every other empty-setting gate in this codebase -- tests need both set.
+os.environ.setdefault("MINIAPP_URL", "https://app.test")
+os.environ.setdefault("PAYMENTS_PUBLIC_BASE_URL", "https://payments.test")
 # packages/core/phone_crypto.py has no safe empty default (registration
 # cannot function without it) -- a fixed, obviously-not-production key so
 # every test run derives the exact same encryption/lookup subkeys, the

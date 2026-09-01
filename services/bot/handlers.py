@@ -306,7 +306,8 @@ async def cmd_deposit(
             user_id=user.id,
             amount=amount,
             phone_e164=user.phone_e164,
-            return_url=f"{settings.public_base_url}/deposit/return",
+            return_url=settings.miniapp_url,
+            callback_url=f"{settings.payments_public_base_url}/webhooks/chapa",
             min_deposit=settings.min_deposit_etb,
             daily_cap=settings.daily_deposit_cap_etb,
         )

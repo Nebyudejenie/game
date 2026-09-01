@@ -1,0 +1,39 @@
+# Copy to deploy/cloudflared/config.yml on the actual deployment server
+# and fill in the real tunnel id -- never committed (see .gitignore),
+# same reasoning as deploy/.env vs deploy/.env.prod.example. README.md's
+# "Domain and Cloudflare Tunnel" section has the full one-time setup this
+# file is the last step of: installing cloudflared, `cloudflared tunnel
+# login`, `cloudflared tunnel create jobingo` (prints the tunnel id and
+# writes the credentials JSON this file's credentials-file line points
+# at), and `cloudflared tunnel route dns jobingo <hostname>` once per
+# subdomain below (creates the real DNS records -- nothing to click
+# together in the Cloudflare dashboard).
+#
+# Ingress rules are evaluated top to bottom; the first matching hostname
+# wins, and the final catch-all is required by cloudflared itself, matched
+# only when no hostname above it matched. Every service: value is a plain
+# Docker Compose service name -- reachable by that name only from inside
+# this stack's own network, exactly how gateway/admin/payments/bot already
+# reach postgres/redis today.
+
+tunnel: <TUNNEL_ID>
+credentials-file: /etc/cloudflared/tunnel-credentials.json
+
+ingress:
+  # Mini App static files, player REST API, and the game WebSocket.
+  - hostname: app.arada.fun
+    service: http://gateway:8000
+  # Admin console -- IP-allowlisted at the application layer
+  # (ADMIN_IP_ALLOWLIST) regardless of this subdomain being public;
+  # the allowlist is the real boundary, not the hostname.
+  - hostname: admin.arada.fun
+    service: http://admin:8001
+  # Chapa's real server-to-server webhook (POST /webhooks/chapa) --
+  # PAYMENTS_PUBLIC_BASE_URL must match this exact hostname.
+  - hostname: pay.arada.fun
+    service: http://payments:8002
+  # Telegram's webhook (POST /webhook) -- PUBLIC_BASE_URL must match
+  # this exact hostname.
+  - hostname: bot.arada.fun
+    service: http://bot:8003
+  - service: http_status:404

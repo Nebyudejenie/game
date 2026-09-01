@@ -5,6 +5,128 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-01 — arada.fun domain, Cloudflare Tunnel, and a real webhook-routing bug it surfaced
+
+Jo Bingo deploys on a Proxmox VM with no public IP, reached through
+`arada.fun` (purchased via Hostinger, DNS and Tunnel both managed through
+Cloudflare) rather than any cloud hosting. Four subdomains, one per
+public-facing service (`engine-worker`/`payout-worker`'s `/metrics` are
+never tunnelled -- internal Prometheus scraping only, and no Prometheus
+service exists in the prod stack yet either): `app.arada.fun` ->
+`gateway:8000` (Mini App, player API, WebSocket), `admin.arada.fun` ->
+`admin:8001` (already IP-allowlisted at the app layer -- the subdomain is
+not the real boundary), `pay.arada.fun` -> `payments:8002` (Chapa's real
+webhook), `bot.arada.fun` -> `bot:8003` (Telegram's webhook). Routing is
+defined in a committed `deploy/cloudflared/config.yml.example` (ingress
+rules as versioned code, matching this project's existing Prometheus/
+Grafana provisioning-by-file convention), never clicked together in the
+Cloudflare dashboard -- the real `config.yml` and the tunnel's credentials
+JSON are gitignored, same relationship as `deploy/.env.prod.example` vs
+`deploy/.env`. `cloudflared` runs as an always-on service in `deploy/
+docker-compose.prod.yml` (not profile-gated like the dev compose file's
+optional observability services -- this tunnel *is* production ingress,
+not an add-on).
+
+**A real, pre-existing bug surfaced while tracing exactly which URL needs
+to be reachable where, and got fixed alongside the tunnel work rather
+than shipped onto a real domain**: `ChapaProvider.create_checkout()`
+(`services/payments/chapa.py`) sent Chapa **one** URL for two different
+jobs -- `return_url` (where the player's *browser* redirects after
+paying) and `callback_url` (Chapa's own **server-to-server** webhook)
+were both the same value, `f"{settings.public_base_url}/deposit/return"`
+(built at `services/gateway/app.py`'s `/api/deposit` and `services/bot/
+handlers.py`'s `/deposit` command). That path has **no route anywhere in
+the codebase** (confirmed: `grep -rn "deposit/return"` across `services/`
+and `web/` found only those two string-builders, never a route) -- and it
+was never meant to be the real Chapa webhook route, which is
+`POST /webhooks/chapa` on the **payments** service, a different path on a
+different service/subdomain entirely. In practice this means Chapa's
+real-time webhook confirmation has likely never actually worked in any
+deployment of this code -- every deposit would only ever have confirmed
+via `poll_pending_deposits()`'s slower (30s+) polling fallback, which is
+exactly why no test ever caught it: every existing test drives
+`handle_webhook()` directly in-process, never over a real network hitting
+a real configured `callback_url`.
+
+**Fix**: split into two real, separately-configured URLs. `packages/core/
+config.py` gains `payments_public_base_url` (the payments service's own
+externally-reachable base, e.g. `https://pay.arada.fun`) alongside the
+existing `public_base_url` (now correctly scoped to just its one real
+remaining job: the *bot's* own Telegram-webhook-registration base, e.g.
+`https://bot.arada.fun` -- a real deployment has these as two different
+subdomains on two different services, never one shared value).
+`PaymentProvider.create_checkout()`'s Protocol (`services/payments/
+provider.py`) and every implementer/test-double gained a second
+parameter, `callback_url`, threaded through `services/payments/
+deposits.py`'s `create_deposit_intent()` the same way `return_url`
+already was. The two real callers now build genuinely different URLs:
+`return_url=settings.miniapp_url` (the player's browser now actually
+returns to the real app instead of a 404) and
+`callback_url=f"{settings.payments_public_base_url}/webhooks/chapa"`
+(Chapa's real webhook route, on the real service). `services/payments/
+availability.py`'s `chapa_deposit_configured` check and both call sites'
+own gate checks now require `miniapp_url` and `payments_public_base_url`
+both truthy (replacing the old, no-longer-relevant `public_base_url`
+check) -- same "honestly refuse rather than hand a provider a broken URL"
+discipline this codebase already applies everywhere else.
+
+**Test fallout, mechanical but real**: `tests/integration/conftest.py`'s
+shared env defaults needed `MINIAPP_URL`/`PAYMENTS_PUBLIC_BASE_URL` added
+(gateway's `/api/deposit` gate now depends on them, not `PUBLIC_BASE_URL`)
+-- and `test_bot_handlers.py`'s session-wide shared `bot_setup` fixture
+had `miniapp_url=""` as its baseline (deliberately, for one specific
+"not available" test), which meant **six** other deposit-command tests in
+that same file, that all need Chapa deposits actually available to reach
+the flow they're testing, were about to start failing purely from this
+config split, not from anything about their own scenarios. Flipping
+`bot_setup`'s default to truthy and moving the override to the two tests
+that specifically want it empty (rather than patching all six) kept the
+touched-test count to two instead of six.
+
+**Verified for real**: `tests/integration/test_backup_restore.py` gained
+`test_prod_compose_cloudflared_service_is_valid_and_always_on`, real
+`docker compose config` output (not eyeballed YAML) proving the service,
+its command, and its two bind mounts are genuinely valid and present in a
+plain `up -d` by default -- the same bar `test_prod_compose_reconcile_
+job_is_valid_and_profile_gated` already set for `reconcile-job`. A live
+tunnel connection can't be verified from this sandbox (no real Cloudflare
+account/DNS) -- documented as such in README.md, the same honesty this
+project already applies to the CD self-hosted-runner registration and the
+WAL/PITR "restore drill run monthly" claim. Full discipline otherwise:
+mypy clean, `git stash` the source changes and confirm all 15 affected
+tests genuinely fail pre-change (they did, each with the exact expected
+symptom -- `provider_error`/422s and a `KeyError`-shaped `Settings()`
+construction failure), full `pytest` (896 passed) + `-m chaos_infra`
+(2 passed) + `-m e2e` (29 passed after one rerun -- an unrelated Playwright
+timeout, passed cleanly in isolation, in a test that never touches
+payments/config code). `-m load` showed the same already-well-documented
+host-contention pattern from this file's other entries dated today
+(`test_gateway_fanout.py`/`test_load_multiroom.py`, up to 630ms against a
+300ms budget) -- `git diff --stat` against `services/gateway/`/`packages/`
+was empty for this stage's diff, so not re-litigated with a third full
+stash-comparison in one day.
+
+**Also encountered and fixed during this stage's own verification, purely
+operational, not a code bug**: the WAL archiver (built earlier today, see
+this file's own WAL/PITR entry) was found stuck -- `pg_stat_archiver`
+showed 340+ failures repeatedly retrying the same segment, because that
+segment's file was already present in `backups/wal_archive/` (left over
+from this session's own earlier manual `rm -f backups/wal_archive/*`
+debugging) while Postgres's own archive-status bookkeeping still expected
+to archive it fresh. `archive_command`'s `test ! -f ... && install ...`
+refuses to overwrite on principle (see the WAL/PITR entry's own
+reasoning) -- correct behavior against a genuine timeline conflict, but a
+permanent archiver deadlock (blocking every later segment too, since
+archiving is strictly sequential) against a stats/disk desync like this
+one. Not a real production risk -- it requires manually deleting files out
+of a live archive directory while Postgres's own bookkeeping still
+expects them, not something a real deployment does -- so `archive_command`
+itself is unchanged; fixed by clearing the stale on-disk copies so
+Postgres could re-archive the backlog fresh (confirmed: `archived_count`
+jumped from 32 to 54 within 15s once unstuck, `failed_count` stopped
+climbing). Recorded here as an honest operational note, not silently
+worked around.
+
 ## 2026-09-01 — Examined and deliberately NOT fixed: abandoned checkouts counting toward the daily deposit cap
 
 An audit pass re-surfaced a real, previously-catalogued-once-and-forgotten

@@ -72,7 +72,7 @@ class ChapaProvider:
         }
 
     async def create_checkout(
-        self, *, amount: Decimal, user_ref: str, our_ref: str, return_url: str
+        self, *, amount: Decimal, user_ref: str, our_ref: str, return_url: str, callback_url: str
     ) -> CheckoutResult:
         # Chapa requires the caller to hand it a tx_ref up front, rather
         # than allocating one at checkout time -- so for this adapter,
@@ -80,13 +80,23 @@ class ChapaProvider:
         # separate id Chapa allocates only shows up later, in the webhook's
         # "reference" field, and gets recorded onto payments.provider_ref
         # once that arrives.
+        #
+        # return_url and callback_url are deliberately two different
+        # values, not the same URL doing double duty: return_url is where
+        # the player's *browser* redirects after paying (the Mini App
+        # itself), while callback_url is Chapa's own server-to-server
+        # webhook, which must land on services/payments/app.py's real
+        # POST /webhooks/chapa route -- a different service/subdomain
+        # entirely in a real deployment. See DECISIONS.md for the bug this
+        # replaced (both were previously the same value, pointing at a
+        # path with no route at all).
         body = {
             "amount": str(amount),
             "currency": "ETB",
             "tx_ref": our_ref,
             "phone_number": user_ref,
             "return_url": return_url,
-            "callback_url": return_url,
+            "callback_url": callback_url,
         }
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(

@@ -55,7 +55,7 @@ class PaymentProvider(Protocol):
     name: str
 
     async def create_checkout(
-        self, *, amount: Decimal, user_ref: str, our_ref: str, return_url: str
+        self, *, amount: Decimal, user_ref: str, our_ref: str, return_url: str, callback_url: str
     ) -> CheckoutResult: ...
 
     def verify_webhook(self, headers: dict[str, str], raw_body: bytes) -> VerifiedEvent:

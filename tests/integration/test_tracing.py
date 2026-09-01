@@ -49,7 +49,7 @@ def _clear_spans():
 class _FakeProvider:
     name: str = "chapa"
 
-    async def create_checkout(self, *, amount, user_ref, our_ref, return_url):
+    async def create_checkout(self, *, amount, user_ref, our_ref, return_url, callback_url):
         return CheckoutResult(
             checkout_url=f"https://pay.test/{our_ref}", provider_ref=our_ref, raw_response={}
         )
@@ -74,6 +74,7 @@ async def test_create_deposit_intent_produces_real_nested_spans(pool, redis, con
         amount=Decimal("25.00"),
         phone_e164="+251911000222",
         return_url="https://example.test/return",
+        callback_url="https://payments.test/webhooks/chapa",
         min_deposit=Decimal("10.00"),
         daily_cap=Decimal("50000.00"),
     )
@@ -104,6 +105,7 @@ async def test_apply_confirmed_status_span_records_the_real_outcome(pool, redis,
         amount=Decimal("30.00"),
         phone_e164="+251911000333",
         return_url="https://example.test/return",
+        callback_url="https://payments.test/webhooks/chapa",
         min_deposit=Decimal("10.00"),
         daily_cap=Decimal("50000.00"),
     )

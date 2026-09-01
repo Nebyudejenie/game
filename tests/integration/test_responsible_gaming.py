@@ -47,6 +47,7 @@ async def _deposit(pool, redis, conn, user_id, amount, *, provider=None, **overr
         amount=amount,
         phone_e164="+251911000000",
         return_url="https://app.test/return",
+        callback_url="https://payments.test/webhooks/chapa",
         min_deposit=Decimal("1.00"),
         daily_cap=Decimal("1000000.00"),
     )

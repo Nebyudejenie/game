@@ -173,6 +173,7 @@ async def test_deposit_credit_notifies_the_depositor(pool, redis, conn):
             amount=Decimal("120.00"),
             phone_e164="+251911000000",
             return_url="https://app.test/return",
+            callback_url="https://payments.test/webhooks/chapa",
             min_deposit=Decimal("1.00"),
             daily_cap=Decimal("1000000.00"),
         )

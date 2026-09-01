@@ -173,6 +173,45 @@ async def test_prod_compose_reconcile_job_is_valid_and_profile_gated():
             backup_path.rename(env_path)
 
 
+async def test_prod_compose_cloudflared_service_is_valid_and_always_on():
+    # arada.fun deployment: the Proxmox server has no public IP of its
+    # own, so cloudflared is the only ingress path in (see README.md's
+    # "Domain and Cloudflare Tunnel" section and deploy/cloudflared/
+    # config.yml.example) -- unlike reconcile-job above, this must NOT be
+    # profile-gated, since it's production ingress, not an optional add-on.
+    # Real `docker compose config` output (not eyeballed YAML) -- proves
+    # the service definition, its command, and its two bind mounts are
+    # genuinely valid, and that it's present in a plain `up -d` by
+    # default. docker compose config validates syntax/interpolation only,
+    # not that bind-mount host paths physically exist, so this doesn't
+    # need scratch deploy/cloudflared/ files -- the same reason the
+    # reconcile-job test above needs no scratch payments/reconciliation
+    # state either.
+    env_path = DEPLOY_DIR / ".env"
+    backup_path = env_path.with_suffix(".env.bak-test")
+    had_existing_env = env_path.exists()
+    if had_existing_env:
+        env_path.rename(backup_path)
+    try:
+        env_path.write_text("POSTGRES_PASSWORD=test-dummy\nPHONE_ENCRYPTION_KEY=" + "0" * 64 + "\n")
+
+        default_services = await _run(
+            "docker", "compose", "-f", str(DEPLOY_DIR / "docker-compose.prod.yml"), "config", "--services",
+        )
+        assert "cloudflared" in default_services.split()
+
+        full_config = await _run(
+            "docker", "compose", "-f", str(DEPLOY_DIR / "docker-compose.prod.yml"), "config",
+        )
+        assert "/etc/cloudflared/config.yml" in full_config
+        assert "/etc/cloudflared/tunnel-credentials.json" in full_config
+        assert "tunnel" in full_config and "--config" in full_config
+    finally:
+        env_path.unlink(missing_ok=True)
+        if had_existing_env:
+            backup_path.rename(env_path)
+
+
 # --- WAL archiving + point-in-time recovery -----------------------------
 #
 # The capability deploy/backup.sh/restore.sh's logical pg_dump/pg_restore
