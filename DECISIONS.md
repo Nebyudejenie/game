@@ -8673,6 +8673,117 @@ case (`test_at_threshold_first_approval_awaits_second_without_crediting`/
 tests, both concurrent-double-approval tests). mypy clean across 75
 source files.
 
+## 2026-09-01 — Mini App boot() could hang forever on a WebSocket that never connects, leaving a permanently blank screen with zero feedback
+
+Reported as a P0 production incident: the Mini App opens inside Telegram
+(header visible), but the game never renders -- black screen, no board,
+no controls, forever. No SSH/production access exists for this session
+(the user chose to handle server-side deployment steps themselves
+earlier this session), so this could not be reproduced against the
+actual production server, logs, or a real Telegram client -- everything
+below was investigated and verified against this sandbox's own dev
+stack and a real headless Chromium via Playwright instead, and is
+reported honestly as such rather than claimed as a live-production
+verification.
+
+**Root cause, confirmed in code**: `app.js`'s `boot()` does `user = await
+ws.waitForAuth()` before ever calling `showScreen(...)` -- and no screen
+in `index.html`'s raw markup defaults to `class="active"` (a deliberate
+earlier fix, see `test_miniapp_e2e.py`'s own module docstring). `ws.js`
+already handles a WebSocket that *opens* and then receives a **terminal**
+close code (4000/4001/4003 -- bad/expired initData) by rejecting any
+pending `waitForAuth()` promise. But it had no handling at all for a
+WebSocket that **never successfully opens in the first place** -- wrong
+URL, a reverse-proxy/tunnel not forwarding the `Upgrade` header, a
+firewall, anything that makes every connection attempt fail before a
+close code even matters. That case just retries forever with backoff
+(correct, by design, for a *transient* drop), but nothing ever settles
+`waitForAuth()`'s promise -- `boot()` hangs on that `await` line forever,
+`showScreen()` is never called, and the page shows nothing but its own
+dark background, indefinitely, with zero indication anything is wrong.
+This exactly matches the reported symptom.
+
+**Fixed**: `waitForAuth()` now takes a flat client-side deadline
+(`INITIAL_AUTH_TIMEOUT_MS = 20000`, overridable only for tests) that
+fires regardless of *why* the promise hasn't settled -- socket never
+opens, opens but "authed" never arrives, anything else -- rather than
+trying to enumerate every specific failure mode. On expiry it sets a new
+`connection: "connect_failed"` state (distinct from the existing
+`auth_failed`, since the recommended action and banner text differ) and
+rejects. `app.js`'s connection-banner subscriber gained a branch for it:
+a real, visible, tappable banner ("Unable to connect to the game server.
+Tap to retry.") that reloads the page on click/Enter/Space
+(`makeKeyboardActivatable`, matching every other custom control in this
+codebase) -- reloading re-runs the whole `boot()` sequence fresh, the
+same recovery the existing `auth_failed` banner already uses. Only the
+very first connection is bounded this way -- reconnection during active
+gameplay (already authenticated once) is completely untouched and keeps
+retrying forever exactly as before, matching the spec's own reconnection
+principle; the fix's `authResolvers.length > 0` scoping only matters
+before the very first successful auth.
+
+**A real bug in the fix's own first draft, caught by its own test**: the
+deadline `setTimeout` was never cleared when the promise settled through
+either of the *other* two paths ("authed" arriving, or a terminal close)
+-- harmless in a browser tab, but a real dangling timer, and it made
+`test_wait_for_auth_terminal_failure.mjs` (an *existing*, previously
+-passing test, unrelated to this fix on its face) hang for a full 20 real
+seconds after printing "ok", caught by wrapping every node-script run in
+this investigation with an explicit `timeout` guard rather than trusting
+a bare pass. Fixed by threading each pending resolver's own timer through
+a new shared `_settleAuthResolvers()` helper (now the *only* place
+`authResolvers` gets drained) that clears it wherever the promise
+actually settles.
+
+**Verification, each confirmed to fail against the reverted code
+first**: `tests/frontend/test_wait_for_auth_never_connects.mjs` (a new
+plain-node script, same no-framework style as its sibling terminal
+-failure test) drives a fake WebSocket that never fires open/message/
+close at all -- exactly what an unresponsive endpoint looks like
+client-side -- and confirms `waitForAuth()` rejects within its own
+(test-overridden, short) deadline instead of hanging. A new real
+-browser Playwright e2e test,
+`test_miniapp_shows_a_retry_banner_instead_of_a_permanent_blank_screen_when_ws_never_connects`,
+uses Playwright's `route_web_socket()` with a handler that never calls
+`connect_to_server()` -- confirmed empirically first (not assumed) to
+make every real connection attempt fail immediately with a real,
+non-terminal close code, the same shape a broken reverse-proxy/tunnel
+would produce -- and runs against the **real, unmodified 20-second
+production timeout**, not a shortened stand-in, confirming the actual
+banner appears (visible, tappable, non-empty text) instead of the page
+staying silently blank; against the reverted code this same test
+times out waiting 25s for a banner that never appears, exactly
+reproducing the reported incident. Full suite: mypy clean across 75
+source files, `pytest tests/` 918 passed / 39 deselected, full
+`test_miniapp_e2e.py` 9/9 (`-m e2e`).
+
+**What this does and does not rule out.** This closes one concrete,
+reproducible way `boot()` could hang with a completely silent failure --
+and it's a real defensive improvement regardless of what actually
+happened in production, since "silently retry forever with zero user
+feedback" was always a latent bug independent of any specific trigger.
+But without production log/console access, the *specific* infra
+condition that (if this is in fact the root cause) made the WebSocket
+fail to connect in the first place was not identified. Candidates worth
+checking directly against the live deployment, none of which this
+session could verify: (1) Cloudflare's account-level WebSockets toggle
+(Network settings) -- off would silently break the upgrade at the edge
+even though `deploy/cloudflared/config.yml`'s plain `http://gateway:8000`
+ingress rule is itself correct and needs no special WS configuration;
+(2) whether `cloudflared` is actually connected/healthy on the production
+host; (3) `deploy/.env`'s `MINIAPP_URL` actually matching the real
+`app.arada.fun` hostname (a wrong or placeholder value would make
+`wsUrl()` -- derived from `window.location.host`, i.e. whatever the
+Mini App itself was actually loaded from -- point somewhere real DNS
+doesn't resolve or the tunnel doesn't route); (4) whether the deployed
+image actually contains this fix at all (nothing in this session could
+confirm what commit, if any, is actually running in production). This
+fix should be deployed and the Mini App reopened; if the screen is still
+blank afterward, the now-visible retry banner's own presence or absence
+is itself the next real diagnostic signal -- its absence would point
+at a JS bundle/serving problem instead of a connectivity one, and this
+session has no way to observe which without production access.
+
 ## Pre-existing repo state noted, not touched
 
 This directory already had a `.git` folder with `origin` pointing to

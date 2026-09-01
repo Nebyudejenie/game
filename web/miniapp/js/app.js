@@ -77,6 +77,29 @@ subscribe((state) => {
   } else if (state.connection === "reconnecting" || state.connection === "offline") {
     banner.textContent = t("connection.reconnecting");
     banner.classList.add("visible");
+  } else if (state.connection === "connect_failed") {
+    // ws.js gave up after the very first connection attempt could never
+    // complete within INITIAL_AUTH_TIMEOUT_MS -- unlike "reconnecting"
+    // (which resolves itself once the network recovers), this needs an
+    // explicit action: a full page reload re-runs the whole boot()
+    // sequence fresh, the same recovery this banner already tells the
+    // player to do for an expired session.
+    banner.textContent = t("connection.connect_failed");
+    banner.classList.add("visible");
+  }
+  banner.classList.toggle(
+    "actionable", state.connection === "auth_failed" || state.connection === "connect_failed"
+  );
+});
+
+// Both terminal states' own banner text tells the player to reload --
+// this is what actually does it. A full reload re-runs boot() fresh,
+// which is simpler and more robust than trying to resume a half
+// -completed startup sequence in place. No-ops for every other
+// connection state (reconnecting/offline resolve themselves).
+makeKeyboardActivatable(el("connection-banner"), () => {
+  if (["auth_failed", "connect_failed"].includes(getState().connection)) {
+    window.location.reload();
   }
 });
 

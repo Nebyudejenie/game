@@ -11,6 +11,22 @@ import { setState, getState } from "./state.js";
 const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30000;
 const PING_INTERVAL_MS = 20000;
+// A production incident (Mini App opens to a permanently blank screen)
+// traced to a gap the existing terminal-close-code handling below
+// doesn't cover: a WebSocket that never successfully opens at all --
+// wrong URL, a reverse-proxy/tunnel not forwarding the Upgrade header,
+// a firewall -- as opposed to one that opens and then gets a terminal
+// close code (bad initData). That case has no close event with a
+// terminal code to react to; it just keeps retrying forever with
+// backoff, and nothing ever settles waitForAuth()'s promise. app.js's
+// boot() awaits that promise exactly once, before any screen has ever
+// rendered, so a connection that can never succeed left the player
+// looking at a permanently blank page with nothing telling them
+// anything was wrong. This bounds only the very first wait -- once
+// authenticated, reconnection during active gameplay still retries
+// forever with no timeout, exactly as the spec's own reconnection
+// principle requires.
+const INITIAL_AUTH_TIMEOUT_MS = 20000;
 
 // services/gateway/connection.py's own _handshake() close codes for a
 // handshake that will *never* succeed on retry: 4000 (malformed/
@@ -61,6 +77,22 @@ export function on(type, handler) {
   return () => messageHandlers.get(type).delete(handler);
 }
 
+// The only place authResolvers entries ever get resolved/rejected other
+// than waitForAuth()'s own deadline firing -- always via this, so every
+// entry's deadline timer (see waitForAuth()) gets cleared here too. A
+// real bug this exact fix's own test caught: without clearing it, a
+// promise settled here still left a real, un-cancelled setTimeout
+// pending for the rest of its full timeoutMs, silently outliving the
+// promise it no longer had anything to do (harmless in a browser tab,
+// but genuinely dangling).
+function _settleAuthResolvers(outcome, value) {
+  for (const entry of authResolvers.splice(0)) {
+    clearTimeout(entry.timer);
+    if (outcome === "resolve") entry.resolve(value);
+    else entry.reject(value);
+  }
+}
+
 function dispatch(message) {
   if (typeof message.server_time === "number") {
     setState({ serverTimeOffsetMs: message.server_time - Date.now() });
@@ -97,7 +129,7 @@ function open() {
       // whole {t, user, server_time} envelope here silently broke every
       // caller's `user.balance` access (real bug, caught by an E2E test
       // actually reading the DOM instead of just checking the WS traffic).
-      for (const { resolve } of authResolvers.splice(0)) resolve(message.user);
+      _settleAuthResolvers("resolve", message.user);
       const { currentRoomId } = getState();
       if (currentRoomId !== null) send({ t: "join", room_id: currentRoomId });
     }
@@ -119,9 +151,7 @@ function open() {
       // directly, so it hung on a stale/expired initData forever instead
       // of ever reaching the reload banner the connection-state
       // subscriber above already shows independently of this promise.
-      for (const { reject } of authResolvers.splice(0)) {
-        reject(new Error(`auth failed: close code ${event.code}`));
-      }
+      _settleAuthResolvers("reject", new Error(`auth failed: close code ${event.code}`));
       return;
     }
     setState({ connection: "offline" });
@@ -153,7 +183,10 @@ function send(payload) {
   }
 }
 
-export function waitForAuth() {
+// timeoutMs is overridable only so tests can drive this deterministically
+// in well under INITIAL_AUTH_TIMEOUT_MS's real 20s -- every real caller
+// (app.js's boot(), the only one) calls this with zero arguments.
+export function waitForAuth(timeoutMs = INITIAL_AUTH_TIMEOUT_MS) {
   const state = getState();
   if (state.connection === "connected") return Promise.resolve(state.user);
   // A terminal failure that already happened before this call (e.g. a
@@ -164,7 +197,25 @@ export function waitForAuth() {
   if (state.connection === "auth_failed") {
     return Promise.reject(new Error("auth failed"));
   }
-  return new Promise((resolve, reject) => authResolvers.push({ resolve, reject }));
+  return new Promise((resolve, reject) => {
+    const entry = { resolve, reject, timer: null };
+    authResolvers.push(entry);
+    // See INITIAL_AUTH_TIMEOUT_MS's own comment -- a flat client-side
+    // deadline covers every way this could otherwise hang forever
+    // (the socket never opens, it opens but "authed" never arrives,
+    // etc.) without needing to know which one is actually happening.
+    // _settleAuthResolvers() clears this same timer if the promise
+    // settles for real (authed or a terminal close) before it ever
+    // fires -- otherwise a real, un-cancelled timer would keep firing
+    // (harmlessly, but genuinely dangling) for the rest of timeoutMs.
+    entry.timer = setTimeout(() => {
+      const index = authResolvers.indexOf(entry);
+      if (index === -1) return; // already settled for real
+      authResolvers.splice(index, 1);
+      setState({ connection: "connect_failed" });
+      reject(new Error("timed out waiting for the server to authenticate this session"));
+    }, timeoutMs);
+  });
 }
 
 export function requestRooms() {

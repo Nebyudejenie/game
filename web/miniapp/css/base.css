@@ -77,6 +77,14 @@ button:disabled {
   transform: translateY(0);
 }
 
+/* Only auth_failed/connect_failed are actually tappable (see app.js's
+   own connection-banner subscriber) -- reconnecting/offline resolve on
+   their own, nothing for a tap to do. */
+#connection-banner.actionable {
+  cursor: pointer;
+  text-decoration: underline;
+}
+
 .stat-strip {
   display: flex;
   justify-content: space-between;

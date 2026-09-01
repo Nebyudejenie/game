@@ -107,6 +107,7 @@
   "connection.reconnecting": "በመገናኘት ላይ…",
   "connection.offline": "ግንኙነት ተቋርጧል",
   "connection.expired": "የእርስዎ ክፍለ ጊዜ አልቋል። እባክዎ ይህን መተግበሪያ ዘግተው እንደገና ይክፈቱት።",
+  "connection.connect_failed": "ከጨዋታ አገልጋዩ ጋር መገናኘት አልተቻለም። እንደገና ለመሞከር ይንኩ።",
 
   "error.generic": "የሆነ ስህተት ተፈጥሯል። እባክዎ እንደገና ይሞክሩ።",
   "error.room_unavailable": "ይህ ክፍል አሁን አይገኝም።",

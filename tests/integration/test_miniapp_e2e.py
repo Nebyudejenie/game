@@ -116,6 +116,61 @@ async def test_miniapp_loads_authenticates_and_shows_balance(gateway_server, bro
     await page.close()
 
 
+async def test_miniapp_shows_a_retry_banner_instead_of_a_permanent_blank_screen_when_ws_never_connects(
+    gateway_server, browser
+):
+    """A production incident (the Mini App opening to a permanently blank
+    screen -- header visible, nothing else) traced to boot()'s own
+    `await ws.waitForAuth()` hanging forever when the WebSocket can never
+    be established at all (as opposed to opening and then getting a
+    terminal close code, which was already handled). No screen in the
+    raw HTML defaults to `active` (see this file's own module docstring),
+    so a boot() that never completes leaves the page showing nothing but
+    its own dark background forever -- exactly the reported symptom.
+
+    Simulates a genuinely broken WS endpoint via Playwright's own
+    route_web_socket() with a handler that never calls
+    connect_to_server() -- confirmed empirically to make every real
+    connection attempt fail immediately with a real (non-terminal)
+    close code, the same shape a Cloudflare Tunnel WebSocket-upgrade
+    misconfiguration or a firewall would produce from the client's own
+    point of view. Runs against the real, unmodified 20s production
+    timeout (INITIAL_AUTH_TIMEOUT_MS in ws.js) -- not shortened -- so
+    this proves the actual production behavior, not a sped-up stand-in.
+    """
+    telegram_id = next_telegram_id()
+    page, console_errors = await prepare_page(browser, telegram_id)
+
+    async def never_connect(ws_route):
+        pass  # deliberately never calls ws_route.connect_to_server()
+
+    await page.route_web_socket("**/ws", never_connect)
+
+    http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+    await page.goto(http_base + "/")
+
+    # The bug this test exists to catch: no screen ever becomes active,
+    # and no banner ever appears -- the page just silently stays exactly
+    # as blank as it started. Confirm the *opposite* happens instead.
+    await page.wait_for_function(
+        "document.getElementById('connection-banner').classList.contains('visible')", timeout=25000
+    )
+    assert await page.evaluate(
+        "document.getElementById('connection-banner').classList.contains('actionable')"
+    ), "the give-up banner must be tappable to retry, not just informational"
+    banner_text = await page.text_content("#connection-banner")
+    assert banner_text and banner_text.strip(), "banner must show real text, not stay empty"
+
+    # Never reached "authenticated" or any active game screen -- the whole
+    # point is this state is reached *instead of* a working boot, not
+    # alongside it.
+    assert not await page.evaluate("document.getElementById('screen-rooms').classList.contains('active')")
+
+    await page.screenshot(path="/tmp/miniapp-connect-failed-banner.png")
+    await page.close()
+    await page.close()
+
+
 async def test_room_card_is_reachable_and_activatable_by_keyboard_alone(
     gateway_server, browser, pool, redis, card_pool, conn
 ):
