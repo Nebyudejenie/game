@@ -43,6 +43,20 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-jobingo}
     volumes:
       - jobingo_prod_postgres_data:/var/lib/postgresql/data
+      # Same WAL archiving as deploy/docker-compose.yml -- see that file's
+      # own comment and DECISIONS.md. Relative to this file's own
+      # directory (deploy/), same as the dev compose file.
+      - ../backups/wal_archive:/wal_archive
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=replica"
+      - "-c"
+      - "archive_mode=on"
+      # See deploy/docker-compose.yml's own comment for why `install -m
+      # 644` replaces a plain `cp` here.
+      - "-c"
+      - "archive_command=test ! -f /wal_archive/%f && install -m 644 %p /wal_archive/%f"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-jobingo} -d $${POSTGRES_DB:-jobingo}"]
       interval: 5s

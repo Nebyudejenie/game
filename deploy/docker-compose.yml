@@ -13,6 +13,34 @@ services:
       - "5433:5432"
     volumes:
       - jobingo_postgres_data:/var/lib/postgresql/data
+      # WAL archive destination for spec section 9.2's PITR requirement
+      # (idea.md ~line 6161) -- host-visible, nested under the same
+      # already-gitignored backups/ root deploy/backup.sh writes dumps
+      # into, so deploy/basebackup.sh and deploy/restore_pitr.sh can read
+      # it directly without going through `docker compose exec`. See
+      # DECISIONS.md.
+      - ../backups/wal_archive:/wal_archive
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=replica"
+      - "-c"
+      - "archive_mode=on"
+      # Postgres's own documented archive_command idiom (refuses to
+      # silently overwrite an already-archived segment -- nonzero exit ->
+      # Postgres logs a warning and retries, the correct, intentional
+      # behavior on a real conflict), adapted with `install -m 644` in
+      # place of a plain `cp`: WAL segments are created 0600 by the
+      # postgres process inside this container, but deploy/restore_pitr.sh
+      # deliberately reads them from a SEPARATE throwaway container running
+      # as the host user (never as this container's own uid) -- `install`
+      # sets the readable mode atomically as part of the same copy, so
+      # there's no separate chmod step that could succeed only halfway
+      # (leaving a file that's genuinely archived but permanently
+      # misreported as failed, since a later retry's `test ! -f` would
+      # then see it as already present and skip re-archiving).
+      - "-c"
+      - "archive_command=test ! -f /wal_archive/%f && install -m 644 %p /wal_archive/%f"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U jobingo -d jobingo"]
       interval: 5s

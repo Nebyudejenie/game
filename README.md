@@ -636,6 +636,44 @@ whoever happened to be connected at the exact second the round ended. See
   14) can't literally be claimed without a real production deployment,
   and what's provable instead.
 
+**Point-in-time recovery (PITR) — spec section 9.2**: `pg_dump`/`pg_restore`
+above is a *logical* backup — portable, but architecturally unable to
+replay forward to an arbitrary point in time between two backups. Spec
+section 9.2 explicitly asks for PITR, which needs a *physical* base backup
+plus continuously archived WAL:
+- `deploy/docker-compose.yml`/`docker-compose.prod.yml`'s `postgres`
+  service has `archive_mode=on`, archiving every completed WAL segment into
+  a bind-mounted `backups/wal_archive/`.
+- **One-time setup, before the stack's first start** (mirrors
+  `deploy/.env` — Docker auto-creates a missing bind-mount source as
+  `root:root`, which the containerized Postgres process can never write
+  into, and a plain host user can't fix after the fact):
+  ```
+  mkdir -p backups/wal_archive && chmod 777 backups/wal_archive
+  ```
+- **`deploy/basebackup.sh`** — a real `pg_basebackup`, written under
+  `backups/basebackups/<timestamp>/base.tar`.
+- **`deploy/restore_pitr.sh <base.tar> <target_time> <host_port>`** —
+  replays the archived WAL forward to an exact target timestamp in a
+  genuinely separate, throwaway `docker run` container (never the live
+  `postgres` service), and leaves it running on `<host_port>` for the
+  caller to query.
+- **`deploy/prune_wal_archive.sh [days]`** — the spec's 30-day retention
+  (default 30), deleting archived WAL segments and base backups past the
+  window.
+- Verified with a real drill (`tests/integration/test_backup_restore.py`,
+  `test_wal_archiving_supports_point_in_time_recovery`): funds a row,
+  takes a base backup, funds a second row, then restores to the timestamp
+  between the two — the recovered instance has the first row and not the
+  second. See `DECISIONS.md` for three real gotchas this drill's own first
+  draft ran into (archived files need to be readable by a differently-owned
+  restoring container; the target timestamp must be captured *after* the
+  base backup, not before; and why the test issues every SQL statement and
+  every `pg_switch_wal()` call as its own round trip). Same "performed in
+  the last 30 days"/"run monthly" honesty split as the logical-backup drill
+  above — the mechanism is proven for real right now, the literal
+  production cadence isn't something this session can manufacture.
+
 **Observability (spec section 10.4):**
 - **`packages/core/metrics.py`** — real Prometheus metrics (not
   placeholders): `gateway_connections`, `engine_rooms_active`,

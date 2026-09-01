@@ -5,6 +5,109 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-01 — WAL archiving + real point-in-time recovery (PITR)
+
+An audit pass (cross-referencing idea.md's Definition-of-Done section
+against the actual codebase, not just this file's own prior claims) found
+a real, previously-unraised gap: spec section 9.2 (idea.md ~line 6161) is
+explicit -- **"PostgreSQL PITR with WAL archiving, 30-day retention, and a
+restore drill run monthly -- an untested backup is not a backup."** The
+existing `deploy/backup.sh`/`restore.sh` (verified by `tests/integration/
+test_backup_restore.py`) is a **logical** backup (`pg_dump`/`pg_restore`)
+-- genuinely useful, but architecturally unable to replay forward to an
+arbitrary point in time between two backups: real PITR needs a **physical
+base backup** (`pg_basebackup`) plus continuously archived WAL segments
+replayed forward to a target timestamp. No prior mention of "PITR"/"WAL
+archiving" anywhere in this file or README.md -- unlike every other known
+gap in this project (SantimPay/ArifPay, live Chapa creds, an automated KYC
+pipeline, etc.), this one needed no business/external input, so it's built
+now rather than just logged as blocked.
+
+**Design**: the existing logical backup/restore path is untouched --
+`backup.sh`/`restore.sh` stay exactly as they are, still the right tool for
+"get a portable snapshot right now." Three new scripts add the
+complementary physical path: `deploy/basebackup.sh` (a real
+`pg_basebackup -F tar -X none`, relying entirely on the archived WAL rather
+than bundling it), `deploy/restore_pitr.sh <base.tar> <target_time>
+<host_port>` (extracts the base backup into a fresh temp `PGDATA`, drops a
+`recovery.signal` + `restore_command`/`recovery_target_time`/
+`recovery_target_action=promote`, and runs a genuinely separate, throwaway
+`docker run --rm` container -- never touching the live `postgres` service,
+one level further than `restore.sh`'s own "never risk the real thing"
+principle, since a physical restore needs its own data directory and
+process, not just a separate database on the same running server), and
+`deploy/prune_wal_archive.sh <days>` (the spec's 30-day retention, real
+find-by-mtime deletion, tested by backdating files rather than waiting 30
+real days). `deploy/docker-compose.yml`/`docker-compose.prod.yml`'s
+`postgres` service both gain `archive_mode=on` plus a bind-mounted
+`../backups/wal_archive:/wal_archive` (nested under the already-gitignored
+`/backups/` root, no new `.gitignore` entry needed).
+
+**Three real, non-obvious gotchas found and fixed while building the drill
+test (`test_wal_archiving_supports_point_in_time_recovery`), all worth
+recording since none of them would be obvious from reading Postgres's own
+docs in isolation:**
+
+1. **`archive_command` must not use a plain `cp`.** WAL segments are
+   created `0600`, owned by the *live* Postgres container's own uid.
+   `restore_pitr.sh` deliberately reads them back from a *separately owned*
+   throwaway container (running as the host user, not the live container's
+   uid) -- a plain `cp %p /wal_archive/%f` preserves that `0600`, making
+   the archived file unreadable to anything else. Fixed by using `install
+   -m 644 %p /wal_archive/%f` instead: the mode is set atomically as part
+   of the same copy, so there's no separate `chmod` step that could
+   succeed only halfway (which would leave a file genuinely archived but
+   permanently misreported as failed -- a retry's `test ! -f` guard would
+   then see it as already present and never re-attempt the `chmod`).
+2. **The WAL archive bind-mount directory needs to exist, host-user-owned
+   and world-writable, *before* Postgres's first start.** Docker
+   auto-creates a missing bind-mount source as `root:root`, which the
+   containerized postgres process (uid 999, not root) can never write
+   into -- and once created that way, a non-root host user can't `chmod`
+   it either. This is a real one-time setup step (mirroring `deploy/.env`'s
+   own already-established "must exist before first use, can't be
+   auto-provisioned" precedent) -- documented in README. The test itself
+   defensively `mkdir`+`chmod 777`s the directory too, so it's self-healing
+   for a fresh checkout where the directory doesn't exist yet at all (the
+   one case that genuinely can be fixed at test time); it can't fix one
+   Docker already auto-created as root, same as a real deployment.
+3. **`recovery_target_time` needs real WAL evidence *after* it, not just
+   *before* it.** Two sub-gotchas here, both found by watching real
+   `FATAL: recovery ended before configured recovery target was reached`
+   failures rather than assuming: (a) the target timestamp must be
+   captured *after* the base backup runs, not before -- if the target
+   predates the base backup's own redo point, there's nothing for replay
+   to "stop before" since the whole replay range is already past it: `T1 =
+   clock_timestamp()` moved from before `basebackup.sh` to after it in the
+   test's final version. (b) Sending an `INSERT` and `SELECT
+   pg_switch_wal()` as *one* multi-statement `psql -c "stmt1; stmt2"` call
+   defers the INSERT's own `COMMIT` WAL record until *after* the switch --
+   confirmed directly with `pg_waldump` on the archived segments, which
+   showed the `INSERT`'s heap record but no `COMMIT` in either the segment
+   containing it or the next one; the real commit record only showed up in
+   the *third*, still-unarchived segment. The fix is procedural, not a
+   product bug: every statement and every `pg_switch_wal()` call in the
+   test issues as its own separate round trip.
+
+**What's provable now vs. the literal spec claim**: exactly the same split
+this file's own prior backup-drill entry already draws for `pg_dump`/
+`pg_restore` -- "a full restore from backup has been performed in the last
+30 days" is a production operating fact this session can't manufacture (no
+production deployment exists, and no 30 days have elapsed). What's real and
+tested right now: `pg_basebackup` + continuously archived WAL really do
+replay forward to an exact, arbitrary target timestamp, excluding
+everything committed after it -- proven with real data (a row committed
+before the target survives; one committed after does not), not asserted
+from reading the mechanism's design.
+
+**Also confirmed, not fixed, during this stage's full verification pass**:
+`test_gateway_fanout.py`'s p99/stalled-reader latency-budget assertions
+missed their 300ms budget on one `-m load` run (up to 462.7ms), on code
+this stage's diff never touches (`git diff --stat` against `services/
+gateway/` and the test file itself was empty) -- the same host-contention
+flake pattern already documented multiple times across the manual-payment
+subsystem's own stages. A rerun minutes later passed cleanly (5/5).
+
 ## 2026-09-01 — Two-person approval for high-value manual payments
 
 The manual payment subsystem's own Stage 1 deliberately deferred one

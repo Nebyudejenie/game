@@ -16,7 +16,11 @@ connection, so it needs no chaos_infra-style isolation.
 
 import asyncio
 import os
+import re
+import shutil
+import socket
 import subprocess
+import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -167,3 +171,160 @@ async def test_prod_compose_reconcile_job_is_valid_and_profile_gated():
         env_path.unlink(missing_ok=True)
         if had_existing_env:
             backup_path.rename(env_path)
+
+
+# --- WAL archiving + point-in-time recovery -----------------------------
+#
+# The capability deploy/backup.sh/restore.sh's logical pg_dump/pg_restore
+# path above architecturally cannot provide: replaying forward to an EXACT
+# point in time strictly between two backups, not just restoring to
+# whenever the last dump happened to be taken. Spec section 9.2 (idea.md
+# ~line 6161) names this explicitly: "PostgreSQL PITR with WAL archiving,
+# 30-day retention, and a restore drill run monthly." See DECISIONS.md for
+# the full design and deploy/basebackup.sh/restore_pitr.sh's own comments.
+
+
+def _free_port() -> int:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
+def _ensure_wal_archive_dir_writable() -> None:
+    # deploy/docker-compose.yml's postgres service writes archived WAL
+    # segments here (as its own container uid), and deploy/restore_pitr.sh
+    # reads them back from a SEPARATE throwaway container running as the
+    # host user -- Docker auto-creates a missing bind-mount source as
+    # root:root, which neither of those uids can write into. A real
+    # deployment does this once, host-user-owned and world-writable,
+    # BEFORE the postgres container's first start (README documents it,
+    # mirroring deploy/.env's own one-time-setup precedent). This call
+    # makes the test self-healing for a fresh checkout that hasn't run
+    # that step yet -- it can create the directory (or fix perms on one
+    # this same host user already owns) but can't fix one Docker already
+    # auto-created as root; see DECISIONS.md for the real gotcha this
+    # documents.
+    wal_dir = DEPLOY_DIR / ".." / "backups" / "wal_archive"
+    wal_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(wal_dir, 0o777)
+
+
+async def _psql(sql: str) -> None:
+    # Each statement its own real round trip against the dev compose
+    # Postgres -- a genuine, non-obvious gotcha found while building this
+    # test: batching an INSERT and SELECT pg_switch_wal() into ONE
+    # multi-statement psql call defers the INSERT's own COMMIT record
+    # until AFTER the switch, landing it in the segment the switch just
+    # rotated INTO (which then sits unarchived) rather than the one that
+    # gets archived -- silently breaking recovery_target_time's ability to
+    # ever find it, since the commit it needs to see never made it into
+    # any archived segment. See DECISIONS.md.
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "compose", "-f", str(DEPLOY_DIR / "docker-compose.yml"),
+        "exec", "-T", "postgres", "psql", "-U", "jobingo", "-d", "jobingo", "-c", sql,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    assert proc.returncode == 0, (stdout + stderr).decode()
+
+
+async def test_wal_archiving_supports_point_in_time_recovery(pool, conn):
+    _ensure_wal_archive_dir_writable()
+
+    table = f"pitr_test_{os.urandom(4).hex()}"
+    port = _free_port()
+    container_name = f"jobingo-pitr-drill-test-{os.urandom(4).hex()}"
+    base_tar: str | None = None
+    pgdata_dir: str | None = None
+
+    try:
+        await _psql(f"CREATE TABLE {table} (label text)")
+        await _psql(f"INSERT INTO {table} (label) VALUES ('user_A')")
+        await _psql("SELECT pg_switch_wal()")
+
+        base_output = await _run(str(DEPLOY_DIR / "basebackup.sh"))
+        base_tar = base_output.strip().rsplit(" ", 1)[-1]
+        assert Path(base_tar).is_file()
+
+        # recovery_target_time must be chronologically AFTER the base
+        # backup's own redo point, or there's nothing for replay to "stop
+        # before" -- another real gotcha this test's own first draft ran
+        # into (see DECISIONS.md). Captured via the server's own clock
+        # (not the host's), same reasoning the capstone manual-payment
+        # e2e test already established for T1-style timestamps elsewhere
+        # in this suite.
+        target_time = await conn.fetchval("SELECT clock_timestamp()")
+
+        before_archived = await conn.fetchval("SELECT archived_count FROM pg_stat_archiver")
+        await _psql(f"INSERT INTO {table} (label) VALUES ('user_B')")
+        await _psql("SELECT pg_switch_wal()")
+        for _ in range(20):
+            after_archived = await conn.fetchval("SELECT archived_count FROM pg_stat_archiver")
+            if after_archived > before_archived:
+                break
+            await asyncio.sleep(0.5)
+        else:
+            raise AssertionError("WAL segment containing the post-target insert was never archived")
+
+        restore_output = await _run(
+            str(DEPLOY_DIR / "restore_pitr.sh"), base_tar, str(target_time), str(port), container_name,
+        )
+        match = re.search(r"pgdata=(\S+)", restore_output)
+        assert match, restore_output
+        pgdata_dir = match.group(1)
+
+        recovered_conn = await asyncpg.connect(dsn=f"postgresql://jobingo:jobingo@127.0.0.1:{port}/jobingo")
+        try:
+            rows = await recovered_conn.fetch(f"SELECT label FROM {table} ORDER BY label")
+            # The real proof recovery stopped exactly at the target time,
+            # not "at the end of whatever WAL happened to be archived":
+            # user_A (committed before target_time) survived; user_B
+            # (committed after) does not exist at all in the recovered
+            # instance.
+            assert [r["label"] for r in rows] == ["user_A"]
+        finally:
+            await recovered_conn.close()
+    finally:
+        stop = await asyncio.create_subprocess_exec(
+            "docker", "stop", container_name, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        await stop.communicate()
+        if pgdata_dir:
+            shutil.rmtree(pgdata_dir, ignore_errors=True)
+        await _psql(f"DROP TABLE IF EXISTS {table}")
+        if base_tar:
+            shutil.rmtree(Path(base_tar).parent, ignore_errors=True)
+
+
+async def test_prune_wal_archive_deletes_only_items_older_than_the_retention_window(tmp_path):
+    wal_dir = tmp_path / "wal_archive"
+    wal_dir.mkdir()
+    old_wal = wal_dir / "000000010000000000000001"
+    new_wal = wal_dir / "000000010000000000000002"
+    old_wal.write_bytes(b"old")
+    new_wal.write_bytes(b"new")
+    old_time = time.time() - 40 * 86400  # well past the default 30-day window
+    os.utime(old_wal, (old_time, old_time))
+
+    basebackup_dir = tmp_path / "basebackups"
+    old_backup = basebackup_dir / "20260101T000000Z"
+    new_backup = basebackup_dir / "20260901T000000Z"
+    old_backup.mkdir(parents=True)
+    new_backup.mkdir(parents=True)
+    (old_backup / "base.tar").write_bytes(b"old")
+    (new_backup / "base.tar").write_bytes(b"new")
+    os.utime(old_backup, (old_time, old_time))
+
+    proc = await asyncio.create_subprocess_exec(
+        str(DEPLOY_DIR / "prune_wal_archive.sh"), "30",
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={**os.environ, "BACKUP_DIR": str(tmp_path)},
+    )
+    stdout, stderr = await proc.communicate()
+    assert proc.returncode == 0, (stdout + stderr).decode()
+
+    assert not old_wal.exists()
+    assert new_wal.exists()
+    assert not old_backup.exists()
+    assert new_backup.exists()
