@@ -150,6 +150,70 @@ async def test_finance_approves_a_manual_deposit_over_a_real_browser(admin_serve
     await page.close()
 
 
+async def test_two_different_finance_admins_approve_a_high_value_manual_deposit_over_real_browsers(
+    admin_server, pool, redis, conn, browser
+):
+    # The two-person-approval feature's own e2e capstone: a single admin
+    # session clicking Approve twice must never be enough to credit a
+    # >= 2,000 ETB manual deposit -- it takes a second, genuinely
+    # different admin's browser session and login.
+    _, first_username, first_password, first_totp = await create_test_admin(pool, role="finance")
+    _, second_username, second_password, second_totp = await create_test_admin(pool, role="finance")
+    user_id = await create_user(conn)
+    destination_row = await conn.fetchrow(
+        """
+        INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name)
+        VALUES ('telebirr', '0911000000', 'Jo Bingo PLC') RETURNING id
+        """
+    )
+    intent = await manual.create_manual_deposit_request(
+        pool,
+        redis,
+        user_id=user_id,
+        amount=Decimal("2500.00"),
+        manual_destination_id=destination_row["id"],
+        external_reference="FT-E2E-2PERSON-1",
+        receipt_telegram_file_id=None,
+        min_deposit=MIN_DEPOSIT,
+        daily_cap=DAILY_CAP,
+    )
+    payment_row = f'tr[data-payment-id="{intent.payment_id}"]'
+
+    first_page = await browser.new_page(viewport={"width": 1280, "height": 900})
+    first_page.on("dialog", lambda dialog: dialog.accept("e2e test: first look, matches bank statement"))
+    await _login(first_page, admin_server, first_username, first_password, first_totp)
+    await first_page.wait_for_selector(".stat-grid", timeout=10000)
+    await first_page.click('.nav-btn[data-screen="manual_deposits"]')
+    await first_page.wait_for_selector(payment_row, timeout=10000)
+    await first_page.click(f"{payment_row} .approve-btn")
+    await first_page.wait_for_selector("#toast.visible", timeout=5000)
+    await first_page.wait_for_selector(f'{payment_row}:has-text("awaiting 2nd approval")', timeout=5000)
+    await first_page.close()
+
+    status_after_first = await conn.fetchval("SELECT status FROM payments WHERE id = $1", intent.payment_id)
+    assert status_after_first == "review"  # not yet credited
+    assert await _cash(conn, user_id) == Decimal("0.00")
+
+    second_page = await browser.new_page(viewport={"width": 1280, "height": 900})
+    page_errors: list[str] = []
+    second_page.on("pageerror", lambda exc: page_errors.append(str(exc)))
+    second_page.on("dialog", lambda dialog: dialog.accept("e2e test: confirmed externally by a second reviewer"))
+    await _login(second_page, admin_server, second_username, second_password, second_totp)
+    await second_page.wait_for_selector(".stat-grid", timeout=10000)
+    await second_page.click('.nav-btn[data-screen="manual_deposits"]')
+    await second_page.wait_for_selector(payment_row, timeout=10000)
+    await second_page.click(f"{payment_row} .approve-btn")
+    await second_page.wait_for_selector("#toast.visible", timeout=5000)
+    await second_page.wait_for_function(f"!document.querySelector('{payment_row}')", timeout=5000)
+
+    assert await _cash(conn, user_id) == Decimal("2500.00")
+    status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", intent.payment_id)
+    assert status == "succeeded"
+
+    assert page_errors == [], f"JS errors during two-person manual-deposit-approve flow: {page_errors}"
+    await second_page.close()
+
+
 async def test_finance_approves_and_settles_a_manual_withdrawal_over_a_real_browser(
     admin_server, pool, redis, conn, browser
 ):

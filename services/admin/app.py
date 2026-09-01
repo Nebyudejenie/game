@@ -440,17 +440,21 @@ async def approve_manual_deposit(
     admin: Annotated[AdminSession, Depends(require("payments:approve"))],
     payment_id: int,
     body: ManualPaymentDecisionRequest,
-) -> dict[str, bool]:
+) -> dict[str, str]:
     _require_reason(body.reason)
-    approved = await queries.approve_manual_deposit_admin(
-        app.state.pool,
-        app.state.redis,
-        admin_id=admin.admin_id,
-        payment_id=payment_id,
-        reason=body.reason,
-        ip_address=_client_ip(request),
-    )
-    return {"approved": approved}
+    try:
+        outcome = await queries.approve_manual_deposit_admin(
+            app.state.pool,
+            app.state.redis,
+            admin_id=admin.admin_id,
+            payment_id=payment_id,
+            reason=body.reason,
+            ip_address=_client_ip(request),
+            two_person_threshold=get_settings().auto_approve_withdraw_etb,
+        )
+    except queries.SameAdminCannotProvideSecondApproval as exc:
+        raise HTTPException(status_code=409, detail="same_admin_cannot_double_approve") from exc
+    return {"outcome": outcome}
 
 
 @app.post("/manual-deposits/{payment_id}/reject")
@@ -527,17 +531,21 @@ async def approve_manual_withdrawal(
     admin: Annotated[AdminSession, Depends(require("payments:approve"))],
     payment_id: int,
     body: ManualPaymentDecisionRequest,
-) -> dict[str, bool]:
+) -> dict[str, str]:
     _require_reason(body.reason)
-    approved = await queries.approve_manual_withdrawal_admin(
-        app.state.pool,
-        app.state.redis,
-        admin_id=admin.admin_id,
-        payment_id=payment_id,
-        reason=body.reason,
-        ip_address=_client_ip(request),
-    )
-    return {"approved": approved}
+    try:
+        outcome = await queries.approve_manual_withdrawal_admin(
+            app.state.pool,
+            app.state.redis,
+            admin_id=admin.admin_id,
+            payment_id=payment_id,
+            reason=body.reason,
+            ip_address=_client_ip(request),
+            two_person_threshold=get_settings().auto_approve_withdraw_etb,
+        )
+    except queries.SameAdminCannotProvideSecondApproval as exc:
+        raise HTTPException(status_code=409, detail="same_admin_cannot_double_approve") from exc
+    return {"outcome": outcome}
 
 
 class SettleManualWithdrawalRequest(BaseModel):

@@ -39,6 +39,7 @@ export async function render(container) {
               <td>
                 ${escapeHtml(d.external_reference || "—")}
                 ${d.possible_duplicate_reference ? '<span class="badge badge-review">possible duplicate</span>' : ""}
+                ${d.first_approved_by_admin_id ? `<span class="badge badge-review">awaiting 2nd approval (1st: ${escapeHtml(d.first_approver_username)})</span>` : ""}
               </td>
               <td>${d.receipt_telegram_file_id ? `<a href="/manual-deposits/${d.id}/receipt" target="_blank" rel="noopener">view</a>` : "—"}</td>
               <td>${fmtDate(d.created_at)}</td>
@@ -66,8 +67,14 @@ export async function render(container) {
       return;
     }
     try {
-      await api(`/manual-deposits/${paymentId}/${action}`, { method: "POST", body: { reason } });
-      toast(action === "approve" ? "Deposit approved and credited." : "Deposit rejected.");
+      const result = await api(`/manual-deposits/${paymentId}/${action}`, { method: "POST", body: { reason } });
+      if (action === "reject") {
+        toast("Deposit rejected.");
+      } else if (result.outcome === "awaiting_second_approval") {
+        toast("First approval recorded -- a different admin must approve to credit this deposit.");
+      } else {
+        toast("Deposit approved and credited.");
+      }
       reload();
     } catch (err) {
       toast(err.detail || err.message, true);

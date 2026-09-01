@@ -5,11 +5,13 @@ audit trail, the live (not stale-flag) duplicate-reference detection, and
 the receipt-photo proxy route.
 """
 
+import json
 import uuid
 from decimal import Decimal
 
 import httpx
 
+from packages.core import ledger
 from packages.core.notifications import NOTIFICATIONS_STREAM
 from services.admin import queries
 from services.payments import manual
@@ -19,6 +21,11 @@ from tests.integration.test_admin_auth import create_test_admin
 
 MIN_DEPOSIT = Decimal("10.00")
 DAILY_CAP = Decimal("50000.00")
+
+
+async def _cash(conn, user_id: int) -> Decimal:
+    account = await ledger.get_or_create_account(conn, user_id, "user_cash")
+    return await ledger.balance(conn, account.id)
 
 
 def _unique_ref() -> str:
@@ -113,7 +120,7 @@ async def test_approve_writes_an_audit_row(pool, redis, conn):
 
     await queries.approve_manual_deposit_admin(
         pool, redis, admin_id=admin_id, payment_id=payment_id, reason="matched bank statement",
-        ip_address="10.0.0.1",
+        ip_address="10.0.0.1", two_person_threshold=Decimal("2000.00"),
     )
 
     audit_row = await conn.fetchrow(
@@ -153,7 +160,8 @@ async def test_approve_enqueues_a_real_telegram_notification(pool, redis, conn):
 
     before = await redis.xlen(NOTIFICATIONS_STREAM)
     await queries.approve_manual_deposit_admin(
-        pool, redis, admin_id=admin_id, payment_id=payment_id, reason="ok", ip_address="10.0.0.1"
+        pool, redis, admin_id=admin_id, payment_id=payment_id, reason="ok", ip_address="10.0.0.1",
+        two_person_threshold=Decimal("2000.00"),
     )
     after = await redis.xlen(NOTIFICATIONS_STREAM)
     assert after == before + 1
@@ -207,7 +215,7 @@ async def test_finance_can_approve_manual_deposits_over_http(admin_server, pool,
             f"{admin_server}/manual-deposits/{payment_id}/approve", headers=headers, json={"reason": "ok"}
         )
     assert response.status_code == 200
-    assert response.json()["approved"] is True
+    assert response.json()["outcome"] == "credited"
 
 
 async def test_approve_manual_deposit_rejects_empty_reason_over_http(admin_server, pool, redis, conn):
@@ -254,9 +262,10 @@ async def test_notification_failure_never_blocks_or_reverses_the_credit(pool, re
     monkeypatch.setattr(redis, "xadd", broken_xadd)
 
     approved = await queries.approve_manual_deposit_admin(
-        pool, redis, admin_id=admin_id, payment_id=payment_id, reason="ok", ip_address="10.0.0.1"
+        pool, redis, admin_id=admin_id, payment_id=payment_id, reason="ok", ip_address="10.0.0.1",
+        two_person_threshold=Decimal("2000.00"),
     )
-    assert approved is True
+    assert approved == "credited"
 
     status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", payment_id)
     assert status == "succeeded"
@@ -264,3 +273,111 @@ async def test_notification_failure_never_blocks_or_reverses_the_credit(pool, re
         "SELECT count(*) FROM ledger_transactions WHERE idempotency_key = $1", our_ref
     )
     assert txn_count == 1
+
+
+# --- Two-person approval: HTTP boundary, audit trail, reject interplay --
+
+
+async def test_same_admin_cannot_double_approve_over_http_returns_409(admin_server, pool, redis, conn):
+    headers = await _auth_headers(admin_server, pool, role="finance")
+    user_id = await create_user(conn)
+    payment_id, _ = await _pending_manual_deposit(pool, redis, conn, user_id, Decimal("2500.00"), _unique_ref())
+
+    async with httpx.AsyncClient() as client:
+        first = await client.post(
+            f"{admin_server}/manual-deposits/{payment_id}/approve", headers=headers, json={"reason": "first look"}
+        )
+        assert first.status_code == 200
+        assert first.json()["outcome"] == "awaiting_second_approval"
+
+        second = await client.post(
+            f"{admin_server}/manual-deposits/{payment_id}/approve", headers=headers, json={"reason": "again"}
+        )
+    assert second.status_code == 409
+    assert second.json()["detail"] == "same_admin_cannot_double_approve"
+
+    status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", payment_id)
+    assert status == "review"  # the rejected second call never moved anything
+
+
+async def test_two_different_finance_admins_can_approve_the_same_high_value_deposit_over_http(
+    admin_server, pool, redis, conn
+):
+    first_headers = await _auth_headers(admin_server, pool, role="finance")
+    second_headers = await _auth_headers(admin_server, pool, role="finance")
+    user_id = await create_user(conn)
+    payment_id, _ = await _pending_manual_deposit(pool, redis, conn, user_id, Decimal("2500.00"), _unique_ref())
+
+    async with httpx.AsyncClient() as client:
+        first = await client.post(
+            f"{admin_server}/manual-deposits/{payment_id}/approve", headers=first_headers, json={"reason": "ok"}
+        )
+        assert first.status_code == 200
+        assert first.json()["outcome"] == "awaiting_second_approval"
+
+        second = await client.post(
+            f"{admin_server}/manual-deposits/{payment_id}/approve",
+            headers=second_headers,
+            json={"reason": "confirmed"},
+        )
+    assert second.status_code == 200
+    assert second.json()["outcome"] == "credited"
+
+    status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", payment_id)
+    assert status == "succeeded"
+
+
+async def test_audit_trail_shows_both_approvers_above_threshold(pool, redis, conn):
+    first_admin, *_ = await create_test_admin(pool)
+    second_admin, *_ = await create_test_admin(pool)
+    user_id = await create_user(conn)
+    payment_id, _ = await _pending_manual_deposit(pool, redis, conn, user_id, Decimal("2200.00"), _unique_ref())
+
+    await queries.approve_manual_deposit_admin(
+        pool, redis, admin_id=first_admin, payment_id=payment_id, reason="first look",
+        ip_address="10.0.0.1", two_person_threshold=Decimal("2000.00"),
+    )
+    await queries.approve_manual_deposit_admin(
+        pool, redis, admin_id=second_admin, payment_id=payment_id, reason="confirmed externally",
+        ip_address="10.0.0.2", two_person_threshold=Decimal("2000.00"),
+    )
+
+    rows = await conn.fetch(
+        "SELECT action, admin_id, before, after FROM admin_audit_log "
+        "WHERE target_type = 'payment' AND target_id = $1 ORDER BY id",
+        str(payment_id),
+    )
+    assert [r["action"] for r in rows] == ["manual_deposits.first_approve", "manual_deposits.approve"]
+    assert rows[0]["admin_id"] == first_admin
+    assert rows[1]["admin_id"] == second_admin
+
+    final_before = json.loads(rows[1]["before"])
+    assert final_before["first_approved_by_admin_id"] == first_admin
+
+
+async def test_reject_still_works_while_awaiting_second_approval(pool, redis, conn):
+    # A request sitting in the awaiting-second-approval window is still
+    # just status='review' -- reject_manual_deposit_admin's guard doesn't
+    # know or care about first_approved_by_admin_id, so declining the
+    # request outright must keep working exactly as it always has. Only
+    # actually RELEASING the money needs the extra scrutiny.
+    first_admin, *_ = await create_test_admin(pool)
+    reviewer_admin, *_ = await create_test_admin(pool)
+    user_id = await create_user(conn)
+    payment_id, _ = await _pending_manual_deposit(pool, redis, conn, user_id, Decimal("2100.00"), _unique_ref())
+
+    first_outcome = await queries.approve_manual_deposit_admin(
+        pool, redis, admin_id=first_admin, payment_id=payment_id, reason="first look",
+        ip_address="10.0.0.1", two_person_threshold=Decimal("2000.00"),
+    )
+    assert first_outcome == "awaiting_second_approval"
+
+    rejected = await queries.reject_manual_deposit_admin(
+        pool, redis, admin_id=reviewer_admin, payment_id=payment_id, reason="reference turned out to be fraudulent",
+        ip_address="10.0.0.3",
+    )
+    assert rejected is True
+
+    status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", payment_id)
+    assert status == "rejected"
+    assert await _cash(conn, user_id) == Decimal("0.00")

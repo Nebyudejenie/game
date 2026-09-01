@@ -5,6 +5,87 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-01 — Two-person approval for high-value manual payments
+
+The manual payment subsystem's own Stage 1 deliberately deferred one
+anti-fraud item: two-person approval for high-risk amounts, since it
+needed a real threshold and approval shape this session was never given
+and was not going to invent. The business has now supplied both:
+
+- **Scope**: both manual deposits and manual withdrawals, not just one
+  direction.
+- **Threshold**: 2,000 ETB, explicitly matching `settings.auto_approve_
+  withdraw_etb` -- reused directly rather than added as a second config
+  field that duplicates the same number. If the business ever wants
+  these two thresholds to diverge, that's a real product decision
+  requiring a new setting, not something this feature should guess at
+  by pre-emptively splitting them today.
+- **Approver rule**: any admin holding `payments:approve` can provide
+  either approval; the one hard rule is that the same admin can never
+  provide both. Real maker-checker separation, not a role restriction
+  (deliberately not "must be superadmin").
+- **Threshold shape**: per-request only, matching every other threshold
+  in this codebase (`auto_approve_withdraw_etb`, `kyc_required_above_
+  etb`) -- no cumulative daily tracking.
+
+**Schema: two new nullable columns, no new `payments.status` value.**
+`first_approved_by_admin_id` / `first_approved_at` coexist with the
+existing `'review'` status throughout the whole "awaiting second
+approval" window. This is why `reject_manual_deposit_admin`/
+`reject_withdrawal_admin` needed **zero code changes** -- their guard
+already checks `status = 'review'`, true throughout, so a request can
+still be rejected outright at any point before a second approval lands.
+Only *releasing* money needs the extra scrutiny, not *declining* to.
+
+**Design call, not explicitly specified by the business**: for
+withdrawals, the two-person gate sits at the `review` -> `approved`
+decision (the moment the platform commits to paying) -- the same point
+a deposit's own `review` -> `succeeded` credit already sits at -- not at
+the later `approved` -> `succeeded` settlement step, which stays
+single-admin exactly as it works today. Reasoning: "approve" is the
+actual *decision* to release funds; settlement only confirms the
+mechanical transfer that decision already authorized.
+
+**Return type upgraded from `bool` to a descriptive `Literal`**:
+`approve_manual_deposit_admin`/`approve_manual_withdrawal_admin` now
+return `"credited"|"awaiting_second_approval"|"no_op"` (deposit) /
+`"approved"|"awaiting_second_approval"|"no_op"` (withdrawal) instead of
+`True`/`False` -- "the call succeeded but didn't move money yet" is a
+real, distinct outcome from both "moved money" and "did nothing because
+someone else already handled it" (the pre-existing race-tolerance
+no-op). A genuine policy-violation attempt -- the same admin trying to
+provide both approvals -- raises `SameAdminCannotProvideSecondApproval`
+(a loud exception) rather than being silently absorbed like the
+existing "someone else already finished this" no-op.
+
+Verification followed this subsystem's established discipline: mypy
+clean; every new/changed test file's source changes `git stash`ed and
+the new tests confirmed to genuinely fail against the pre-change code
+(25 failures, all `TypeError: missing two_person_threshold` or `KeyError:
+'outcome'`/`'approved'`, none surprising) before popping the stash back;
+a full clean-slate rebuild (`docker compose down -v` -> `up -d` ->
+`alembic upgrade head`, including a real downgrade-then-re-upgrade
+round-trip of the new migration verified via `\d payments`) -> mypy ->
+the full `pytest tests/` suite (886 passed) -> `-m load` -> `-m
+chaos_infra` -> `-m e2e` (29 passed, including a new real-two-browser-
+session e2e proving a single admin's session can never satisfy both
+approvals on a >= 2,000 ETB deposit).
+
+**Two `-m load`/`-m chaos_infra` timing-budget misses during this
+rebuild were confirmed pre-existing, not regressions**: `test_gateway_
+fanout.py`/`test_load_multiroom.py`'s p99 latency assertions and
+`test_chaos_gateway_kill.py`'s reconnect-time assertion each missed
+their budget by a small margin (e.g. 310-362ms vs. a 300ms budget) on a
+host under real, independently-observed contention (`uptime` load
+average > CPU count, an unrelated `spos-backend` container cycling).
+None of the affected test files, nor the gateway/chaos code they
+exercise, were touched by this feature (`git diff --stat` against
+`services/gateway/` and `packages/` was empty) -- confirmed decisively
+by stashing every change from this feature and rerunning the exact same
+failing tests against unmodified `HEAD`, which failed identically. This
+is the same host-contention flake pattern already documented multiple
+times across the manual-payment subsystem's own Stages 3+.
+
 ## 2026-08-31 — Manual payment subsystem, Stage 7: crash/retry sweep (closes the feature)
 
 Seventh and final stage of the P1 manual-payment directive. Every prior

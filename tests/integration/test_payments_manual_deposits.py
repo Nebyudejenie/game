@@ -155,11 +155,11 @@ async def test_admin_approve_credits_exactly_once(pool, redis, conn):
         daily_cap=DAILY_CAP,
     )
 
-    approved = await admin_queries.approve_manual_deposit_admin(
+    outcome = await admin_queries.approve_manual_deposit_admin(
         pool, redis, admin_id=admin_id, payment_id=intent.payment_id, reason="verified externally",
-        ip_address="10.0.0.1",
+        ip_address="10.0.0.1", two_person_threshold=Decimal("2000.00"),
     )
-    assert approved is True
+    assert outcome == "credited"
     assert await _cash(conn, user_id) == Decimal("300.00")
 
     status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", intent.payment_id)
@@ -189,12 +189,13 @@ async def test_concurrent_double_approval_credits_exactly_once(pool, redis, conn
 
     async def approve():
         return await admin_queries.approve_manual_deposit_admin(
-            pool, redis, admin_id=admin_id, payment_id=intent.payment_id, reason="ok", ip_address="10.0.0.1"
+            pool, redis, admin_id=admin_id, payment_id=intent.payment_id, reason="ok", ip_address="10.0.0.1",
+            two_person_threshold=Decimal("2000.00"),
         )
 
     results = await asyncio.gather(*(approve() for _ in range(20)))
-    assert results.count(True) == 1
-    assert results.count(False) == 19
+    assert results.count("credited") == 1
+    assert results.count("no_op") == 19
 
     assert await _cash(conn, user_id) == Decimal("120.00")
     txn_count = await conn.fetchval(
@@ -255,14 +256,16 @@ async def test_post_commit_retry_is_a_clean_noop_not_a_double_credit(pool, redis
     )
 
     first = await admin_queries.approve_manual_deposit_admin(
-        pool, redis, admin_id=admin_id, payment_id=intent.payment_id, reason="ok", ip_address="10.0.0.1"
+        pool, redis, admin_id=admin_id, payment_id=intent.payment_id, reason="ok", ip_address="10.0.0.1",
+        two_person_threshold=Decimal("2000.00"),
     )
-    assert first is True
+    assert first == "credited"
 
     retry = await admin_queries.approve_manual_deposit_admin(
-        pool, redis, admin_id=admin_id, payment_id=intent.payment_id, reason="ok", ip_address="10.0.0.1"
+        pool, redis, admin_id=admin_id, payment_id=intent.payment_id, reason="ok", ip_address="10.0.0.1",
+        two_person_threshold=Decimal("2000.00"),
     )
-    assert retry is False  # clean no-op, not an exception, not a second credit
+    assert retry == "no_op"  # clean no-op, not an exception, not a second credit
     assert await _cash(conn, user_id) == Decimal("50.00")
 
 
@@ -298,3 +301,148 @@ async def test_attach_receipt_returns_none_when_nothing_pending(pool, redis, con
         pool, user_id=user_id, telegram_file_id="AgACAgQ-fake-file-id"
     )
     assert attached_to is None
+
+
+# --- Two-person approval (amount >= two_person_threshold) --------------
+
+
+async def test_at_threshold_first_approval_awaits_second_without_crediting(pool, redis, conn):
+    first_admin, *_ = await create_test_admin(pool)
+    user_id = await create_user(conn)
+    destination_id = await _active_destination(conn)
+    intent = await manual.create_manual_deposit_request(
+        pool,
+        redis,
+        user_id=user_id,
+        amount=Decimal("2000.00"),  # exactly at the threshold -- >= gates it
+        manual_destination_id=destination_id,
+        external_reference="FT26-THRESH-1",
+        receipt_telegram_file_id=None,
+        min_deposit=MIN_DEPOSIT,
+        daily_cap=DAILY_CAP,
+    )
+
+    outcome = await admin_queries.approve_manual_deposit_admin(
+        pool, redis, admin_id=first_admin, payment_id=intent.payment_id, reason="first look",
+        ip_address="10.0.0.1", two_person_threshold=Decimal("2000.00"),
+    )
+    assert outcome == "awaiting_second_approval"
+    assert await _cash(conn, user_id) == Decimal("0.00")
+
+    row = await conn.fetchrow(
+        "SELECT status, first_approved_by_admin_id FROM payments WHERE id = $1", intent.payment_id
+    )
+    assert row["status"] == "review"
+    assert row["first_approved_by_admin_id"] == first_admin
+
+
+async def test_second_different_admin_credits_exactly_once_above_threshold(pool, redis, conn):
+    first_admin, *_ = await create_test_admin(pool)
+    second_admin, *_ = await create_test_admin(pool)
+    user_id = await create_user(conn)
+    destination_id = await _active_destination(conn)
+    intent = await manual.create_manual_deposit_request(
+        pool,
+        redis,
+        user_id=user_id,
+        amount=Decimal("2500.00"),
+        manual_destination_id=destination_id,
+        external_reference="FT26-THRESH-2",
+        receipt_telegram_file_id=None,
+        min_deposit=MIN_DEPOSIT,
+        daily_cap=DAILY_CAP,
+    )
+
+    first_outcome = await admin_queries.approve_manual_deposit_admin(
+        pool, redis, admin_id=first_admin, payment_id=intent.payment_id, reason="first look",
+        ip_address="10.0.0.1", two_person_threshold=Decimal("2000.00"),
+    )
+    assert first_outcome == "awaiting_second_approval"
+
+    second_outcome = await admin_queries.approve_manual_deposit_admin(
+        pool, redis, admin_id=second_admin, payment_id=intent.payment_id, reason="confirmed externally",
+        ip_address="10.0.0.2", two_person_threshold=Decimal("2000.00"),
+    )
+    assert second_outcome == "credited"
+    assert await _cash(conn, user_id) == Decimal("2500.00")
+
+    status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", intent.payment_id)
+    assert status == "succeeded"
+    txn_count = await conn.fetchval(
+        "SELECT count(*) FROM ledger_transactions WHERE idempotency_key = $1", intent.our_ref
+    )
+    assert txn_count == 1
+
+
+async def test_concurrent_approvals_by_two_different_admins_credits_exactly_once_above_threshold(
+    pool, redis, conn
+):
+    # Proves the row lock still serializes this correctly even when two
+    # distinct admins race for the FIRST approval: exactly one of them
+    # wins it (awaiting_second_approval), and the other -- serialized
+    # behind the first one's commit -- immediately completes the second
+    # approval and credits, rather than either double-crediting or both
+    # ending up stuck awaiting a second approval that never comes.
+    first_admin, *_ = await create_test_admin(pool)
+    second_admin, *_ = await create_test_admin(pool)
+    user_id = await create_user(conn)
+    destination_id = await _active_destination(conn)
+    intent = await manual.create_manual_deposit_request(
+        pool,
+        redis,
+        user_id=user_id,
+        amount=Decimal("3000.00"),
+        manual_destination_id=destination_id,
+        external_reference="FT26-THRESH-3",
+        receipt_telegram_file_id=None,
+        min_deposit=MIN_DEPOSIT,
+        daily_cap=DAILY_CAP,
+    )
+
+    async def approve(admin_id: int):
+        return await admin_queries.approve_manual_deposit_admin(
+            pool, redis, admin_id=admin_id, payment_id=intent.payment_id, reason="ok",
+            ip_address="10.0.0.1", two_person_threshold=Decimal("2000.00"),
+        )
+
+    results = await asyncio.gather(approve(first_admin), approve(second_admin))
+    assert sorted(results) == ["awaiting_second_approval", "credited"]
+    assert await _cash(conn, user_id) == Decimal("3000.00")
+
+    txn_count = await conn.fetchval(
+        "SELECT count(*) FROM ledger_transactions WHERE idempotency_key = $1", intent.our_ref
+    )
+    assert txn_count == 1
+
+
+async def test_same_admin_cannot_provide_second_approval_above_threshold(pool, redis, conn):
+    admin_id, *_ = await create_test_admin(pool)
+    user_id = await create_user(conn)
+    destination_id = await _active_destination(conn)
+    intent = await manual.create_manual_deposit_request(
+        pool,
+        redis,
+        user_id=user_id,
+        amount=Decimal("2000.00"),
+        manual_destination_id=destination_id,
+        external_reference="FT26-THRESH-4",
+        receipt_telegram_file_id=None,
+        min_deposit=MIN_DEPOSIT,
+        daily_cap=DAILY_CAP,
+    )
+
+    first_outcome = await admin_queries.approve_manual_deposit_admin(
+        pool, redis, admin_id=admin_id, payment_id=intent.payment_id, reason="first look",
+        ip_address="10.0.0.1", two_person_threshold=Decimal("2000.00"),
+    )
+    assert first_outcome == "awaiting_second_approval"
+
+    with pytest.raises(admin_queries.SameAdminCannotProvideSecondApproval):
+        await admin_queries.approve_manual_deposit_admin(
+            pool, redis, admin_id=admin_id, payment_id=intent.payment_id, reason="trying again",
+            ip_address="10.0.0.1", two_person_threshold=Decimal("2000.00"),
+        )
+
+    assert await _cash(conn, user_id) == Decimal("0.00")
+    status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", intent.payment_id)
+    assert status == "review"

@@ -49,7 +49,10 @@ export async function render(container) {
               <td>${w.amount} ETB</td>
               <td>${escapeHtml(w.method_kind || "—")} / ${escapeHtml(w.account_ref || "—")} / ${escapeHtml(w.holder_name || "—")}</td>
               <td>${w.prior_successful_withdrawals}</td>
-              <td>${escapeHtml(w.review_reason || "—")}</td>
+              <td>
+                ${escapeHtml(w.review_reason || "—")}
+                ${w.first_approved_by_admin_id ? `<span class="badge badge-review">awaiting 2nd approval (1st: ${escapeHtml(w.first_approver_username)})</span>` : ""}
+              </td>
               <td>${fmtDate(w.created_at)}</td>
               <td>
                 <button class="btn btn-success btn-sm approve-btn">Approve</button>
@@ -111,8 +114,12 @@ export async function render(container) {
       return;
     }
     try {
-      await api(`/manual-withdrawals/${paymentId}/approve`, { method: "POST", body: { reason } });
-      toast("Approved. Send the transfer, then settle it below once sent.");
+      const result = await api(`/manual-withdrawals/${paymentId}/approve`, { method: "POST", body: { reason } });
+      if (result.outcome === "awaiting_second_approval") {
+        toast("First approval recorded -- a different admin must approve before the transfer can be sent.");
+      } else {
+        toast("Approved. Send the transfer, then settle it below once sent.");
+      }
       reloadPending();
       reloadSettlement();
     } catch (err) {

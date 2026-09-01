@@ -13,6 +13,7 @@ import asyncio
 from decimal import Decimal
 
 import httpx
+import pytest
 
 from packages.core import ledger
 from services.admin import queries
@@ -77,9 +78,10 @@ async def test_admin_approve_is_a_checkpoint_only_no_ledger_row_yet(pool, redis,
     payment_id, our_ref = await _manual_withdrawal(pool, redis, user_id, Decimal("100.00"))
 
     approved = await queries.approve_manual_withdrawal_admin(
-        pool, redis, admin_id=admin_id, payment_id=payment_id, reason="verified identity", ip_address="10.0.0.1"
+        pool, redis, admin_id=admin_id, payment_id=payment_id, reason="verified identity", ip_address="10.0.0.1",
+        two_person_threshold=Decimal("2000.00"),
     )
-    assert approved is True
+    assert approved == "approved"
 
     status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", payment_id)
     assert status == "approved"
@@ -91,12 +93,100 @@ async def test_admin_approve_is_a_checkpoint_only_no_ledger_row_yet(pool, redis,
     assert txn_count == 0
 
 
+# --- Two-person approval (amount >= two_person_threshold) --------------
+
+
+async def test_at_threshold_first_approval_awaits_second_without_approving(pool, redis, conn):
+    first_admin, *_ = await create_test_admin(pool)
+    user_id = await create_funded_user(conn, Decimal("5000.00"))
+    payment_id, _ = await _manual_withdrawal(pool, redis, user_id, Decimal("2000.00"))
+
+    outcome = await queries.approve_manual_withdrawal_admin(
+        pool, redis, admin_id=first_admin, payment_id=payment_id, reason="first look",
+        ip_address="10.0.0.1", two_person_threshold=Decimal("2000.00"),
+    )
+    assert outcome == "awaiting_second_approval"
+
+    row = await conn.fetchrow(
+        "SELECT status, first_approved_by_admin_id FROM payments WHERE id = $1", payment_id
+    )
+    assert row["status"] == "review"  # not yet 'approved' -- funds stay locked, unsent
+    assert row["first_approved_by_admin_id"] == first_admin
+    assert await _locked(conn, user_id) == Decimal("2000.00")
+
+
+async def test_second_different_admin_approves_exactly_once_above_threshold(pool, redis, conn):
+    first_admin, *_ = await create_test_admin(pool)
+    second_admin, *_ = await create_test_admin(pool)
+    user_id = await create_funded_user(conn, Decimal("5000.00"))
+    payment_id, _ = await _manual_withdrawal(pool, redis, user_id, Decimal("2500.00"))
+
+    first_outcome = await queries.approve_manual_withdrawal_admin(
+        pool, redis, admin_id=first_admin, payment_id=payment_id, reason="first look",
+        ip_address="10.0.0.1", two_person_threshold=Decimal("2000.00"),
+    )
+    assert first_outcome == "awaiting_second_approval"
+
+    second_outcome = await queries.approve_manual_withdrawal_admin(
+        pool, redis, admin_id=second_admin, payment_id=payment_id, reason="confirmed identity",
+        ip_address="10.0.0.2", two_person_threshold=Decimal("2000.00"),
+    )
+    assert second_outcome == "approved"
+
+    status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", payment_id)
+    assert status == "approved"
+
+
+async def test_concurrent_approvals_by_two_different_admins_approves_exactly_once_above_threshold(
+    pool, redis, conn
+):
+    first_admin, *_ = await create_test_admin(pool)
+    second_admin, *_ = await create_test_admin(pool)
+    user_id = await create_funded_user(conn, Decimal("5000.00"))
+    payment_id, _ = await _manual_withdrawal(pool, redis, user_id, Decimal("3000.00"))
+
+    async def approve(admin_id: int):
+        return await queries.approve_manual_withdrawal_admin(
+            pool, redis, admin_id=admin_id, payment_id=payment_id, reason="ok",
+            ip_address="10.0.0.1", two_person_threshold=Decimal("2000.00"),
+        )
+
+    results = await asyncio.gather(approve(first_admin), approve(second_admin))
+    assert sorted(results) == ["approved", "awaiting_second_approval"]
+
+    status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", payment_id)
+    assert status == "approved"
+
+
+async def test_same_admin_cannot_provide_second_withdrawal_approval_above_threshold(pool, redis, conn):
+    admin_id, *_ = await create_test_admin(pool)
+    user_id = await create_funded_user(conn, Decimal("5000.00"))
+    payment_id, _ = await _manual_withdrawal(pool, redis, user_id, Decimal("2000.00"))
+
+    first_outcome = await queries.approve_manual_withdrawal_admin(
+        pool, redis, admin_id=admin_id, payment_id=payment_id, reason="first look",
+        ip_address="10.0.0.1", two_person_threshold=Decimal("2000.00"),
+    )
+    assert first_outcome == "awaiting_second_approval"
+
+    with pytest.raises(queries.SameAdminCannotProvideSecondApproval):
+        await queries.approve_manual_withdrawal_admin(
+            pool, redis, admin_id=admin_id, payment_id=payment_id, reason="trying again",
+            ip_address="10.0.0.1", two_person_threshold=Decimal("2000.00"),
+        )
+
+    status = await conn.fetchval("SELECT status FROM payments WHERE id = $1", payment_id)
+    assert status == "review"
+    assert await _locked(conn, user_id) == Decimal("2000.00")
+
+
 async def test_settle_releases_locked_funds_to_the_provider_settlement_account(pool, redis, conn):
     admin_id, *_ = await create_test_admin(pool)
     user_id = await create_funded_user(conn, Decimal("500.00"))
     payment_id, our_ref = await _manual_withdrawal(pool, redis, user_id, Decimal("150.00"))
     await queries.approve_manual_withdrawal_admin(
-        pool, redis, admin_id=admin_id, payment_id=payment_id, reason="ok", ip_address="10.0.0.1"
+        pool, redis, admin_id=admin_id, payment_id=payment_id, reason="ok", ip_address="10.0.0.1",
+        two_person_threshold=Decimal("2000.00"),
     )
 
     settled = await queries.settle_manual_withdrawal_admin(
@@ -121,7 +211,8 @@ async def test_concurrent_double_settlement_pays_exactly_once(pool, redis, conn)
     user_id = await create_funded_user(conn, Decimal("500.00"))
     payment_id, our_ref = await _manual_withdrawal(pool, redis, user_id, Decimal("200.00"))
     await queries.approve_manual_withdrawal_admin(
-        pool, redis, admin_id=admin_id, payment_id=payment_id, reason="ok", ip_address="10.0.0.1"
+        pool, redis, admin_id=admin_id, payment_id=payment_id, reason="ok", ip_address="10.0.0.1",
+        two_person_threshold=Decimal("2000.00"),
     )
 
     async def settle():
@@ -146,7 +237,8 @@ async def test_settle_post_commit_retry_is_a_clean_noop(pool, redis, conn):
     user_id = await create_funded_user(conn, Decimal("500.00"))
     payment_id, _ = await _manual_withdrawal(pool, redis, user_id, Decimal("70.00"))
     await queries.approve_manual_withdrawal_admin(
-        pool, redis, admin_id=admin_id, payment_id=payment_id, reason="ok", ip_address="10.0.0.1"
+        pool, redis, admin_id=admin_id, payment_id=payment_id, reason="ok", ip_address="10.0.0.1",
+        two_person_threshold=Decimal("2000.00"),
     )
 
     first = await queries.settle_manual_withdrawal_admin(
@@ -168,7 +260,8 @@ async def test_fail_after_approval_returns_the_exact_amount_to_cash(pool, redis,
     user_id = await create_funded_user(conn, Decimal("500.00"))
     payment_id, our_ref = await _manual_withdrawal(pool, redis, user_id, Decimal("90.00"))
     await queries.approve_manual_withdrawal_admin(
-        pool, redis, admin_id=admin_id, payment_id=payment_id, reason="ok", ip_address="10.0.0.1"
+        pool, redis, admin_id=admin_id, payment_id=payment_id, reason="ok", ip_address="10.0.0.1",
+        two_person_threshold=Decimal("2000.00"),
     )
 
     failed = await queries.fail_manual_withdrawal_admin(
@@ -287,7 +380,7 @@ async def test_finance_can_approve_and_settle_manual_withdrawals_over_http(admin
             f"{admin_server}/manual-withdrawals/{payment_id}/approve", headers=headers, json={"reason": "ok"}
         )
         assert approve_response.status_code == 200
-        assert approve_response.json()["approved"] is True
+        assert approve_response.json()["outcome"] == "approved"
 
         settle_response = await client.post(
             f"{admin_server}/manual-withdrawals/{payment_id}/settle",

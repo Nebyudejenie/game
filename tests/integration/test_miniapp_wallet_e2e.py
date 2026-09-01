@@ -674,9 +674,9 @@ async def test_full_lifecycle_registration_through_withdrawal_using_the_manual_r
         # already-open tab live, over the same WS connection) ---
         approved = await admin_queries.approve_manual_deposit_admin(
             pool, redis, admin_id=admin_id, payment_id=deposit_payment_id, reason="verified externally",
-            ip_address="10.0.0.1",
+            ip_address="10.0.0.1", two_person_threshold=Decimal("2000.00"),
         )
-        assert approved is True
+        assert approved == "credited"
         await page.wait_for_function(
             "document.getElementById('wallet-cash').textContent.includes('100.00')", timeout=10000
         )
@@ -750,9 +750,9 @@ async def test_full_lifecycle_registration_through_withdrawal_using_the_manual_r
         # --- Admin approves and settles the withdrawal ---
         approved_wd = await admin_queries.approve_manual_withdrawal_admin(
             pool, redis, admin_id=admin_id, payment_id=withdrawal["id"], reason="verified identity",
-            ip_address="10.0.0.1",
+            ip_address="10.0.0.1", two_person_threshold=Decimal("2000.00"),
         )
-        assert approved_wd is True
+        assert approved_wd == "approved"
         settled = await admin_queries.settle_manual_withdrawal_admin(
             pool, redis, admin_id=admin_id, payment_id=withdrawal["id"], external_reference="TXN-E2E-LIFECYCLE",
             reason="sent via Telebirr", ip_address="10.0.0.1",

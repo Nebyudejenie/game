@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 import asyncpg
@@ -1115,6 +1115,7 @@ async def list_pending_manual_deposits(pool: asyncpg.Pool) -> list[dict[str, Any
                p.provider_ref AS external_reference, p.receipt_telegram_file_id,
                md.method_kind, md.account_ref AS destination_account_ref,
                md.account_name AS destination_account_name,
+               p.first_approved_by_admin_id, fa.username AS first_approver_username,
                EXISTS (
                  SELECT 1 FROM payments p2
                  WHERE p2.direction = 'in' AND p2.provider = 'manual' AND p2.id != p.id
@@ -1123,11 +1124,25 @@ async def list_pending_manual_deposits(pool: asyncpg.Pool) -> list[dict[str, Any
         FROM payments p
         JOIN users u ON u.id = p.user_id
         LEFT JOIN manual_payment_destinations md ON md.id = p.manual_destination_id
+        LEFT JOIN admin_users fa ON fa.id = p.first_approved_by_admin_id
         WHERE p.direction = 'in' AND p.provider = 'manual' AND p.status = 'review'
         ORDER BY p.created_at
         """
     )
     return [dict(r) for r in rows]
+
+
+class SameAdminCannotProvideSecondApproval(Exception):
+    """Raised by approve_manual_deposit_admin/approve_manual_withdrawal_admin
+    when the admin calling for a second time is the same one who already
+    provided the first approval on a >= two_person_threshold request --
+    real maker-checker separation, not just a role check. A genuine
+    policy-violation attempt, so this is a loud exception, not a quiet
+    no_op the way "someone else already finished this" already is.
+    """
+
+
+ManualDepositApprovalOutcome = Literal["credited", "awaiting_second_approval", "no_op"]
 
 
 async def approve_manual_deposit_admin(
@@ -1138,24 +1153,54 @@ async def approve_manual_deposit_admin(
     payment_id: int,
     reason: str | None,
     ip_address: str | None,
-) -> bool:
+    two_person_threshold: Decimal,
+) -> ManualDepositApprovalOutcome:
     # Same shape as approve_withdrawal_admin/reject_withdrawal_admin: row-
-    # lock, no-op (return False) if the row already moved out of the
-    # expected status -- that guard IS the idempotency/concurrency
-    # mechanism against a double-click, a browser retry, or two admins
-    # racing, exactly as it already is for withdrawals. The credit itself
-    # is the same shape as deposits.py's own _apply_confirmed_status():
-    # provider_settlement -amount / user_cash +amount, keyed on our_ref.
+    # lock, no-op if the row already moved out of the expected status --
+    # that guard IS the idempotency/concurrency mechanism against a
+    # double-click, a browser retry, or two admins racing, exactly as it
+    # already is for withdrawals. status stays 'review' through the whole
+    # awaiting-second-approval window (no new status value), which is
+    # exactly why reject_manual_deposit_admin needs zero changes to keep
+    # working at any point before a second approval lands.
     async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
-                "SELECT user_id, amount, our_ref, status FROM payments "
+                "SELECT user_id, amount, our_ref, status, first_approved_by_admin_id FROM payments "
                 "WHERE id = $1 AND direction = 'in' AND provider = 'manual' FOR UPDATE",
                 payment_id,
             )
             if row is None or row["status"] != "review":
-                return False
+                return "no_op"
 
+            if row["amount"] >= two_person_threshold:
+                if row["first_approved_by_admin_id"] is None:
+                    await conn.execute(
+                        "UPDATE payments SET first_approved_by_admin_id = $2, first_approved_at = now() "
+                        "WHERE id = $1",
+                        payment_id,
+                        admin_id,
+                    )
+                    await audit.record(
+                        conn,
+                        admin_id=admin_id,
+                        action="manual_deposits.first_approve",
+                        target_type="payment",
+                        target_id=str(payment_id),
+                        after={"first_approved_by_admin_id": admin_id},
+                        reason=reason,
+                        ip_address=ip_address,
+                    )
+                    return "awaiting_second_approval"
+
+                if row["first_approved_by_admin_id"] == admin_id:
+                    raise SameAdminCannotProvideSecondApproval(
+                        f"admin {admin_id} already provided the first approval for payment {payment_id}"
+                    )
+
+            # The credit itself is the same shape as deposits.py's own
+            # _apply_confirmed_status(): provider_settlement -amount /
+            # user_cash +amount, keyed on our_ref.
             provider_account = await ledger.get_or_create_account(conn, None, "provider_settlement")
             cash_account = await ledger.get_or_create_account(conn, row["user_id"], "user_cash")
             txn = await ledger.post(
@@ -1177,7 +1222,7 @@ async def approve_manual_deposit_admin(
                 action="manual_deposits.approve",
                 target_type="payment",
                 target_id=str(payment_id),
-                before={"status": "review"},
+                before={"status": "review", "first_approved_by_admin_id": row["first_approved_by_admin_id"]},
                 after={"status": "succeeded"},
                 reason=reason,
                 ip_address=ip_address,
@@ -1199,7 +1244,7 @@ async def approve_manual_deposit_admin(
         pool, redis, user_id=user_id, key="notify.deposit_confirmed",
         amount=str(amount), balance=balance["cash"],
     )
-    return True
+    return "credited"
 
 
 async def reject_manual_deposit_admin(
@@ -1268,6 +1313,7 @@ async def list_pending_manual_withdrawals(pool: asyncpg.Pool) -> list[dict[str, 
         """
         SELECT p.id, p.user_id, u.display_name, u.kyc_level, p.our_ref, p.amount, p.status,
                p.created_at, p.review_reason, pm.kind AS method_kind, pm.account_ref, pm.holder_name,
+               p.first_approved_by_admin_id, fa.username AS first_approver_username,
                (
                  SELECT count(*) FROM payments p2
                  WHERE p2.user_id = p.user_id AND p2.direction = 'out' AND p2.status = 'succeeded'
@@ -1275,6 +1321,7 @@ async def list_pending_manual_withdrawals(pool: asyncpg.Pool) -> list[dict[str, 
         FROM payments p
         JOIN users u ON u.id = p.user_id
         LEFT JOIN payment_methods pm ON pm.id = p.method_id
+        LEFT JOIN admin_users fa ON fa.id = p.first_approved_by_admin_id
         WHERE p.direction = 'out' AND p.status = 'review' AND p.provider = 'manual'
         ORDER BY p.created_at
         """
@@ -1297,6 +1344,9 @@ async def list_manual_withdrawals_awaiting_settlement(pool: asyncpg.Pool) -> lis
     return [dict(r) for r in rows]
 
 
+ManualWithdrawalApprovalOutcome = Literal["approved", "awaiting_second_approval", "no_op"]
+
+
 async def approve_manual_withdrawal_admin(
     pool: asyncpg.Pool,
     redis: Redis,
@@ -1305,23 +1355,56 @@ async def approve_manual_withdrawal_admin(
     payment_id: int,
     reason: str | None,
     ip_address: str | None,
-) -> bool:
+    two_person_threshold: Decimal,
+) -> ManualWithdrawalApprovalOutcome:
     """review -> approved. No ledger call -- funds are already locked
     from request_withdrawal() itself; this just records the decision to
     actually send the transfer. Deliberately does NOT call enqueue_payout
     -- there is no automatic dispatch for the manual rail, an admin
     settles it by hand via settle_manual_withdrawal_admin once the
     transfer has genuinely gone out.
+
+    The two-person gate sits here, at the decision to release funds, not
+    at settle_manual_withdrawal_admin -- that later step only confirms
+    the mechanical transfer this decision already authorized. status
+    stays 'review' through the awaiting-second-approval window, same as
+    the deposit side, so reject_withdrawal_admin needs no changes either.
     """
     async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
-                "SELECT status FROM payments WHERE id = $1 AND direction = 'out' AND provider = 'manual' "
-                "FOR UPDATE",
+                "SELECT amount, status, first_approved_by_admin_id FROM payments "
+                "WHERE id = $1 AND direction = 'out' AND provider = 'manual' FOR UPDATE",
                 payment_id,
             )
             if row is None or row["status"] != "review":
-                return False
+                return "no_op"
+
+            if row["amount"] >= two_person_threshold:
+                if row["first_approved_by_admin_id"] is None:
+                    await conn.execute(
+                        "UPDATE payments SET first_approved_by_admin_id = $2, first_approved_at = now() "
+                        "WHERE id = $1",
+                        payment_id,
+                        admin_id,
+                    )
+                    await audit.record(
+                        conn,
+                        admin_id=admin_id,
+                        action="manual_withdrawals.first_approve",
+                        target_type="payment",
+                        target_id=str(payment_id),
+                        after={"first_approved_by_admin_id": admin_id},
+                        reason=reason,
+                        ip_address=ip_address,
+                    )
+                    return "awaiting_second_approval"
+
+                if row["first_approved_by_admin_id"] == admin_id:
+                    raise SameAdminCannotProvideSecondApproval(
+                        f"admin {admin_id} already provided the first approval for payment {payment_id}"
+                    )
+
             await conn.execute(
                 "UPDATE payments SET status = 'approved', updated_at = now() WHERE id = $1", payment_id
             )
@@ -1331,12 +1414,12 @@ async def approve_manual_withdrawal_admin(
                 action="manual_withdrawals.approve",
                 target_type="payment",
                 target_id=str(payment_id),
-                before={"status": "review"},
+                before={"status": "review", "first_approved_by_admin_id": row["first_approved_by_admin_id"]},
                 after={"status": "approved"},
                 reason=reason,
                 ip_address=ip_address,
             )
-    return True
+    return "approved"
 
 
 async def settle_manual_withdrawal_admin(
