@@ -5,6 +5,81 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-01 — Examined and deliberately NOT fixed: abandoned checkouts counting toward the daily deposit cap
+
+An audit pass re-surfaced a real, previously-catalogued-once-and-forgotten
+finding: `_check_deposit_eligibility()`'s daily-cap query
+(`services/payments/deposits.py:131-139`) sums `payments` rows with
+`status IN ('pending','processing','succeeded')` for today, with no
+exclusion for a checkout the player opened and then simply never
+returned to. Since `create_deposit_intent()` flips a row to `'processing'`
+the instant `provider.create_checkout()` succeeds -- before the player has
+done anything at all -- an abandoned attempt can consume real capacity
+against a player's own daily cap for the rest of that calendar day (the
+query's own `created_at >= date_trunc('day', now())` filter already bounds
+this to at most ~24h, not forever, contrary to how severe it first looked).
+
+**Traced the full resolution path before concluding anything**:
+`poll_pending_deposits()` (`deposits.py:369-401`) already re-checks every
+`'processing'` row against Chapa every 30s+ via `fetch_status()`, and
+`_apply_confirmed_status()` already correctly resolves it the moment Chapa
+reports a real terminal status (`_TERMINAL_FAILURE_STATUSES = ("failed",
+"cancelled")`, `deposits.py:277-292`) -- so the system already self-heals
+correctly once Chapa's own signal arrives. The gap is narrower than "we
+never ask" -- it's specifically about a checkout the player never even
+opens: `ChapaProvider.fetch_status()` maps a 404 (Chapa has no record of
+the transaction at all) to `'pending'` rather than a terminal failure
+(`services/payments/chapa.py:199-200`, and `_apply_confirmed_status()`'s
+own docstring names this exact case), so a truly-never-touched checkout
+can sit reporting "still pending" indefinitely rather than resolving.
+
+**Two candidate fixes considered, both rejected as unsafe to ship without
+information this session doesn't have:**
+1. *Exclude old `'pending'`/`'processing'` rows from the cap sum
+   directly* (a purely internal query change, no external dependency).
+   Rejected: this creates a real double-credit path, not just a UX
+   improvement. If checkout A (say, near the daily cap) is excluded from
+   the sum after some internal cutoff, a player could open a *second*
+   checkout B for the remaining allowance, and *then* return to complete
+   the still-live A (Chapa's own checkout link may not have actually
+   expired just because our query stopped counting it) -- `poll_pending_
+   deposits()` would still credit A normally, since its own query has no
+   age cutoff, and the player ends up crediting more than their configured
+   daily cap in one day. Weakening a real AML/responsible-gambling control
+   to fix a comparatively minor lockout annoyance is the wrong trade.
+2. *Have the system mark a sufficiently-old `'processing'` row `'failed'`
+   itself, internally, once past some threshold.* Rejected for the
+   opposite failure mode: `poll_pending_deposits()`'s own query only
+   selects `status = 'processing'` rows (`deposits.py:378`) -- once a row
+   is internally marked `'failed'`, it's never polled again. If Chapa's
+   checkout session was, for whatever reason, still genuinely valid and
+   the player completes it after our internal cutoff, that real payment
+   is now permanently unpollable and unrecoverable: Chapa took the money,
+   we never learn it succeeded, and it's never credited. A real,
+   silent money-loss bug traded for a UX fix.
+
+**What would actually make this safe to fix, and why this session can't
+supply it**: either (a) confirmed knowledge of Chapa's own checkout-link
+expiry window (would let an internal cutoff be set safely *longer* than
+Chapa's own, guaranteeing no late-completion is possible once we stop
+counting/polling), or (b) confirmation that a 404 from Chapa's `/transaction
+/verify/{ref}` endpoint reliably means "will never succeed" rather than
+"eventual-consistency lag," which would let `fetch_status()` map it to a
+real terminal failure instead of `'pending'` and let the *existing*,
+already-safe resolution path close this on its own. Both are live-API
+behavioral facts, not something to guess at -- the same category of gap
+this project already leaves honestly documented rather than guessed
+(`services/payments/payout_worker.py`'s own "payments stuck at
+'processing' have no way to learn they failed" gap, blocked on the same
+kind of missing provider-API knowledge). Live Chapa sandbox access is
+already a logged, known blocker for this session.
+
+**Left as-is, not silently dropped**: this entry exists specifically so a
+future session with real Chapa API access (or documentation) can close
+this properly, and so nobody "fixes" it later by picking option 1 or 2
+above without re-deriving why each is a real regression, not just an
+incomplete improvement.
+
 ## 2026-09-01 — A `/code-review high` pass caught the pool-timeout fix's own real regression: bounded failures need somewhere to land
 
 The pool-acquire()-timeout fix above (same day) had never had an
