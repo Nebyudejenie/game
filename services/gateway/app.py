@@ -9,7 +9,8 @@ currently-open connections, both scoped to this process's lifetime.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import os
+from collections.abc import AsyncIterator, MutableMapping
 from contextlib import asynccontextmanager
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -343,7 +344,32 @@ async def api_create_withdrawal(
     return {"status": intent.status, "our_ref": intent.our_ref}
 
 
+class _RevalidateStaticFiles(StaticFiles):
+    """Plain StaticFiles sends no Cache-Control at all, which left Cloudflare
+    free to invent its own default (observed live: max-age=14400 -- a
+    returning player's browser could sit on a stale bundle for up to 4
+    hours after a deploy, entirely invisible from the origin's own logs).
+    no-cache forces every request to revalidate against the origin's
+    ETag/Last-Modified (already sent by plain StaticFiles) before using a
+    cached copy -- a cheap 304 when nothing changed, an immediate fresh
+    fetch the moment a deploy changes the file. This is what the
+    app.js -> app.v5.js -> app.v6.js rename-per-deploy was actually
+    working around; see DECISIONS.md.
+    """
+
+    def file_response(
+        self,
+        full_path: str | os.PathLike[str],
+        stat_result: os.stat_result,
+        scope: MutableMapping[str, Any],
+        status_code: int = 200,
+    ) -> Response:
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 # Mounted last: FastAPI matches routes in registration order, and static
 # files are served at "/" -- every /api/* and /ws route above must be
 # registered first or the static mount would shadow them.
-app.mount("/", StaticFiles(directory=MINIAPP_DIR, html=True), name="miniapp")
+app.mount("/", _RevalidateStaticFiles(directory=MINIAPP_DIR, html=True), name="miniapp")

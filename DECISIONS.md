@@ -5,6 +5,48 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-02 — The real fix for the app.js rename-per-deploy hack: an explicit Cache-Control on the miniapp's static bundle
+
+Flagged as follow-up debt in this same day's DNS-collision entry ("the
+correct fix is a real ... `Cache-Control` strategy ... not another
+one-off rename") — came due immediately: right after deploying the lobby
+enrichment (below), checking whether it had actually reached real users
+found `services/gateway/app.py`'s plain `StaticFiles(directory=
+MINIAPP_DIR, html=True)` sends no `Cache-Control` header at all. Checked
+live against the real public URL: Cloudflare filled that gap with its
+own default, `max-age=14400` (4 hours) — meaning any player whose browser
+had already fetched `app.v6.js` before a deploy would keep using that
+cached copy for up to 4 hours, seeing none of that deploy's fixes, with
+nothing about it visible in the origin's own logs. This is almost
+certainly the actual mechanism behind the earlier `app.v5.js`/`app.v6.js`
+renames — a new filename is a new cache key, so it bypasses this exact
+problem by brute force, at the cost of doing it again on every future
+deploy.
+
+**Fix**: `_RevalidateStaticFiles`, a two-line `StaticFiles` subclass
+overriding `file_response()` to set `Cache-Control: no-cache` on every
+response. `no-cache` (not `no-store`) is deliberate — plain `StaticFiles`
+already sends `ETag`/`Last-Modified`, so this doesn't disable caching,
+it forces a revalidation round-trip before using a cached copy: a cheap
+304 when nothing changed, an immediate fresh fetch the moment a file
+does. To be verified live against the real public URL (`curl -D-
+https://arada.fun/js/app.v6.js`) once deployed: `cache-control: no-cache`
+should override whatever Cloudflare would otherwise invent.
+
+New test, `tests/integration/test_miniapp_static_caching.py`: fetches
+`/` and `/js/app.v6.js` from a real running gateway and asserts the
+exact header value, plus that `ETag`/`Last-Modified` are still present
+(proving this didn't regress into `no-store`, which would force a full
+refetch every single load instead of a cheap conditional one).
+
+This also means the `app.v5.js` → `app.v6.js` rename pattern itself can
+stop now — a future deploy can go back to a plain `app.js` filename
+without reintroducing the staleness problem this was working around.
+Not renamed back in this same pass (out of scope for a cache-header fix,
+and touching the filename again right after fixing the reason it kept
+changing seemed like exactly the kind of unnecessary churn to leave
+alone) — worth doing next time that file is touched anyway.
+
 ## 2026-09-02 — Lobby screen enriched to match the reference video: REFRESH, BALANCE, CONNECTED, live Stake/Win
 
 The second of two concrete gaps found by studying `20260902093014.mp4`'s
