@@ -1231,6 +1231,23 @@ async function boot() {
   applyStaticTranslations();
 
   const initData = tg ? tg.initData : "";
+  const hasInitData = Boolean(initData && initData.trim());
+  if (!hasInitData) {
+    // Show an explicit auth-failure shell so the player never sees a
+    // featureless black screen if Telegram did not provide initData.
+    const shell = el("boot-shell");
+    shell.innerHTML = `
+      <div class="boot-shell">
+        <div class="boot-shell-title">${t("error.generic")}</div>
+        <div class="boot-shell-body">${t("connection.connect_failed")}</div>
+        <button class="boot-shell-action" data-action="retry">${t("connection.retry")}</button>
+      </div>
+    `;
+    document.body.appendChild(shell);
+    makeKeyboardActivatable(shell, () => window.location.reload());
+    return;
+  }
+
   ws.connect(initData);
   let user;
   try {

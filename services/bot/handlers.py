@@ -578,22 +578,85 @@ async def on_photo(message: Message, pool: asyncpg.Pool, notifier: Notifier) -> 
     await notifier.send(message.chat.id, t("manual_deposit.receipt_received", language))
 
 
+
 @router.message(F.text)
-async def on_unregistered_text(message: Message, pool: asyncpg.Pool, notifier: Notifier) -> None:
-    """Catch-all, registered last: a typed message from someone who hasn't
-    completed registration -- most importantly, someone typing their phone
-    number instead of using the Share Phone Number button, which spec
-    section 7.2 explicitly requires rejecting (typed numbers are never
-    proof of ownership). Registered users sending unrecognized text get no
-    reply; nothing in the spec asks for one.
-    """
+async def on_menu_text(message: Message, pool: asyncpg.Pool, redis: Redis, notifier: Notifier, settings: Settings) -> None:
+    """Handle localized ReplyKeyboard button presses without relying on
+    exact static text matching. Telegram delivers the button text in the
+    user's own language, so we resolve the sender's language and compare
+    against the known menu labels for that locale."""
+    assert message.from_user is not None
+    text = (message.text or "").strip()
+    language = await _language_for(pool, message.from_user.id)
+    registered = await get_registered_user(pool, message.from_user.id) is not None
+
+    mapping = {
+        t("menu.play", language): ("play", True),
+        t("menu.balance", language): ("balance", False),
+        t("menu.deposit", language): ("deposit", True),
+        t("menu.withdraw", language): ("withdraw", True),
+        t("menu.invite", language): ("invite", False),
+        t("menu.rules", language): ("rules", False),
+    }
+
+    matched = mapping.get(text)
+    if not matched:
+        if not registered:
+            await notifier.send(message.chat.id, t("register.use_button", language), reply_markup=registration_keyboard(language))
+        return
+
+    action, needs_registration = matched
+    if needs_registration and not registered:
+        await notifier.send(message.chat.id, t("error.not_registered", language))
+        return
+
+    if action == "play":
+        await cmd_play(message, pool, notifier, settings)
+    elif action == "balance":
+        await cmd_balance(message, pool, notifier)
+    elif action == "deposit":
+        empty_command = CommandObject(command="/deposit", args="")
+        await cmd_deposit(message, empty_command, pool, redis, notifier, settings)
+    elif action == "withdraw":
+        empty_command = CommandObject(command="/withdraw", args="")
+        await cmd_withdraw(message, empty_command, pool, redis, notifier, settings)
+    elif action == "invite":
+        await cmd_invite(message, pool, notifier, settings)
+    elif action == "rules":
+        await cmd_rules(message, pool, notifier)
+
+
+@router.message(F.contact)
+async def on_contact(message: Message, pool: asyncpg.Pool, notifier: Notifier) -> None:
+    """Accept shared contacts only through the dedicated contact handler
+    above; reject any stray contact object here to keep the contract
+    explicit."""
+    assert message.from_user is not None and message.contact is not None
+    language = await _language_for(pool, message.from_user.id)
+    user = await get_registered_user(pool, message.from_user.id)
+    if user is not None:
+        return
+    await notifier.send(
+        message.chat.id,
+        t("register.use_button", language),
+        reply_markup=registration_keyboard(language),
+    )
+
+
+@router.message()
+async def on_unhandled_message(message: Message, pool: asyncpg.Pool, notifier: Notifier) -> None:
+    """Final catch-all: ignore everything we do not explicitly handle.
+    Registered users get silent drop for unknown text/media; unregistered
+    users get the registration prompt."""
     assert message.from_user is not None
     user = await get_registered_user(pool, message.from_user.id)
     if user is not None:
         return
-    language = resolve_language(message.from_user.language_code)
+    language = await _language_for(pool, message.from_user.id)
     await notifier.send(
-        message.chat.id, t("register.use_button", language), reply_markup=registration_keyboard(language)
+        message.chat.id,
+        t("register.use_button", language),
+        reply_markup=registration_keyboard(language),
     )
 
 
