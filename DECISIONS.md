@@ -5,6 +5,163 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-02 — Root cause of the persistent blank-screen P0: gateway/payments/admin/bot were talking to the wrong Postgres and Redis entirely
+
+The Mini App blank-screen incident had already been through two rounds of
+fixes (the boot() hang fix and the WS-rejection logging, both 2026-09-01)
+without actually resolving it. Given SSH access to the production host
+for the first time, a live production investigation found the real root
+cause, several layers deeper than anything client-side.
+
+**The bug.** `jobingo-gateway`, `jobingo-payments`, `jobingo-admin`, and
+`jobingo-bot` are each attached to two Docker networks: their own
+`jobingo-internal`, and a shared `hermis-internal` network used only so
+this host's shared Traefik instance can route to them (this Proxmox box
+runs several unrelated apps behind one Traefik). Both networks happen to
+have a container aliased plainly `postgres`, and another aliased
+`redis` — the real `jobingo-postgres`/`jobingo-redis` on one network, and
+a completely unrelated app's Postgres/Redis on the shared network.
+Docker's per-container embedded DNS resolved the bare hostnames in
+jobingo's own `DATABASE_URL`/`REDIS_URL` ambiguously across the two
+attached networks — and for these four services, it resolved to the
+*wrong* containers. Confirmed live, from inside each container: gateway,
+payments, and admin all saw 0 tables in `pg_tables` where the real
+database has 20, and bot's Redis connection returned a `run_id` that
+matched the unrelated shared Redis, not `jobingo-redis`'s own (fetched
+directly for comparison). `jobingo-migrate`, `engine-worker`, and
+`payout-worker` are single-network (`jobingo-internal` only) and were
+never affected — which is exactly why round settlement and payouts kept
+working while the WebSocket edge every player's phone actually talks to
+was silently hitting an empty database. Gateway's own logs showed the
+smoking gun directly: 35 `asyncpg.exceptions.UndefinedTableError:
+relation "users" does not exist` crashes in a 24-second burst, each one
+*after* `telegram_auth.validate_init_data()` had already succeeded —
+meaning these were real Telegram launches with validly-signed
+`initData`, not the empty-`initData` case chased before.
+
+One partial, symptom-level fix for this exact bug already existed:
+`jobingo-bot`'s `DATABASE_URL` was hardcoded to `jobingo-postgres` (the
+unique, unambiguous alias) directly in `docker-compose.yml`'s
+`environment:` block, rather than the shared env files everyone else
+reads — someone had clearly hit this before, for bot specifically, and
+patched around it locally without recognizing it as systemic. Its Redis
+connection was never patched the same way and was still resolving to
+the wrong instance.
+
+**The fix**, applied directly to the two env files the affected services
+actually read (`deploy/.env`'s `DATABASE_URL`, and `REDIS_URL` in both
+`deploy/.env` and `config/.env`): point at the container's own unique
+alias (`jobingo-postgres`, `jobingo-redis`) instead of the ambiguous
+bare service name (`postgres`, `redis`). No networking topology changed,
+nothing on the shared host's other apps touched — Traefik still needs
+`hermis-internal` for ingress, this only changes which hostname jobingo's
+own outbound connections resolve. Verified live after recreating the
+affected containers: all four now report the real 20-table schema and
+the real Redis `run_id`, matching `jobingo-postgres`/`jobingo-redis`
+queried directly.
+
+**Impact assessment**: `payments` and `admin` had had zero real requests
+in their ~19.5 hours up (health checks only) when this was found — no
+financial data was lost or written to the wrong place. This was a live
+landmine, not a realized incident.
+
+**Also found and fixed while merging in three commits made directly on
+the production box during the same incident** (`f9a8377`, `ebb0fd0`,
+`14e1f51` — cache-busting the miniapp bundle to `app.v6.js` past
+aggressive caching, an auth-failed fallback shell for when Telegram
+doesn't supply `initData`, and resolving the bot's ReplyKeyboard button
+text per-user-language instead of exact English matching):
+
+- The auth-failed shell had its own bug that fully defeated its purpose:
+  `boot()` called `el("boot-shell")` — a `getElementById` lookup for an
+  id that was never added anywhere in `index.html` — so it returned
+  `null`, and the very next line threw `TypeError` setting `.innerHTML`
+  on it, silently reproducing the exact blank screen the shell exists to
+  prevent, for every real user hitting the empty-`initData` case. Fixed
+  by building the element fresh (`document.createElement`) instead of
+  looking one up.
+- The bot-side commit added a second `@router.message(F.contact)` async
+  def on_contact(...)` without noticing `services/bot/handlers.py`
+  already had one (the real registration flow, `ContactMismatch`/
+  `InvalidPhone` handling, referral crediting). Python allows the
+  redefinition, but mypy's `no-redef` check catches it — and since the
+  pre-existing handler is registered first and unconditionally matches
+  `F.contact`, the second one was already unreachable dead code the
+  moment it landed. Removed.
+
+**Not changed**: the `app.js` → `app.v5.js` → `app.v6.js` rename-per-deploy
+cache-busting approach, despite being a code smell (every future deploy
+renames the file again, and git tracks each as an add+delete). Flagged
+here as follow-up debt rather than fixed now, mid-incident-response —
+the correct fix is a real versioned-asset or `Cache-Control` strategy at
+the gateway's static-file serving layer, not another one-off rename.
+
+Verification: mypy clean across the merged tree; the merge itself was a
+clean, conflict-free `git merge` (no shared files edited on both sides
+except `index.html` and `app.js`/`app.v6.js`, both auto-merged
+correctly); live production verification via direct `asyncpg`/`redis`
+queries from inside each previously-broken container, both before (0
+tables / wrong Redis `run_id`) and after (20 tables / correct `run_id`)
+the fix; real production traffic completed a full WS handshake
+immediately after redeploy with no crash and no rejection logged.
+
+## 2026-09-02 — Winner's actual card rendered on the result screen, not just text
+
+A real gameplay reference video (`20260902093014.mp4`, provided directly
+this session — not a spec description of one) was located, probed with
+`ffprobe`, and frame-extracted with `ffmpeg` at both fixed intervals and
+specific high-resolution timestamps, since no native video-viewing tool
+exists here. Its winner modal (~t=69s) shows a full 5×5 card preview
+inside a decorative gold-bordered panel, with the winning pattern's
+cells clearly highlighted — the deployed result screen only ever showed
+a text amount and pattern name.
+
+Two gaps were real; a third apparent gap was investigated and
+deliberately not copied. The video's own master board colors each
+column's *called numbers* one way (B=red, I=blue, N=yellow, G=green) but
+its *recent-call circles* a different way for N and G specifically
+(N shown green, G shown gold) — a genuine inconsistency in the
+reference, not a rule to extract. Per this session's own standing
+instruction not to blindly copy reference implementation mistakes, the
+already-shipped column-color system (2026-09-02, the 45-section spec
+audit) was kept as-is — internally consistent across board, card, call
+badge, and recent-calls — rather than reproduced with the reference's
+own mismatch.
+
+**Fix**: `round_engine.py`'s `_settle_with_winners()` now includes each
+winner's own grid in the `round_end` broadcast — `self._card_pool[w.
+card_no]`, already the engine's own in-memory source of truth used to
+validate the claim in the first place, so this is zero new queries and
+zero new data. `render/card.js` gained `cellsForPattern()` (mirrors
+`packages/core/bingo.py`'s `_all_patterns()` naming exactly —
+`row_{r}`/`col_{c}`/`diag_main`/`diag_anti`/`corners` — safe to duplicate
+since it's purely presentational, never a source of truth for claim
+validity) and `renderStaticCard()`, a deliberately separate, stateless
+renderer from the live card's own singleton state (`buildCard()`/
+`setCardGrid()`), so the result screen's one-off snapshot can never
+cross-contaminate the live game card. Winning-pattern cells get a gold
+glow ring (`.card-cell.winning`, reusing the master board's existing
+`.near` ring language) layered over the normal column-color fill, rather
+than the reference's own red/green split for non-pattern cells (also
+not reproduced, same reasoning as above). `app.js`'s `round_end` handler
+was unified (`shown = mine || winners[0]`) so the same render path
+covers both "I won" and "someone else won."
+
+New test: `test_result_screen_shows_the_winning_card_preview`
+(`tests/integration/test_miniapp_e2e.py`) drives a real two-player round
+to a real completion in an actual browser and asserts the rendered card
+has exactly 25 cells, a gold FREE star, exactly 5 cells carrying
+`.winning`, and that every `.winning` cell is also `.marked` — not a DOM
+snapshot test, a real Playwright screenshot was reviewed directly
+(`/tmp/miniapp-result-card.png`) confirming the gold gradient border,
+column-colored fills, and the gold ring on the actual anti-diagonal
+winning pattern.
+
+Full clean-slate verification: mypy clean across 76 source files;
+`test_round_engine.py` 20/20; `test_miniapp_e2e.py` 10/10 (`-m e2e`,
+including the new test); full `pytest tests/` run separately (see the
+entry above for the production-fix verification run alongside it).
+
 ## 2026-09-01 — Dependency lockfiles, flagged five days ago and never picked back up
 
 The 2026-08-27 dependency vulnerability audit (elsewhere in this file)
