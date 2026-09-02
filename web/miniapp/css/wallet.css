@@ -1,0 +1,391 @@
+/* Wallet/deposit/withdraw/history screen -- spec section 2.6, and the
+   file tokens.css's own header comment has pointed at since before this
+   redesign ("Wallet/settings screens are the ones allowed to blend with
+   Telegram's theme -- see wallet.css"). Everything here reads --bg/
+   --surface/--text/--muted/--accent, the exact custom properties
+   applyWalletTheme() (app.js) overrides from Telegram's own themeParams
+   the moment the wallet opens -- a genuinely native-feeling wallet that
+   matches each player's own Telegram theme, not a fixed brand palette.
+   The game screen's own fixed dark canvas is deliberately untouched by
+   any of this (tokens.css's own comment on why: called/near/danger/gold
+   need a stable canvas or the color coding breaks under a light theme). */
+
+.wallet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.wallet-header h2 {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+
+#wallet-back-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--fs-md);
+  line-height: 1;
+}
+
+.wallet-tabs {
+  display: flex;
+  gap: 4px;
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  padding: 4px;
+  margin-bottom: 16px;
+}
+
+.wallet-tab {
+  flex: 1;
+  padding: 10px 4px;
+  text-align: center;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  border-radius: var(--radius);
+  border-bottom: none;
+}
+
+.wallet-tab.active {
+  color: var(--text);
+  background: var(--bg);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.wallet-card {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  padding: 18px;
+  margin-bottom: 12px;
+}
+
+/* --- balance pane: a hero card + secondary figures, replacing the old
+   plain label/value rows --- */
+
+.balance-hero {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.balance-hero .balance-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  background: var(--surface-2); /* fallback for engines without color-mix() */
+  background: color-mix(in srgb, var(--call) 20%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+  flex-shrink: 0;
+}
+
+.balance-hero .balance-figures {
+  min-width: 0;
+}
+
+.balance-hero .balance-label {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.balance-hero .balance-value {
+  font-family: var(--font-display);
+  font-size: var(--fs-xl);
+  color: var(--call);
+  font-variant-numeric: tabular-nums;
+}
+
+.balance-secondary {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.balance-secondary-item {
+  background: var(--bg);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+
+.balance-secondary-item .label {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+
+.balance-secondary-item .value {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+.wallet-note {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  margin-top: 14px;
+  text-align: center;
+}
+
+.wallet-note.error {
+  color: var(--danger);
+}
+
+.wallet-note.success {
+  color: var(--call);
+}
+
+/* --- amount chips (deposit quick-amounts, history filter) --- */
+
+.amount-chips {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.amount-chip {
+  flex: 1;
+  padding: 11px 0;
+  text-align: center;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  background: var(--bg);
+}
+
+.amount-chip.selected {
+  border-color: var(--accent);
+  background: var(--surface-2);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.wallet-input {
+  display: block;
+  width: 100%;
+  padding: 13px 14px;
+  margin-bottom: 10px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--fs-md);
+}
+
+.wallet-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* --- destination picker (manual deposit): selectable cards, same
+   "pick one" job the old bare <select> did, styled to match the
+   provider-choice cards real bank/mobile-money apps use --- */
+
+.destination-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.destination-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  text-align: left;
+  width: 100%;
+}
+
+.destination-card .destination-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--surface);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.destination-card .destination-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.destination-card .destination-name {
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  text-transform: capitalize;
+}
+
+.destination-card .destination-ref {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.destination-card .destination-check {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+  flex-shrink: 0;
+}
+
+.destination-card[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--surface-2);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg));
+}
+
+.destination-card[aria-pressed="true"] .destination-check {
+  border-color: var(--accent);
+  background: var(--accent);
+  position: relative;
+}
+
+.destination-card[aria-pressed="true"] .destination-check::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 5px;
+  height: 9px;
+  border-right: 2px solid var(--bg);
+  border-bottom: 2px solid var(--bg);
+  transform: translateY(-1px) rotate(45deg);
+}
+
+.destination-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* --- withdrawal summary: a live preview of what's about to be
+   submitted, filled in as the player types -- purely a read of the
+   existing form fields, no new data --- */
+
+.summary-card {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  padding: 18px;
+  margin: 14px 0;
+}
+
+.summary-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.summary-title {
+  font-weight: 700;
+  font-size: var(--fs-md);
+}
+
+.status-pill {
+  display: inline-block;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+.status-pill.pending {
+  background: color-mix(in srgb, var(--near) 22%, transparent);
+  color: var(--near);
+}
+
+.status-pill.success {
+  background: color-mix(in srgb, var(--call) 20%, transparent);
+  color: var(--call);
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px 10px;
+}
+
+.summary-grid .label {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.summary-grid .value {
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- history --- */
+
+.history-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border-radius: var(--radius);
+  margin-bottom: 8px;
+}
+
+.history-row .history-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+}
+
+.history-row.won .history-dot {
+  background: var(--call);
+}
+
+.history-row .history-main {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-sm);
+}
+
+.history-row .history-meta {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+
+.history-row.won .history-meta {
+  color: var(--call);
+  font-weight: 600;
+}

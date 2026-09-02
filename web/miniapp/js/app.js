@@ -29,6 +29,21 @@ function el(id) {
   return document.getElementById(id);
 }
 
+// For the handful of places server-sourced text (an admin-entered
+// manual payment destination's name/reference, notably) gets built into
+// innerHTML via a template literal rather than set as textContent --
+// this closes what would otherwise be a stored-XSS gap if a value ever
+// contained "<" (admin-only input, so a low-likelihood path, but a real
+// one worth not leaving open just because the blast radius is smaller).
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 // Room cards, the card-selection grid, and the AUTO toggle are plain
 // <div>s (not <button>s -- they need custom layout/styling <button>'s
 // own UA defaults would fight) -- an architecture audit caught that
@@ -863,6 +878,14 @@ el("deposit-automatic-toggle-btn").addEventListener("click", () => {
   el("deposit-manual-toggle-btn").classList.remove("hidden");
 });
 
+// method_kind values a real admin can enter (services/admin/queries.py's
+// create_manual_payment_destination_admin takes a free-ish string, not a
+// closed enum) -- a plain bank emoji covers anything not in this small
+// "recognizable brand" list rather than leaving an icon slot blank.
+const DESTINATION_ICONS = { telebirr: "📱", cbe_birr: "🏦", cbe: "🏦", awash: "🏦", boa: "🏦" };
+
+let selectedManualDestinationId = null;
+
 async function loadManualDestinations() {
   const listEl = el("deposit-manual-destinations");
   try {
@@ -872,22 +895,44 @@ async function loadManualDestinations() {
       listEl.innerHTML = `<p class="wallet-note">${t("wallet.no_manual_destinations")}</p>`;
       return;
     }
+    selectedManualDestinationId = destinations[0].id;
     listEl.innerHTML = `
-      <select id="deposit-manual-destination-select" class="wallet-input">
+      <div class="destination-list" id="deposit-manual-destination-list">
         ${destinations
-          .map((d) => `<option value="${d.id}">${d.method_kind} - ${d.account_name} (${d.account_ref})</option>`)
+          .map(
+            (d) => `
+          <button type="button" class="destination-card" data-id="${d.id}"
+                  aria-pressed="${d.id === selectedManualDestinationId}">
+            <span class="destination-icon">${DESTINATION_ICONS[d.method_kind] || "🏦"}</span>
+            <span class="destination-info">
+              <span class="destination-name">${escapeHtml(d.method_kind.replace(/_/g, " "))}</span>
+              <span class="destination-ref">${escapeHtml(d.account_name)} · ${escapeHtml(d.account_ref)}</span>
+            </span>
+            <span class="destination-check"></span>
+          </button>`
+          )
           .join("")}
-      </select>
+      </div>
       <p id="deposit-manual-instructions" class="wallet-note"></p>
     `;
-    const select = el("deposit-manual-destination-select");
     const instructionsEl = el("deposit-manual-instructions");
-    const byId = new Map(destinations.map((d) => [String(d.id), d]));
+    const byId = new Map(destinations.map((d) => [d.id, d]));
     const updateInstructions = () => {
-      const destination = byId.get(select.value);
+      const destination = byId.get(selectedManualDestinationId);
       instructionsEl.textContent = (destination && destination.instructions) || "";
     };
-    select.addEventListener("change", updateInstructions);
+    // Real <button>s -- already fully keyboard-accessible (Tab + Enter/
+    // Space) with no extra wiring, unlike the plain <div>s
+    // makeKeyboardActivatable exists for elsewhere in this file.
+    for (const card of listEl.querySelectorAll(".destination-card")) {
+      card.addEventListener("click", () => {
+        selectedManualDestinationId = Number(card.dataset.id);
+        for (const other of listEl.querySelectorAll(".destination-card")) {
+          other.setAttribute("aria-pressed", String(other === card));
+        }
+        updateInstructions();
+      });
+    }
     updateInstructions();
   } catch {
     listEl.innerHTML = `<p class="wallet-note">${t("wallet.error.generic")}</p>`;
@@ -897,8 +942,7 @@ async function loadManualDestinations() {
 el("deposit-manual-submit-btn").addEventListener("click", async () => {
   const amount = el("deposit-manual-amount-input").value;
   const reference = el("deposit-manual-reference-input").value.trim();
-  const select = el("deposit-manual-destination-select");
-  const destinationId = select ? Number(select.value) : null;
+  const destinationId = selectedManualDestinationId;
   if (!amount || Number(amount) <= 0 || !destinationId || !reference) {
     setWalletStatus("deposit-manual-status", "wallet.error.invalid_amount", "error");
     return;
@@ -927,6 +971,31 @@ el("deposit-manual-submit-btn").addEventListener("click", async () => {
 });
 
 // --- withdraw ----------------------------------------------------------
+// The summary card is a pure, read-only reflection of the three inputs
+// below it plus the request's own outcome -- no new data, nothing the
+// submit handler doesn't already have. Kept live via "input" listeners
+// so it updates as the player types, matching the reference mockups'
+// own "review before you submit" pattern.
+
+function setWithdrawSummaryStatus(text, kind) {
+  const pill = el("withdraw-summary-status");
+  pill.textContent = text;
+  pill.classList.remove("pending", "success");
+  if (kind) pill.classList.add(kind);
+}
+
+function updateWithdrawSummary() {
+  const amount = el("withdraw-amount-input").value;
+  const accountRef = el("withdraw-account-input").value.trim();
+  const holderName = el("withdraw-name-input").value.trim();
+  el("withdraw-summary-amount").textContent = `${amount || 0} ETB`;
+  el("withdraw-summary-account").textContent = accountRef || t("wallet.summary_not_provided");
+  el("withdraw-summary-holder").textContent = holderName || t("wallet.summary_not_provided");
+}
+
+for (const id of ["withdraw-amount-input", "withdraw-account-input", "withdraw-name-input"]) {
+  el(id).addEventListener("input", updateWithdrawSummary);
+}
 
 el("withdraw-submit-btn").addEventListener("click", async () => {
   const amount = el("withdraw-amount-input").value;
@@ -939,6 +1008,7 @@ el("withdraw-submit-btn").addEventListener("click", async () => {
   }
   el("withdraw-submit-btn").disabled = true;
   setWalletStatus("withdraw-status", "wallet.withdraw_submitting", null);
+  setWithdrawSummaryStatus(t("wallet.withdraw_submitting"), "pending");
   try {
     const response = await fetch("/api/withdraw", {
       method: "POST",
@@ -952,20 +1022,24 @@ el("withdraw-submit-btn").addEventListener("click", async () => {
     });
     if (response.status === 503) {
       setWalletStatus("withdraw-status", "wallet.not_available", "error");
+      setWithdrawSummaryStatus(t("wallet.summary_not_submitted"), null);
       return;
     }
     const data = await response.json();
     if (!response.ok) {
       setWalletStatus("withdraw-status", `wallet.error.${data.detail || "generic"}`, "error");
+      setWithdrawSummaryStatus(t("wallet.summary_not_submitted"), null);
       return;
     }
-    setWalletStatus(
-      "withdraw-status",
-      data.status === "approved" ? "wallet.withdraw_approved" : "wallet.withdraw_review",
-      "success"
+    const approved = data.status === "approved";
+    setWalletStatus("withdraw-status", approved ? "wallet.withdraw_approved" : "wallet.withdraw_review", "success");
+    setWithdrawSummaryStatus(
+      approved ? t("wallet.summary_approved") : t("wallet.summary_pending_approval"),
+      approved ? "success" : "pending"
     );
   } catch {
     setWalletStatus("withdraw-status", "wallet.error.generic", "error");
+    setWithdrawSummaryStatus(t("wallet.summary_not_submitted"), null);
   } finally {
     el("withdraw-submit-btn").disabled = false;
   }
@@ -1019,15 +1093,19 @@ function renderHistory() {
   }
   for (const row of filtered) {
     const line = document.createElement("div");
-    line.className = "history-row";
+    line.className = row.won ? "history-row won" : "history-row";
     const outcome = row.won
       ? t("wallet.history_won", { amount: row.won_amount })
       : t("wallet.history_lost");
+    const dot = document.createElement("span");
+    dot.className = "history-dot";
     const roundLabel = document.createElement("span");
+    roundLabel.className = "history-main";
     roundLabel.textContent = t("wallet.history_round", { seq: row.seq, stake: row.stake });
     const outcomeLabel = document.createElement("span");
     outcomeLabel.className = "history-meta";
     outcomeLabel.textContent = outcome;
+    line.appendChild(dot);
     line.appendChild(roundLabel);
     line.appendChild(outcomeLabel);
     list.appendChild(line);

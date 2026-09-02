@@ -91,6 +91,16 @@
   "wallet.manual_deposit_submitted": "Submitted for review. You'll be notified once it's approved.",
   "wallet.no_manual_destinations": "No manual payment destinations are configured right now.",
   "wallet.manual_withdraw_toggle": "Request as a manual withdrawal",
+  "wallet.summary_title": "Withdrawal Summary",
+  "wallet.summary_amount": "Amount",
+  "wallet.summary_account": "Account",
+  "wallet.summary_holder": "Account holder",
+  "wallet.summary_processing_time": "Processing time",
+  "wallet.summary_processing_time_value": "15 - 30 minutes",
+  "wallet.summary_not_provided": "Not provided",
+  "wallet.summary_not_submitted": "Not submitted",
+  "wallet.summary_pending_approval": "Pending approval",
+  "wallet.summary_approved": "Approved",
 
   "session.reminder": "You've been playing for {minutes} minutes.",
 

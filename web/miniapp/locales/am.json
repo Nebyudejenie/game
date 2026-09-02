@@ -91,6 +91,16 @@
   "wallet.manual_deposit_submitted": "ለግምገማ ገብቷል። ሲጸድቅ ይነገርዎታል።",
   "wallet.no_manual_destinations": "አሁን ምንም የተዋቀረ የክፍያ መድረሻ የለም።",
   "wallet.manual_withdraw_toggle": "እንደ በእጅ ወጪ ይጠይቁ",
+  "wallet.summary_title": "የወጪ ማጠቃለያ",
+  "wallet.summary_amount": "መጠን",
+  "wallet.summary_account": "የሂሳብ ቁጥር",
+  "wallet.summary_holder": "የሂሳብ ባለቤት ስም",
+  "wallet.summary_processing_time": "የማስኬጃ ጊዜ",
+  "wallet.summary_processing_time_value": "15 - 30 ደቂቃ",
+  "wallet.summary_not_provided": "አልቀረበም",
+  "wallet.summary_not_submitted": "ገና አልገባም",
+  "wallet.summary_pending_approval": "በመጠባበቅ ላይ",
+  "wallet.summary_approved": "ጸድቋል",
 
   "session.reminder": "ለ{minutes} ደቂቃዎች ሲጫወቱ ቆይተዋል።",
 
