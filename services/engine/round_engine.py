@@ -821,6 +821,14 @@ class RoundEngine:
                         "card_no": w.card_no,
                         "pattern": w.pattern,
                         "amount": str(share),
+                        # The result screen renders an actual winning-card
+                        # preview (spec: "Render a proper Bingo card
+                        # preview," not just text) -- self._card_pool is
+                        # already this engine's own in-memory source of
+                        # truth for every card's grid, so this is free:
+                        # no new query, no new data, just exposing what
+                        # settlement already used to validate the claim.
+                        "grid": self._card_pool[w.card_no],
                     }
                     for w, share in zip(winners, shares)
                 ],

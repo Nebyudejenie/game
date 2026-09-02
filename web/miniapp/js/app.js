@@ -599,30 +599,42 @@ ws.on("round_end", (msg) => {
   }
 
   showScreen("result");
+  const shown = mine || (msg.winners || [])[0] || null;
   if (mine) {
     el("result-title").textContent = t("result.win_title");
     el("result-title").classList.add("win");
     el("result-amount").textContent = `+ ${mine.amount} ETB`;
     el("result-meta").textContent = t("result.card_row", { card: mine.card_no, pattern: mine.pattern });
     haptics.success();
-  } else if ((msg.winners || []).length > 0) {
-    const winner = msg.winners[0];
+  } else if (shown) {
     // A winner identifier, not just a bare amount -- every other player
     // in the room previously only ever saw "someone won this much,"
     // with no sense of who. display_name is the same public identity
     // this codebase already shows a player to everyone else (admin
     // console, bot messages), not new exposure.
-    el("result-title").textContent = winner.display_name
-      ? t("result.other_winner", { name: winner.display_name })
+    el("result-title").textContent = shown.display_name
+      ? t("result.other_winner", { name: shown.display_name })
       : "";
     el("result-title").classList.remove("win");
-    el("result-amount").textContent = `${winner.amount} ETB`;
-    el("result-meta").textContent = t("result.card_row", { card: winner.card_no, pattern: winner.pattern });
+    el("result-amount").textContent = `${shown.amount} ETB`;
+    el("result-meta").textContent = t("result.card_row", { card: shown.card_no, pattern: shown.pattern });
   } else {
     el("result-title").textContent = "";
     el("result-title").classList.remove("win");
     el("result-amount").textContent = t("result.no_winner");
     el("result-meta").textContent = "";
+  }
+
+  // The actual winning card, not just a text summary -- spec: "Render a
+  // proper Bingo card preview," winning cells strongly highlighted.
+  // Every winner in this broadcast carries their own grid (round_engine
+  // .py's already-in-memory card_pool), so this works identically for
+  // "I won" and "someone else won" -- no separate code path needed.
+  if (shown && shown.grid) {
+    card.renderStaticCard(el("result-card"), shown.grid, state.round ? state.round.called : [], shown.pattern);
+    el("result-card-panel").classList.remove("hidden");
+  } else {
+    el("result-card-panel").classList.add("hidden");
   }
   renderSessionTotal();
 });

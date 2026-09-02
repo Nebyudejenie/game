@@ -467,6 +467,91 @@ async def test_verify_draw_button_shows_a_verified_seed(gateway_server, browser,
         await asyncio.wait_for(task, timeout=15)
 
 
+async def test_result_screen_shows_the_winning_card_preview(gateway_server, browser, pool, redis, card_pool, conn):
+    """Video reference `20260902093014.mp4`'s winner modal (~t=69s):
+    a full card preview, not just a text summary, with the winning
+    pattern's cells visibly highlighted. round_engine.py's round_end
+    broadcast now carries each winner's own grid (self._card_pool,
+    already in memory for settlement -- see the commit adding it), and
+    render/card.js's renderStaticCard() draws it. This proves the whole
+    path end-to-end against a round that actually completes for real.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=8, call_interval_ms=15,
+        is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    try:
+        other_player = await create_funded_user(conn)
+        assert (await engine.join(other_player, 2)).ok
+
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('0.00')", timeout=10000
+        )
+
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        assert user_row is not None
+        await fund_user(conn, user_row["id"], Decimal("100.00"))
+        await page.reload()
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('100.00')", timeout=10000
+        )
+
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page.wait_for_selector(room_selector, timeout=10000)
+        await page.click(room_selector)
+        await page.wait_for_selector("#screen-lobby.active", timeout=10000)
+        cells = await page.query_selector_all(".card-grid-cell")
+        await cells[9].click()  # card #10
+        await page.click("#lobby-cta")
+        await page.wait_for_function(
+            "document.getElementById('lobby-cta').textContent.includes('10')", timeout=5000
+        )
+
+        await page.wait_for_selector("#screen-game.active", timeout=25000)
+        await page.wait_for_selector("#screen-result.active", timeout=90000)
+
+        # Whether this player won or the other did, round_end always
+        # carries at least one winner's grid -- the panel must show it
+        # either way (app.js's `shown = mine || winners[0]` logic).
+        await page.wait_for_selector("#result-card-panel:not(.hidden)", timeout=10000)
+
+        card_cells = await page.query_selector_all("#result-card .card-cell")
+        assert len(card_cells) == 25, f"expected a full 5x5 card preview, got {len(card_cells)} cells"
+
+        free_cell = await page.query_selector("#result-card .card-cell.free")
+        assert free_cell is not None
+        assert (await free_cell.text_content()) == "★"
+
+        winning_cells = await page.query_selector_all("#result-card .card-cell.winning")
+        assert len(winning_cells) == 5, (
+            f"expected exactly 5 cells highlighted for the winning pattern, got {len(winning_cells)}"
+        )
+        # Every highlighted cell must also actually be marked-called --
+        # a winning cell that were somehow not "marked" would mean the
+        # gold ring and the column-color fill visibly disagree.
+        for cell in winning_cells:
+            classes = await cell.get_attribute("class")
+            assert "marked" in (classes or ""), f"winning cell not marked: {classes}"
+
+        await page.screenshot(path="/tmp/miniapp-result-card.png")
+        assert console_errors == [], f"JS errors during result-screen card preview: {console_errors}"
+        await page.close()
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
 async def test_voice_announcement_requests_the_correct_audio_file_for_a_call(
     gateway_server, browser, pool, redis, card_pool, conn
 ):

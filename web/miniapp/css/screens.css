@@ -251,6 +251,16 @@
   color: #1a1200;
 }
 
+/* Winning-pattern cells on the result screen's card preview (render/
+   card.js's renderStaticCard()) -- the exact cells that made this card
+   a winner, per the video reference's own "winning cells receive a
+   strong highlight" treatment. A gold glow ring layered on top of the
+   column fill, same "special to you" language --near's ring already
+   uses on the live master board, not a competing fill color. */
+.card-cell.winning {
+  box-shadow: 0 0 0 2px var(--gold), 0 0 10px 2px var(--gold);
+}
+
 /* --- 2.3 Game screen --- */
 
 .call-row {
@@ -524,6 +534,22 @@
   color: var(--muted);
   font-size: var(--fs-sm);
   margin-bottom: 20px;
+}
+
+/* The winning card itself, "displayed prominently inside a decorative
+   result container" -- a gold gradient border frames the actual 5x5
+   grid (render/card.js's renderStaticCard()), the winning-pattern cells
+   glowing via .card-cell.winning above. */
+.result-card-panel {
+  margin: -8px 0 16px;
+  padding: 12px;
+  background: linear-gradient(160deg, var(--gold), var(--accent));
+}
+
+.result-card-panel > div {
+  background: var(--bg);
+  border-radius: var(--radius);
+  padding: 10px;
 }
 
 .result-actions {

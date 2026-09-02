@@ -6,6 +6,71 @@ const HEADER = ["B", "I", "N", "G", "O"];
 let cells = []; // cells[row][col]
 let currentGrid = null;
 
+// Pattern-name -> exact [row, col] cells, mirroring packages/core/
+// bingo.py's own _all_patterns() naming exactly (row_{r}, col_{c},
+// diag_main, diag_anti, corners) -- safe to duplicate here since it's a
+// stable, purely presentational derivation (which cells to draw a ring
+// around), never a source of truth for whether a claim is actually
+// valid, which stays entirely server-side.
+function cellsForPattern(name) {
+  if (name.startsWith("row_")) {
+    const r = Number(name.slice(4));
+    return [0, 1, 2, 3, 4].map((c) => [r, c]);
+  }
+  if (name.startsWith("col_")) {
+    const c = Number(name.slice(4));
+    return [0, 1, 2, 3, 4].map((r) => [r, c]);
+  }
+  if (name === "diag_main") return [0, 1, 2, 3, 4].map((i) => [i, i]);
+  if (name === "diag_anti") return [0, 1, 2, 3, 4].map((i) => [i, 4 - i]);
+  if (name === "corners") return [[0, 0], [0, 4], [4, 0], [4, 4]];
+  return [];
+}
+
+// A one-off, stateless render for the result screen's winning-card
+// preview -- deliberately NOT sharing buildCard()/setCardGrid()'s own
+// module-level singleton state below, which belongs to the live,
+// interactively-updated game card and must never be silently
+// repurposed by a screen that only ever needs one static snapshot.
+export function renderStaticCard(container, grid, calledNumbers, winningPattern) {
+  container.innerHTML = "";
+  const calledSet = new Set(calledNumbers || []);
+  const winningCells = new Set(cellsForPattern(winningPattern || "").map(([r, c]) => `${r},${c}`));
+
+  const header = document.createElement("div");
+  header.className = "mini-card-header";
+  for (const letter of HEADER) {
+    const cell = document.createElement("div");
+    cell.textContent = letter;
+    header.appendChild(cell);
+  }
+
+  const body = document.createElement("div");
+  body.className = "mini-card";
+  for (let r = 0; r < 5; r++) {
+    for (let c = 0; c < 5; c++) {
+      const value = grid[r][c];
+      const cell = document.createElement("div");
+      const isFree = value === 0;
+      const isCalled = isFree || calledSet.has(value);
+      const isWinning = winningCells.has(`${r},${c}`);
+      cell.className = [
+        "card-cell",
+        isFree ? "free" : "",
+        isCalled ? "marked" : "",
+        isWinning ? "winning" : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      cell.textContent = isFree ? "★" : String(value);
+      body.appendChild(cell);
+    }
+  }
+
+  container.appendChild(header);
+  container.appendChild(body);
+}
+
 export function buildCard(container) {
   container.innerHTML = "";
   cells = [];
