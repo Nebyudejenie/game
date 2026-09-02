@@ -190,10 +190,19 @@
   gap: 4px;
   margin-bottom: 4px;
   text-align: center;
-  color: var(--muted);
   font-size: var(--fs-sm);
   font-weight: 700;
 }
+
+/* Header letters take their column's identity color -- both here and on
+   .board-header below. Row-major DOM order (render/card.js, render/
+   board.js both build 5 cells per row) means :nth-child(5n+1..5n) maps
+   directly to B/I/N/G/O without needing a data-column attribute. */
+.mini-card-header > :nth-child(5n+1) { color: var(--col-b); }
+.mini-card-header > :nth-child(5n+2) { color: var(--col-i); }
+.mini-card-header > :nth-child(5n+3) { color: var(--col-n); }
+.mini-card-header > :nth-child(5n+4) { color: var(--col-g); }
+.mini-card-header > :nth-child(5n)   { color: var(--col-o); }
 
 .card-cell {
   aspect-ratio: 1;
@@ -206,14 +215,40 @@
   font-weight: 600;
 }
 
+/* Uncalled: neutral background, column-colored digits -- the resting
+   -state identity the spec asks for, without competing against the
+   called/marked fill below. */
+.card-cell:nth-child(5n+1) { color: var(--col-b); }
+.card-cell:nth-child(5n+2) { color: var(--col-i); }
+.card-cell:nth-child(5n+3) { color: var(--col-n); }
+.card-cell:nth-child(5n+4) { color: var(--col-g); }
+.card-cell:nth-child(5n)   { color: var(--col-o); }
+
 .card-cell.free {
   background: var(--gold);
   color: #1a1200;
 }
 
+/* Marked: a solid fill in the cell's own column color, replacing the
+   previous uniform green -- amber (N) gets dark text like --near/--gold
+   already use elsewhere, every other column reads fine with light text. */
 .card-cell.marked {
-  background: var(--call);
-  color: #06210f;
+  color: #f5f7fb;
+}
+.card-cell.marked:nth-child(5n+1) { background: var(--col-b); }
+.card-cell.marked:nth-child(5n+2) { background: var(--col-i); }
+.card-cell.marked:nth-child(5n+3) { background: var(--col-n); color: #1a1200; }
+.card-cell.marked:nth-child(5n+4) { background: var(--col-g); color: #06210f; }
+.card-cell.marked:nth-child(5n)   { background: var(--col-o); }
+
+/* The FREE cell always lands at the N column's own :nth-child position
+   (row 2, col 2 -- render/card.js sets class="card-cell free marked" on
+   it together), so .marked:nth-child(5n+3) above would otherwise tie on
+   specificity with .free and win on source order, silently overriding
+   FREE's gold styling with N's column color. This wins that tie back. */
+.card-cell.marked.free {
+  background: var(--gold);
+  color: #1a1200;
 }
 
 /* --- 2.3 Game screen --- */
@@ -229,8 +264,32 @@
   display: flex;
   gap: 6px;
   font-size: var(--fs-sm);
-  color: var(--muted);
 }
+
+/* Small circles for the last few calls, spec section 6 -- one big
+   glowing call-badge for the current number plus a short trail of
+   smaller ones behind it, each still carrying its own column identity
+   (border only, not a solid fill -- these are secondary information,
+   the current call stays the visually dominant one). */
+.recent-calls span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.recent-calls span[data-letter="B"] { border-color: var(--col-b); color: var(--col-b); }
+.recent-calls span[data-letter="I"] { border-color: var(--col-i); color: var(--col-i); }
+.recent-calls span[data-letter="N"] { border-color: var(--col-n); color: var(--col-n); }
+.recent-calls span[data-letter="G"] { border-color: var(--col-g); color: var(--col-g); }
+.recent-calls span[data-letter="O"] { border-color: var(--col-o); color: var(--col-o); }
 
 .game-body {
   display: flex;
@@ -257,6 +316,12 @@
   margin-bottom: 3px;
 }
 
+.board-header > :nth-child(5n+1) { color: var(--col-b); }
+.board-header > :nth-child(5n+2) { color: var(--col-i); }
+.board-header > :nth-child(5n+3) { color: var(--col-n); }
+.board-header > :nth-child(5n+4) { color: var(--col-g); }
+.board-header > :nth-child(5n)   { color: var(--col-o); }
+
 .board-cell {
   aspect-ratio: 1;
   display: flex;
@@ -265,17 +330,34 @@
   background: var(--surface-2);
   border-radius: 4px;
   font-size: 10px;
-  color: var(--muted);
 }
+
+/* Uncalled: column-colored digits on the neutral background, same
+   resting-state treatment as .card-cell above. */
+.board-cell:nth-child(5n+1) { color: var(--col-b); }
+.board-cell:nth-child(5n+2) { color: var(--col-i); }
+.board-cell:nth-child(5n+3) { color: var(--col-n); }
+.board-cell:nth-child(5n+4) { color: var(--col-g); }
+.board-cell:nth-child(5n)   { color: var(--col-o); }
 
 .board-cell.called {
-  background: var(--call);
-  color: #06210f;
+  color: #f5f7fb;
 }
+.board-cell.called:nth-child(5n+1) { background: var(--col-b); }
+.board-cell.called:nth-child(5n+2) { background: var(--col-i); }
+.board-cell.called:nth-child(5n+3) { background: var(--col-n); color: #1a1200; }
+.board-cell.called:nth-child(5n+4) { background: var(--col-g); color: #06210f; }
+.board-cell.called:nth-child(5n)   { background: var(--col-o); }
 
+/* "Near" means "called AND on your own card" (render/board.js), not
+   pattern proximity -- a real gameplay aid worth keeping distinct from
+   plain column identity. Layered as a glow ring on top of the column
+   fill above (not a competing background color) so both pieces of
+   information -- which column, and "this one's yours" -- stay visible
+   at once, using the same gold this app's FREE space already means
+   "special to you" with. */
 .board-cell.near {
-  background: var(--near);
-  color: #1a1200;
+  box-shadow: 0 0 0 2px var(--gold), 0 0 6px 1px var(--gold);
 }
 
 .call-panel {
@@ -299,14 +381,32 @@
   font-size: var(--fs-xl);
   transform: scale(0.8);
   opacity: 0;
-  transition: transform 240ms ease, opacity 240ms ease;
+  transition: transform 240ms ease, opacity 240ms ease, border-color 240ms ease;
 }
+
+/* Column identity on the one element the spec calls out specifically
+   ("large glowing circular element... column-specific visual
+   identity") -- data-letter is set alongside the badge's own text
+   (app.js's "call" handler), so this always matches what the circle
+   actually reads. Falls back to the plain gold border above before the
+   first call of a round sets it. */
+.call-badge[data-letter="B"] { border-color: var(--col-b); }
+.call-badge[data-letter="I"] { border-color: var(--col-i); }
+.call-badge[data-letter="N"] { border-color: var(--col-n); }
+.call-badge[data-letter="G"] { border-color: var(--col-g); }
+.call-badge[data-letter="O"] { border-color: var(--col-o); }
 
 .call-badge.show {
   transform: scale(1);
   opacity: 1;
   box-shadow: 0 0 24px 0 var(--gold);
 }
+
+.call-badge[data-letter="B"].show { box-shadow: 0 0 24px 0 var(--col-b); }
+.call-badge[data-letter="I"].show { box-shadow: 0 0 24px 0 var(--col-i); }
+.call-badge[data-letter="N"].show { box-shadow: 0 0 24px 0 var(--col-n); }
+.call-badge[data-letter="G"].show { box-shadow: 0 0 24px 0 var(--col-g); }
+.call-badge[data-letter="O"].show { box-shadow: 0 0 24px 0 var(--col-o); }
 
 @media (prefers-reduced-motion: reduce) {
   .call-badge {

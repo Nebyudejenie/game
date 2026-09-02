@@ -8947,6 +8947,103 @@ source files, `pytest tests/` 926 passed / 39 deselected, full `-m e2e`
 visually reviewed for the balance, deposit, withdraw (with the live
 summary card mid-flow), and history panes.
 
+## 2026-09-02 — A 45-section gameplay spec audited against the real implementation; two real gaps closed
+
+The user supplied an extremely detailed 45-section spec describing "a
+gameplay reference video" and asked for the game to be rebuilt to match
+it. No video file was actually attached to the message -- flagged this
+directly rather than pretending to have watched footage that was never
+received, and treated the text as the complete spec. Reading it closely,
+it describes -- almost point for point -- the system this codebase
+already is: 75-ball Bingo with exact B/I/N/G/O ranges, a real 80/20
+payout split, server-authoritative provably-fair commit-reveal draw
+(stronger than the spec's own "deterministic replay" bar), a real round
+state machine, atomic card reservation, reconnect-with-snapshot
+recovery, server-validated claims, an already-fixed simultaneous-winner
+race, full Decimal money handling, and extensive real test coverage --
+built and hardened over many prior sessions. Rebuilding from scratch
+would have thrown away all of that for no real gain, so this was treated
+as a gap-audit against the real code (a background Explore agent
+checked all 45 sections directly against source, citing file:line for
+each), not a rewrite.
+
+**Confirmed correct, no action needed**: the 20% house cut / 80% payout
+split (`rooms.house_cut_bps`, admin-configurable, `services/engine/
+settlement.py`) matches the user's own observed 928/1160 and 896/1120
+examples exactly; the 100-card pool size, while a hardcoded constant
+(`packages/core/bingo.py`'s `_POOL_SIZE`), is *deliberately* fixed --
+its own comment explains card #47 must always be the same grid across
+every deployment forever, a real "your lucky card" product guarantee,
+not an oversight, so left untouched; the 50ms multi-winner tie window is
+an already-tested, already-correct engineering parameter, not a business
+policy needing a config knob.
+
+**Fixed -- column-specific visual identity** (spec sections 6-8, 18,
+31: "column-specific visual identity," explicitly called out on both
+the master 75-number board and the large current-call circle). The
+board previously used only functional state colors (uncalled/called/
+"near"=on-your-own-card/free) with no B/I/N/G/O distinction at all.
+Implemented purely in CSS via `:nth-child(5n+1..5n)` selectors --
+`render/board.js` and `render/card.js` both already build cells in
+row-major 5-column DOM order, so column identity needed no JS/HTML
+changes at all for the board or the player's card. New tokens `--col-b`
+(red) `--col-i` (blue) `--col-n` (amber) `--col-g` (reuses `--call`
+green) `--col-o` (reuses `--accent` purple) in `tokens.css`. Uncalled
+cells: neutral background, column-colored digits. Called cells: solid
+column-colored fill (N gets dark text, matching the existing `--near`/
+`--gold` precedent for amber backgrounds). The existing "near" highlight
+(called AND on your own card -- a real gameplay aid, not pattern
+-proximity despite the name) is now a gold glow ring layered on top of
+the column fill via `box-shadow`, rather than a competing background
+color, so both pieces of information stay visible together. Also
+colored the large call-badge's border/glow and the recent-calls chips
+by column (`app.js` now sets `dataset.letter` on both, matching text it
+already writes).
+
+**A real specificity bug caught before it shipped**: the player's own
+card's FREE cell always lands at the N column's own `:nth-child`
+position (row 2, col 2 is literally the N column's center), and
+`render/card.js` applies `class="card-cell free marked"` to it together
+-- `.card-cell.marked:nth-child(5n+3)`'s column-color rule and
+`.card-cell.free`'s gold rule tie on specificity, and the marked rule
+would have won on source order, silently replacing FREE's gold with
+N's amber. Caught by actually reasoning through the DOM position (not
+assumed), fixed with an explicit `.card-cell.marked.free` override
+placed after the column rules. Verified visually via real Playwright
+screenshots of a live game screen (recent-calls circles, the glowing
+call-badge, the master board, and the player's own card, including a
+correctly-gold FREE star) before trusting the CSS math.
+
+**Fixed -- winner identity on the result screen for non-winning
+players** (spec section 13: "a winner identifier... [PLAYER
+IDENTIFIER] has won the game," not just a bare amount). The `round_end`
+broadcast (`services/engine/round_engine.py`'s `_settle_with_winners()`)
+previously carried only a winner's `user_id` -- not a real display
+value -- so every player *other* than the winner saw an amount with no
+sense of who won. Added `display_name` to the broadcast (a single
+batched `SELECT ... WHERE id = ANY($1)` inside the existing settlement
+transaction, reusing the same public-facing identity this codebase
+already shows a player to everyone else -- admin console, bot messages
+-- not new exposure) and wired it into `app.js`'s result-screen handler
+as `"{name} won!"`, alongside the winning card/pattern (previously shown
+only to the winner). Caught and fixed a related pre-existing bug while
+touching this code: the "no winner, full refund" branch never removed
+the `.win` CSS class either, so a stale "you won" title style could
+persist visually into a refund screen after a previous round's win.
+
+New regression test, `test_round_end_broadcast_includes_the_winners_
+display_name` (`tests/integration/test_round_engine.py`): subscribes
+directly to the room's real Redis pub/sub channel (matching `conftest.py`'s
+existing `recv_balance_update()` pattern, generalized to the room
+channel), runs a real two-player round to a real claim, and asserts the
+actual broadcast a losing player's own connection would receive
+carries the correct `display_name` -- confirmed to fail
+(`KeyError: 'display_name'`) against the reverted code first.
+
+Full clean-slate verification: mypy clean across 76 source files,
+`pytest tests/` 926 passed / 39 deselected, full `test_miniapp_e2e.py`
+9/9 (`-m e2e`), `test_round_engine.py` 20/20.
+
 ## Pre-existing repo state noted, not touched
 
 This directory already had a `.git` folder with `origin` pointing to

@@ -777,6 +777,20 @@ class RoundEngine:
                     derash,
                     self._server_seed,
                 )
+
+                # For the result screen's own "X has won!" line (spec: a
+                # winner identifier, not just a bare amount) -- every
+                # *other* player in the room only ever learned a winner's
+                # user_id before this, which isn't a real display value.
+                # display_name is the same public-facing identity this
+                # codebase already uses everywhere else a player is shown
+                # to someone other than themselves (admin console, bot
+                # messages) -- not new exposure, just reusing it here too.
+                display_name_rows = await conn.fetch(
+                    "SELECT id, display_name FROM users WHERE id = ANY($1::bigint[])",
+                    [w.user_id for w in winners],
+                )
+                display_names = {row["id"]: row["display_name"] for row in display_name_rows}
             # Only reachable once the transaction above has actually
             # committed -- see ledger.post()'s own comment for why it
             # can't safely record this itself when called nested, which
@@ -803,6 +817,7 @@ class RoundEngine:
                 "winners": [
                     {
                         "user_id": w.user_id,
+                        "display_name": display_names.get(w.user_id, ""),
                         "card_no": w.card_no,
                         "pattern": w.pattern,
                         "amount": str(share),

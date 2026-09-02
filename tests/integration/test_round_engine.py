@@ -4,6 +4,7 @@ review line by line.
 """
 
 import asyncio
+import json
 from decimal import Decimal
 
 import pytest
@@ -458,6 +459,65 @@ async def test_claim_settlement_pushes_a_live_balance_update_to_the_winner(pool,
 
         push = await recv_balance_update(redis, user_a, _claim)
         assert Decimal(push["cash"]) > Decimal("0.00")
+
+        await wait_until(lambda: engine.status == "idle", timeout=5)
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
+async def test_round_end_broadcast_includes_the_winners_display_name(pool, redis, card_pool, conn):
+    # A code-review pass caught that round_end's own "winners" list only
+    # ever carried user_id -- not a real display value -- so every player
+    # OTHER than the winner had no way to show who actually won, only a
+    # bare amount. Confirms the broadcast itself (not just the DB row)
+    # carries the same public display_name this codebase already shows a
+    # player to everyone else elsewhere (admin console, bot messages).
+    room_id = await create_room(conn, stake=Decimal("20.00"), min_players=2, call_interval_ms=15)
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        user_a = await create_funded_user(conn)
+        user_b = await create_funded_user(conn)
+        card_a = 1
+        assert (await engine.join(user_a, card_a, auto_mark=False)).ok
+        assert (await engine.join(user_b, 2, auto_mark=False)).ok
+
+        expected_name = await conn.fetchval("SELECT display_name FROM users WHERE id = $1", user_a)
+        assert expected_name  # create_user() always sets one -- sanity-check the fixture, not this feature
+
+        await wait_until(lambda: engine.status == "running", timeout=5)
+        grid_a = card_pool[card_a]
+
+        def a_ready() -> bool:
+            return bool(bingo.winning_patterns(grid_a, engine._called, room.win_patterns))  # noqa: SLF001
+
+        await wait_until(a_ready, timeout=10)
+
+        pubsub = redis.pubsub()
+        await pubsub.subscribe(f"room:{room_id}")
+        try:
+            result = await engine.claim(user_a)
+            assert result.ok, result.reason
+
+            round_end_msg = None
+            for _ in range(50):  # other message types (call, etc.) share this same channel
+                raw = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if raw is None:
+                    continue
+                decoded = json.loads(raw["data"])
+                if decoded.get("t") == "round_end":
+                    round_end_msg = decoded
+                    break
+            assert round_end_msg is not None, "round_end was never published"
+        finally:
+            await pubsub.unsubscribe(f"room:{room_id}")
+            await pubsub.aclose()
+
+        assert len(round_end_msg["winners"]) == 1
+        assert round_end_msg["winners"][0]["user_id"] == user_a
+        assert round_end_msg["winners"][0]["display_name"] == expected_name
 
         await wait_until(lambda: engine.status == "idle", timeout=5)
     finally:

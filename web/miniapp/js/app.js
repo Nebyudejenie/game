@@ -414,6 +414,7 @@ ws.on("call", (msg) => {
 
   const badge = el("call-badge");
   badge.textContent = `${msg.letter}${msg.number}`;
+  badge.dataset.letter = msg.letter;
   badge.classList.remove("show");
   void badge.offsetWidth; // restart the CSS animation
   badge.classList.add("show");
@@ -429,6 +430,7 @@ function pushRecentCall(msg) {
   const recent = el("recent-calls");
   const chip = document.createElement("span");
   chip.textContent = `${msg.letter}${msg.number}`;
+  chip.dataset.letter = msg.letter;
   recent.insertBefore(chip, recent.firstChild);
   while (recent.children.length > 3) recent.removeChild(recent.lastChild);
 }
@@ -605,11 +607,20 @@ ws.on("round_end", (msg) => {
     haptics.success();
   } else if ((msg.winners || []).length > 0) {
     const winner = msg.winners[0];
-    el("result-title").textContent = "";
+    // A winner identifier, not just a bare amount -- every other player
+    // in the room previously only ever saw "someone won this much,"
+    // with no sense of who. display_name is the same public identity
+    // this codebase already shows a player to everyone else (admin
+    // console, bot messages), not new exposure.
+    el("result-title").textContent = winner.display_name
+      ? t("result.other_winner", { name: winner.display_name })
+      : "";
+    el("result-title").classList.remove("win");
     el("result-amount").textContent = `${winner.amount} ETB`;
-    el("result-meta").textContent = t("result.session_line", { sign: "-", amount: stake });
+    el("result-meta").textContent = t("result.card_row", { card: winner.card_no, pattern: winner.pattern });
   } else {
     el("result-title").textContent = "";
+    el("result-title").classList.remove("win");
     el("result-amount").textContent = t("result.no_winner");
     el("result-meta").textContent = "";
   }

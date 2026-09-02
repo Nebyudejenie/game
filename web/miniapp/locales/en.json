@@ -30,6 +30,7 @@
   "spectate.reserve": "Reserve a card",
 
   "result.win_title": "You won!",
+  "result.other_winner": "{name} won!",
   "result.card_row": "Card {card} — {pattern}",
   "result.won_on_call": "Won on call {index} of {total}",
   "result.session_line": "This session: {sign}{amount} ETB",

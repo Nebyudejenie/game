@@ -16,6 +16,21 @@
   --gold: #FFC94A;
   --accent: #7C5CFF;
 
+  /* Per-column B/I/N/G/O identity (spec: "column-specific visual
+     identity" on the master board and player card) -- deliberately
+     separate from the functional call/near/gold tokens above, which
+     keep their own meaning (a called number, a called number that's on
+     your own card, the FREE space) layered on top of these via a glow
+     ring rather than competing for the same fill color. --col-g reuses
+     --call and --col-o reuses --accent on purpose (already the right
+     hue, and a green G / purple O both read as sensible mnemonics) --
+     the other three are new. */
+  --col-b: #EF4444;
+  --col-i: #3B82F6;
+  --col-n: #F59E0B;
+  --col-g: var(--call);
+  --col-o: var(--accent);
+
   --border: #262E3D;
 
   --fs-display: 40px;

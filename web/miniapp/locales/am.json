@@ -30,6 +30,7 @@
   "spectate.reserve": "ካርድ ያዝ",
 
   "result.win_title": "ገበያ ደረሰ!",
+  "result.other_winner": "{name} አሸንፈዋል!",
   "result.card_row": "ካርድ {card} — {pattern}",
   "result.won_on_call": "በጥሪ {index} ከ{total} ላይ አሸነፉ",
   "result.session_line": "የዚህ ክፍለ ጊዜ: {sign}{amount} ብር",
