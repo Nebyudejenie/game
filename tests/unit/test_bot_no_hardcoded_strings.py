@@ -19,8 +19,11 @@ from pathlib import Path
 HANDLERS_PATH = Path(__file__).parent.parent.parent / "services" / "bot" / "handlers.py"
 
 # Constructors whose string argument is a protocol identifier (a command
-# name, a router name), never user-facing text.
-_EXEMPT_CALL_NAMES = {"Command", "Router"}
+# name, a router name), never user-facing text. CommandObject is the same
+# category as Command -- a synthetic command dispatch (on_menu_text builds
+# one to route a ReplyKeyboard press through the same handler a typed
+# "/deposit" would hit) carries a bot-command name, not display text.
+_EXEMPT_CALL_NAMES = {"Command", "CommandObject", "Router"}
 
 # Database methods whose first argument is a SQL string, not user text.
 _SQL_METHOD_NAMES = {"fetchrow", "fetch", "fetchval", "execute"}

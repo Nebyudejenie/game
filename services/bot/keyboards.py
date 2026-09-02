@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from enum import Enum
+
 from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -11,6 +13,23 @@ from aiogram.types import (
 )
 
 from services.bot.i18n import t
+
+
+class MenuAction(Enum):
+    """Internal routing tags for main_menu_keyboard()'s buttons -- never
+    displayed to a user (the button text itself always comes from
+    t("menu.*", language)). Defined here, not in handlers.py, so these
+    aren't raw string literals in the one file
+    tests/unit/test_bot_no_hardcoded_strings.py holds to "every
+    user-facing string comes from i18n.t(...)".
+    """
+
+    PLAY = "play"
+    BALANCE = "balance"
+    DEPOSIT = "deposit"
+    WITHDRAW = "withdraw"
+    INVITE = "invite"
+    RULES = "rules"
 
 
 def registration_keyboard(language: str) -> ReplyKeyboardMarkup:

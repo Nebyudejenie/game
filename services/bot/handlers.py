@@ -20,6 +20,7 @@ from packages.core.config import Settings
 from services.bot import referral
 from services.bot.i18n import SUPPORTED_LANGUAGES, resolve_language, t
 from services.bot.keyboards import (
+    MenuAction,
     deposit_checkout_keyboard,
     main_menu_keyboard,
     open_wallet_keyboard,
@@ -591,12 +592,12 @@ async def on_menu_text(message: Message, pool: asyncpg.Pool, redis: Redis, notif
     registered = await get_registered_user(pool, message.from_user.id) is not None
 
     mapping = {
-        t("menu.play", language): ("play", True),
-        t("menu.balance", language): ("balance", False),
-        t("menu.deposit", language): ("deposit", True),
-        t("menu.withdraw", language): ("withdraw", True),
-        t("menu.invite", language): ("invite", False),
-        t("menu.rules", language): ("rules", False),
+        t("menu.play", language): (MenuAction.PLAY, True),
+        t("menu.balance", language): (MenuAction.BALANCE, False),
+        t("menu.deposit", language): (MenuAction.DEPOSIT, True),
+        t("menu.withdraw", language): (MenuAction.WITHDRAW, True),
+        t("menu.invite", language): (MenuAction.INVITE, False),
+        t("menu.rules", language): (MenuAction.RULES, False),
     }
 
     matched = mapping.get(text)
@@ -610,19 +611,19 @@ async def on_menu_text(message: Message, pool: asyncpg.Pool, redis: Redis, notif
         await notifier.send(message.chat.id, t("error.not_registered", language))
         return
 
-    if action == "play":
+    if action == MenuAction.PLAY:
         await cmd_play(message, pool, notifier, settings)
-    elif action == "balance":
+    elif action == MenuAction.BALANCE:
         await cmd_balance(message, pool, notifier)
-    elif action == "deposit":
-        empty_command = CommandObject(command="/deposit", args="")
+    elif action == MenuAction.DEPOSIT:
+        empty_command = CommandObject(command="deposit", args="")
         await cmd_deposit(message, empty_command, pool, redis, notifier, settings)
-    elif action == "withdraw":
-        empty_command = CommandObject(command="/withdraw", args="")
+    elif action == MenuAction.WITHDRAW:
+        empty_command = CommandObject(command="withdraw", args="")
         await cmd_withdraw(message, empty_command, pool, redis, notifier, settings)
-    elif action == "invite":
+    elif action == MenuAction.INVITE:
         await cmd_invite(message, pool, notifier, settings)
-    elif action == "rules":
+    elif action == MenuAction.RULES:
         await cmd_rules(message, pool, notifier)
 
 
