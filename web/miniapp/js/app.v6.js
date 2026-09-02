@@ -1235,7 +1235,12 @@ async function boot() {
   if (!hasInitData) {
     // Show an explicit auth-failure shell so the player never sees a
     // featureless black screen if Telegram did not provide initData.
-    const shell = el("boot-shell");
+    // A fresh element, not el("boot-shell") -- no such id exists in
+    // index.html, so that lookup returned null and threw on the next
+    // line, silently reproducing the exact blank screen this was
+    // meant to fix.
+    const shell = document.createElement("div");
+    shell.id = "boot-shell";
     shell.innerHTML = `
       <div class="boot-shell">
         <div class="boot-shell-title">${t("error.generic")}</div>

@@ -626,23 +626,6 @@ async def on_menu_text(message: Message, pool: asyncpg.Pool, redis: Redis, notif
         await cmd_rules(message, pool, notifier)
 
 
-@router.message(F.contact)
-async def on_contact(message: Message, pool: asyncpg.Pool, notifier: Notifier) -> None:
-    """Accept shared contacts only through the dedicated contact handler
-    above; reject any stray contact object here to keep the contract
-    explicit."""
-    assert message.from_user is not None and message.contact is not None
-    language = await _language_for(pool, message.from_user.id)
-    user = await get_registered_user(pool, message.from_user.id)
-    if user is not None:
-        return
-    await notifier.send(
-        message.chat.id,
-        t("register.use_button", language),
-        reply_markup=registration_keyboard(language),
-    )
-
-
 @router.message()
 async def on_unhandled_message(message: Message, pool: asyncpg.Pool, notifier: Notifier) -> None:
     """Final catch-all: ignore everything we do not explicitly handle.
