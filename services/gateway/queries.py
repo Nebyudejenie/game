@@ -128,15 +128,29 @@ async def held_card_no_for_round(pool: asyncpg.Pool, round_id: int, user_id: int
 
 
 async def user_history(pool: asyncpg.Pool, user_id: int, limit: int = 10) -> list[dict[str, Any]]:
+    # One row per *round* the user took part in, not one row per card --
+    # a player can hold several cards in the same round now. The old
+    # LEFT JOIN matched only (round_id, user_id), so a user holding N
+    # cards in a round with M of their own winning cards produced N*M
+    # result rows (every entry row joined against every one of that
+    # user's winner rows in the round, not just its own card's) -- a real
+    # multiplicative blowup, not just cosmetic duplication. Scoping the
+    # join to the entry's own card_no makes each entry match at most one
+    # winner row; grouping by round and summing amount mirrors
+    # app.v6.js's own round_end fix (a player who won on two of their own
+    # cards in one round shows one round with the combined amount, not
+    # two rows).
     rows = await pool.fetch(
         """
         SELECT rd.id, rd.seq, rd.stake, rd.ended_at,
-               (rw.round_id IS NOT NULL) AS won,
-               rw.amount AS won_amount
+               count(rw.round_id) > 0 AS won,
+               sum(rw.amount) AS won_amount
         FROM round_entries re
         JOIN rounds rd ON rd.id = re.round_id
-        LEFT JOIN round_winners rw ON rw.round_id = re.round_id AND rw.user_id = re.user_id
+        LEFT JOIN round_winners rw
+            ON rw.round_id = re.round_id AND rw.user_id = re.user_id AND rw.card_no = re.card_no
         WHERE re.user_id = $1 AND rd.status IN ('done', 'voided')
+        GROUP BY rd.id, rd.seq, rd.stake, rd.ended_at
         ORDER BY rd.ended_at DESC NULLS LAST
         LIMIT $2
         """,

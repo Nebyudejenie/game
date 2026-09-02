@@ -578,6 +578,55 @@ async def test_repeat_room_pairings_flags_a_lopsided_recurring_pair(pool, conn, 
     assert not any({p["user_a"], p["user_b"]} == {winner_id, other_id} for p in pairings)
 
 
+async def test_repeat_room_pairings_does_not_inflate_shared_rounds_for_multi_card_players(
+    pool, conn, card_pool
+):
+    # A player can hold several cards in the same round now -- joining
+    # round_entries to itself on round_id alone (as the query used to)
+    # means two users each holding 3 cards in ONE shared round produce
+    # 3*3 = 9 raw pair rows for that round, not 1. Two users sharing
+    # exactly one round, each with 3 cards, two of user_a's cards
+    # winning, must score shared_rounds == 1 (not 9) and each side's
+    # *_wins == 1 (one round won, not two winning card-entries counted
+    # as two rounds).
+    room_id = await create_room(conn)
+    user_a = await create_user(conn)
+    user_b = await create_user(conn)
+
+    row = await conn.fetchrow(
+        "INSERT INTO rounds (room_id, seq, status, stake, house_cut_bps, server_seed_hash) "
+        "VALUES ($1, 1, 'done', 20.00, 2000, 'test-hash') RETURNING id",
+        room_id,
+    )
+    round_id = row["id"]
+    await conn.execute(
+        """
+        INSERT INTO round_entries (round_id, card_no, user_id) VALUES
+            ($1, 1, $2), ($1, 2, $2), ($1, 3, $2),
+            ($1, 4, $3), ($1, 5, $3), ($1, 6, $3)
+        """,
+        round_id,
+        user_a,
+        user_b,
+    )
+    await conn.execute(
+        "INSERT INTO round_winners (round_id, user_id, card_no, pattern, won_on_call, amount) "
+        "VALUES ($1, $2, 1, 'row', 10, 16.00), ($1, $2, 2, 'col', 12, 16.00)",
+        round_id,
+        user_a,
+    )
+
+    pairings = await queries.repeat_room_pairings(pool, min_shared_rounds=1, since_days=30)
+    matches = [p for p in pairings if {p["user_a"], p["user_b"]} == {user_a, user_b}]
+    assert len(matches) == 1, matches
+    pairing = matches[0]
+    assert pairing["shared_rounds"] == 1, pairing
+    a_wins = pairing["user_a_wins"] if pairing["user_a"] == user_a else pairing["user_b_wins"]
+    b_wins = pairing["user_a_wins"] if pairing["user_a"] == user_b else pairing["user_b_wins"]
+    assert a_wins == 1, "two winning cards in one round must count as one round won, not two"
+    assert b_wins == 0
+
+
 async def test_void_round_admin_refunds_and_is_idempotent(pool, redis, card_pool, conn):
     admin_id, *_ = await create_test_admin(pool)
     room_id = await create_room(conn, stake=Decimal("15.00"), min_players=5, lobby_seconds=1)

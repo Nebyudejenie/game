@@ -1032,6 +1032,48 @@ async def test_history_command_lists_a_real_completed_round(pool, conn, card_poo
     assert "won" in text or "አሸንፈዋል" in text
 
 
+async def test_history_command_lists_a_round_once_even_with_two_winning_cards(
+    pool, conn, card_pool, bot_ctx
+):
+    # A player can hold several cards in the same round now -- the old
+    # LEFT JOIN (round_id, user_id) matched every entry row against
+    # every one of the user's own winner rows in that round, so 2 cards
+    # x 2 winning cards produced 4 result rows for what is genuinely one
+    # round. Proves cmd_history()'s own copy of the fixed query (see its
+    # comment pointing at services/gateway/queries.py::user_history())
+    # still sends exactly one "Round #1" line, not two or four.
+    from tests.integration.conftest import create_room
+
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+    user_id = await pool.fetchval("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+
+    room_id = await create_room(conn)
+    round_row = await conn.fetchrow(
+        "INSERT INTO rounds (room_id, seq, status, stake, house_cut_bps, server_seed_hash, ended_at) "
+        "VALUES ($1, 1, 'done', 20.00, 2000, 'test-hash', now()) RETURNING id",
+        room_id,
+    )
+    await conn.execute(
+        "INSERT INTO round_entries (round_id, card_no, user_id) VALUES ($1, 5, $2), ($1, 6, $2)",
+        round_row["id"],
+        user_id,
+    )
+    await conn.execute(
+        "INSERT INTO round_winners (round_id, user_id, card_no, pattern, won_on_call, amount) "
+        "VALUES ($1, $2, 5, 'row', 12, 16.00), ($1, $2, 6, 'col', 14, 16.00)",
+        round_row["id"],
+        user_id,
+    )
+
+    await dp.feed_update(bot, make_text_update(telegram_id, "/history"))
+    await _settle()
+
+    assert len(session.sent) == 1
+    text = session.sent[0].text
+    assert text.count("#1") == 1, f"expected exactly one round line, got: {text!r}"
+
+
 async def test_invite_command_rejects_unregistered_user(bot_ctx):
     dp, bot, session = bot_ctx
     telegram_id = next_telegram_id()

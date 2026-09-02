@@ -5,6 +5,95 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-02 — Multi-card-per-player, Phase 5: the two deferred accuracy fixes + remaining test coverage
+
+Closes out `/home/prophet/.claude/plans/graceful-snacking-quail.md`'s final
+phase: the two accuracy issues Phase 2+3 explicitly deferred, plus the
+test coverage the plan called for and hadn't been written yet.
+
+**`user_history()` (`services/gateway/queries.py`) fixed for real, not
+just deduplicated.** The deferred description undersold the actual bug:
+the old `LEFT JOIN round_winners rw ON rw.round_id = re.round_id AND
+rw.user_id = re.user_id` matches on `(round_id, user_id)` only, so a
+player holding N cards in a round where M of their own cards won
+produces N*M result rows for that one round -- a real multiplicative
+blowup (2 cards x 2 winners = 4 rows), not the "one row per card"
+duplication the deferral note described. Fixed by scoping the join to
+the entry's own `card_no` too (so each entry matches at most one winner
+row) and `GROUP BY` round with `sum(rw.amount)` -- mirrors `app.v6.js`'s
+own `round_end` fix from Phase 4, so a player who won on two cards in
+one round sees one round with the combined amount everywhere, not just
+on the result screen.
+
+**The exact same bug, independently duplicated in `services/bot/
+handlers.py::cmd_history()`.** The bot's `/history` command has its own
+inline copy of this query rather than calling the shared function --
+same fix applied there too (documented as a cross-reference in a
+comment, not restructured into a shared call, to avoid coupling the bot
+service to the gateway module under this pass).
+
+**`repeat_room_pairings()` (`services/admin/queries.py`) fixed for the
+same reason.** The `pairs` CTE joins `round_entries` to itself on
+`round_id` alone, so two users each holding 3 cards in one shared round
+produced 3*3 = 9 raw pair rows for that single round, inflating
+`shared_rounds` -- exactly the collusion-detection quadratic-inflation
+issue the plan named. `count(DISTINCT round_id)`/`array_agg(DISTINCT
+round_id)` in the CTE, and `count(DISTINCT w.round_id)` in the two
+`user_a_wins`/`user_b_wins` subqueries (a second, smaller instance of
+the same bug: a mutual two-card win in one round would otherwise have
+counted as two wins of the pair, not one).
+
+**New test coverage**, each verified by deliberately reverting its fix
+and confirming the test actually fails against the bug it claims to
+catch (not just passing and trusted):
+- `test_round_engine.py::test_same_user_two_different_winning_cards_
+  both_paid` extended with a `user_history()` assertion -- reverting the
+  join fix reproduces the exact 4-row blowup predicted above.
+- `test_bot_handlers.py::test_history_command_lists_a_round_once_even_
+  with_two_winning_cards` -- same 4-row blowup, independently confirmed
+  against the bot's own copy of the query.
+- `test_admin_queries.py::test_repeat_room_pairings_does_not_inflate_
+  shared_rounds_for_multi_card_players` -- reverting reproduces
+  `shared_rounds == 9` for two users each holding 3 cards in one round.
+- `test_round_engine.py::test_false_claim_lockout_is_per_card_not_per_
+  player` -- a false claim locks out only that card; a different,
+  genuinely winning card the same player holds is unaffected. Verified
+  by simulating a per-user (not per-card) lockout and confirming the
+  test catches it.
+- `test_round_engine.py::test_multi_card_stake_drop_and_void_refund_
+  reconciles_cleanly` -- 3 cards taken (3 real stakes), one dropped
+  during the lobby (its own real refund), the round then force-voided
+  through the exact `refund_round_in_transaction()` path crash recovery
+  uses, `ledger.reconcile()` clean throughout. Verified by reverting
+  that function's per-card idempotency key and confirming the balance
+  comes back short (90.00 instead of 100.00) rather than the count-only
+  assertions silently passing.
+
+**Re-verified, not re-written** (plan's own "shape stays valid" check):
+`test_max_players_cap_holds_under_real_concurrent_joins` and
+`test_insufficient_balance_join_rejected_no_partial_state` never exercise
+more than one card per user, so `player_count()`'s distinct-user
+semantics are equivalent to the old raw count for both -- confirmed by
+reading, not assumed. `test_load_rush.py`'s 1000-players-rush-100-cards
+test assigns each of 1000 *distinct* users exactly one card each, so it
+never touches `max_cards_per_player` capacity logic either; re-run
+standalone (`-m load`) to confirm real concurrency still holds: 100/100
+cards allocated, zero double-sold. Two unrelated `-m load` p99-latency
+tests (`test_gateway_fanout.py`, `test_load_multiroom.py` -- pure
+WebSocket broadcast fanout timing, no card-allocation code in their
+path) failed only when run as part of the full load batch under this
+session's own real shared-host contention (confirmed via `docker ps`/
+`ps aux`: `santim-commerce-*`, `spos-*`, plus this session's own tooling,
+all running concurrently); both passed cleanly standalone (262.8ms and
+284.7ms respectively, under the 300ms budget) -- the same documented
+shared-host sensitivity noted elsewhere in this file, not a regression.
+
+Full clean-slate verification: mypy clean (79 files); `pytest tests/`
+full default suite green -- 939 passed (four new), 41 deselected, 0
+failed.
+
+---
+
 ## 2026-09-02 — Multi-card-per-player, Phase 4: the Mini App frontend
 
 The frontend half of `/home/prophet/.claude/plans/graceful-snacking-quail.md`,

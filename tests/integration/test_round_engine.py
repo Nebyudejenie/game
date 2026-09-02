@@ -10,8 +10,9 @@ from decimal import Decimal
 import pytest
 
 from packages.core import bingo, ledger
-from services.engine import round_engine, settlement
+from services.engine import refunds, round_engine, settlement
 from services.engine.round_engine import ClaimResult, RoundEngine, load_room_config
+from services.gateway import queries as gateway_queries
 from tests.integration.conftest import create_funded_user, create_room, recv_balance_update
 
 
@@ -498,6 +499,74 @@ async def test_same_user_two_different_winning_cards_both_paid(pool, redis, card
 
         mismatches = await ledger.reconcile(conn)
         assert mismatches == []
+
+        # services/gateway/queries.py::user_history() must show this as
+        # ONE round with the combined amount, not one row per card and
+        # not the multiplicative blowup the old (round_id, user_id)-only
+        # join produced (2 entries x 2 winner rows = 4 result rows) --
+        # see that function's own comment for the full failure mode.
+        history = await gateway_queries.user_history(pool, user_a)
+        this_round = [h for h in history if h["round_id"] == round_row["id"]]
+        assert len(this_round) == 1, f"expected exactly one history row for this round, got {this_round}"
+        assert this_round[0]["won"] is True
+        assert this_round[0]["won_amount"] == "48.00"
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
+async def test_false_claim_lockout_is_per_card_not_per_player(pool, redis, card_pool, conn):
+    """claim()'s own lockout is scoped to (user_id, card_no), not just
+    user_id -- a false claim on one of a player's cards says nothing
+    about whether a *different* card they hold has a genuine pattern
+    right now, both are validated against completely independent grids.
+    Proves both halves: the same card stays locked out on a second
+    attempt, and a different, genuinely winning card the same player
+    holds is completely unaffected.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("20.00"), min_players=2, call_interval_ms=15, max_cards_per_player=2,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        user_a = await create_funded_user(conn)
+        user_b = await create_funded_user(conn)
+        card_1, card_2 = 1, 2
+
+        assert (await engine.join(user_a, card_1, auto_mark=False)).ok
+        assert (await engine.join(user_a, card_2, auto_mark=False)).ok
+        assert (await engine.join(user_b, 3, auto_mark=False)).ok
+
+        await wait_until(lambda: engine.status == "running", timeout=5)
+
+        # At call_index 0, nothing on any card can possibly have a real
+        # pattern yet (the free cell alone never satisfies row/col/diag/
+        # corners) -- a deterministic "no_pattern" claim, not a race.
+        first = await engine.claim(user_a, card_1)
+        assert first == ClaimResult(False, "no_pattern")
+
+        # The SAME card is now locked out.
+        second = await engine.claim(user_a, card_1)
+        assert second == ClaimResult(False, "locked_out")
+
+        # A DIFFERENT card the same player holds must be completely
+        # unaffected by card_1's lockout -- wait for it to actually
+        # complete a real pattern, then claim it for real.
+        grid_2 = card_pool[card_2]
+
+        def card_2_ready() -> bool:
+            called = engine._called  # noqa: SLF001
+            return bool(bingo.winning_patterns(grid_2, called, room.win_patterns))
+
+        await wait_until(card_2_ready, timeout=10)
+        third = await engine.claim(user_a, card_2)
+        assert third.ok, third
+
+        await wait_until(lambda: engine.status == "idle", timeout=5)
+        mismatches = await ledger.reconcile(conn)
+        assert mismatches == []
     finally:
         await engine.stop()
         await asyncio.wait_for(task, timeout=10)
@@ -960,6 +1029,93 @@ async def test_a_player_can_hold_several_cards_up_to_the_rooms_configured_limit(
     finally:
         await engine.stop()
         await asyncio.wait_for(task, timeout=10)
+
+
+async def test_multi_card_stake_drop_and_void_refund_reconciles_cleanly(pool, redis, card_pool, conn):
+    """Ledger reconciliation across a full multi-card lifecycle: take 3
+    cards (3 separate real stakes), drop one during the lobby (its own
+    real refund), then force-void the round through the exact
+    refund_round_in_transaction() path crash recovery/an underfilled
+    lobby both use, for the 2 cards still left (plus a different
+    player's own card) -- proving every card gets its own correctly-keyed
+    ledger entry at every step, not just a balance that happens to net
+    out right, and that the full sequence leaves ledger.reconcile()
+    clean.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=5, max_cards_per_player=3,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    p1 = await create_funded_user(conn, Decimal("100.00"))
+    p2 = await create_funded_user(conn)
+
+    assert (await engine.join(p1, 1)).ok
+    assert (await engine.join(p1, 2)).ok
+    assert (await engine.join(p1, 3)).ok
+    assert (await engine.join(p2, 4)).ok
+
+    cash1 = await ledger.get_or_create_account(conn, p1, "user_cash")
+    assert await ledger.balance(conn, cash1.id) == Decimal("70.00")
+
+    # Drop one of p1's three cards during the lobby -- its own real
+    # refund, keyed by card_no, not shared with the other two.
+    drop_result = await engine.drop_card(p1, 2)
+    assert drop_result.ok
+    assert await ledger.balance(conn, cash1.id) == Decimal("80.00")
+
+    round_id = engine.round_id
+    assert round_id is not None
+
+    # Force a crash-recovery-style void, the same real, idempotent,
+    # ledger-backed path an underfilled lobby and crash recovery both
+    # use -- a hard cancel (not a graceful engine.stop(), which only
+    # takes effect between rounds) is what actually leaves the round
+    # non-terminal for refund_round() to act on.
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await redis.delete(f"room:lock:{room_id}")
+
+    refunded = await refunds.refund_round(pool, round_id, reason="test-forced-void")
+    # p1's two remaining cards (1 and 3) + p2's card (4) -- card 2 is
+    # already gone from round_entries, refunded separately by the drop
+    # above, so it's correctly not in this count.
+    assert refunded == 3
+
+    assert await ledger.balance(conn, cash1.id) == Decimal("100.00")
+
+    stake_txns = await conn.fetch(
+        "SELECT idempotency_key FROM ledger_transactions "
+        "WHERE kind = 'stake' AND idempotency_key LIKE $1 ORDER BY idempotency_key",
+        f"stake-%-{p1}-%",
+    )
+    assert len(stake_txns) == 3, "expected 3 separate stake transactions, one per card p1 took"
+
+    # Joined through ledger_entries rather than LIKE-matching the
+    # idempotency key -- drop_card()'s own refund is keyed "drop-...",
+    # not "refund-...", even though its kind is "refund" the same as
+    # refund_round_in_transaction()'s, so a prefix match alone would
+    # undercount.
+    refund_txns = await conn.fetch(
+        """
+        SELECT lt.idempotency_key FROM ledger_transactions lt
+        JOIN ledger_entries le ON le.transaction_id = lt.id
+        WHERE lt.kind = 'refund' AND le.account_id = $1
+        ORDER BY lt.idempotency_key
+        """,
+        cash1.id,
+    )
+    assert len(refund_txns) == 3, (
+        "expected 3 separate refund transactions crediting p1 (the lobby drop of card 2, and "
+        "the void of cards 1 and 3) -- fewer than 3 means an idempotency key collided and "
+        "silently no-opped a real refund"
+    )
+
+    mismatches = await ledger.reconcile(conn)
+    assert mismatches == []
 
 
 async def test_max_players_cap_holds_under_real_concurrent_joins(pool, redis, card_pool, conn):

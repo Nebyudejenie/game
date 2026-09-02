@@ -214,14 +214,23 @@ async def cmd_history(message: Message, pool: asyncpg.Pool, notifier: Notifier) 
         await notifier.send(message.chat.id, t("error.not_registered", language))
         return
 
+    # See services/gateway/queries.py::user_history()'s own comment --
+    # this is the same query, duplicated here for the bot's /history
+    # command, and needs the same fix: scope the winner join to the
+    # entry's own card_no (a player can hold several cards in one round
+    # now) and group by round so one round is one line, not one line per
+    # card or a multiplicative blowup when several of a player's own
+    # cards won the same round.
     rounds = await pool.fetch(
         """
         SELECT rd.seq, rd.stake, rd.ended_at,
-               (rw.round_id IS NOT NULL) AS won
+               count(rw.round_id) > 0 AS won
         FROM round_entries re
         JOIN rounds rd ON rd.id = re.round_id
-        LEFT JOIN round_winners rw ON rw.round_id = re.round_id AND rw.user_id = re.user_id
+        LEFT JOIN round_winners rw
+            ON rw.round_id = re.round_id AND rw.user_id = re.user_id AND rw.card_no = re.card_no
         WHERE re.user_id = $1 AND rd.status IN ('done', 'voided')
+        GROUP BY rd.id, rd.seq, rd.stake, rd.ended_at
         ORDER BY rd.ended_at DESC NULLS LAST
         LIMIT 10
         """,

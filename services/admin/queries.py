@@ -1639,6 +1639,19 @@ async def repeat_room_pairings(
     (up to ~4,950 pairs in a 100-player room) -- this runs on demand from
     the admin console, not on any hot path, but an unbounded full-history
     scan would still get slower every day the platform stays up.
+
+    A player can hold several cards in the same round now, which is a
+    second, independent source of inflation the query below has to
+    guard against: joining round_entries to itself on round_id alone
+    means a user_a holding 2 cards against a user_b holding 3 cards in
+    one shared round produces 2*3 = 6 raw pair rows for that single
+    round, not 1. `count(DISTINCT round_id)`/`array_agg(DISTINCT
+    round_id)` collapse that back down to real distinct rounds shared,
+    same as `round_winners` needing `count(DISTINCT round_id)` rather
+    than a raw row count once a user can win on more than one of their
+    own cards in the same round -- without this, a two-card mutual win
+    would double-count as two "wins" of the pair instead of the one
+    round it actually was.
     """
     rows = await pool.fetch(
         """
@@ -1649,10 +1662,12 @@ async def repeat_room_pairings(
             WHERE e1.joined_at > now() - make_interval(days => $2)
         ),
         pair_counts AS (
-            SELECT user_a, user_b, count(*) AS shared_rounds, array_agg(round_id) AS round_ids
+            SELECT user_a, user_b,
+                   count(DISTINCT round_id) AS shared_rounds,
+                   array_agg(DISTINCT round_id) AS round_ids
             FROM pairs
             GROUP BY user_a, user_b
-            HAVING count(*) >= $1
+            HAVING count(DISTINCT round_id) >= $1
         )
         SELECT
           pc.user_a,
@@ -1660,9 +1675,9 @@ async def repeat_room_pairings(
           pc.user_b,
           ub.display_name AS user_b_name,
           pc.shared_rounds,
-          (SELECT count(*) FROM round_winners w
+          (SELECT count(DISTINCT w.round_id) FROM round_winners w
             WHERE w.user_id = pc.user_a AND w.round_id = ANY(pc.round_ids)) AS user_a_wins,
-          (SELECT count(*) FROM round_winners w
+          (SELECT count(DISTINCT w.round_id) FROM round_winners w
             WHERE w.user_id = pc.user_b AND w.round_id = ANY(pc.round_ids)) AS user_b_wins
         FROM pair_counts pc
         JOIN users ua ON ua.id = pc.user_a
