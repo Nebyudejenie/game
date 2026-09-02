@@ -34,7 +34,15 @@ def upgrade() -> None:
         sa.column("card_no", sa.SmallInteger),
         sa.column("grid", sa.JSON),
     )
-    rows = [{"card_no": card_no, "grid": grid} for card_no, grid in seed_rows()]
+    # Pinned to <= 100, not "however many seed_rows() returns today" --
+    # seed_rows() calls packages/core/bingo.py's generate_card_pool(),
+    # whose _POOL_SIZE has grown since this migration was first written
+    # (100 -> 150, migration b762e8ce264b). A historical migration must
+    # keep doing exactly what it always did on a fresh database, or a
+    # from-scratch migrate breaks the moment the pool grows again -- this
+    # is exactly what happened running this migration fresh after that
+    # change, caught directly rather than assumed.
+    rows = [{"card_no": card_no, "grid": grid} for card_no, grid in seed_rows() if card_no <= 100]
     op.bulk_insert(cards_table, rows)
 
 

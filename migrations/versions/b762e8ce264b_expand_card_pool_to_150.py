@@ -34,7 +34,14 @@ def upgrade() -> None:
         sa.column("card_no", sa.SmallInteger),
         sa.column("grid", sa.JSON),
     )
-    rows = [{"card_no": card_no, "grid": grid} for card_no, grid in seed_rows() if card_no > 100]
+    # Pinned to the exact 101-150 range, not "> 100" -- if _POOL_SIZE ever
+    # grows again past 150 in the future, this migration must keep
+    # inserting exactly the 50 rows it always did on a fresh database, the
+    # same reasoning that migration 89519947d424 needed retrofitted here
+    # (caught directly: a from-scratch migrate broke on that one the
+    # moment _POOL_SIZE changed, since it called this same live helper
+    # unpinned).
+    rows = [{"card_no": card_no, "grid": grid} for card_no, grid in seed_rows() if 100 < card_no <= 150]
     op.bulk_insert(cards_table, rows)
 
 

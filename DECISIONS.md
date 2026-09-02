@@ -5,6 +5,91 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-02 — Multi-card-per-player, Phase 1: the genuinely-inert half of the schema change
+
+Second phase of the plan at `/home/prophet/.claude/plans/graceful-
+snacking-quail.md` (approved via plan mode). Found a real flaw in the
+approved plan's own Phase 1/Phase 2 split while implementing it, worth
+recording since it's a useful example of why "verify, don't just follow
+the plan text" still applies even to a plan that was itself carefully
+researched: the plan grouped all four schema changes (round_entries'
+UNIQUE drop, round_winners' PK widen, claim_attempts.card_no,
+rooms.max_cards_per_player) into one "genuinely inert" migration, on the
+reasoning that nothing reads the new columns yet. That reasoning holds
+for three of the four -- but `join()` has *no application-level*
+"does this user already have a card" check anywhere in it; the
+`round_entries UNIQUE (round_id, user_id)` constraint is the *only*
+thing enforcing one-card-per-user today. Confirmed directly by reading
+`join()` before writing this migration, not assumed. Dropping that
+specific constraint alone, before the engine code that replaces its
+enforcement (Phase 2's `max_cards_per_player` check and `self._entries`
+restructure) ships, would have:
+- broken the existing `test_duplicate_card_and_double_join_rejected`
+  test immediately (a second join for a different card would now
+  silently succeed instead of being rejected) -- contradicting the
+  plan's own "run the entire existing suite unmodified, confirm 100%
+  green" verification step for this migration, which would have failed
+  had I actually followed it literally, and
+- opened a real, if temporary, production gap: unlimited cards per
+  player with no cap at all, and `self._entries[user_id] = ...`'s
+  overwrite-on-join behavior would silently lose track of every card but
+  the last one taken, corrupting claim/auto-mark behavior for any real
+  player who took a second card during the window between this
+  migration deploying and Phase 2's code deploying.
+
+**Split the schema change in two instead.** This migration
+(`deeff3c6228e`) ships only the three pieces that are genuinely inert
+against the current single-card engine: `round_winners`' primary key
+widens to `(round_id, user_id, card_no)` (a strict superset of the old
+guarantee -- `card_no` already existed as a column, just wasn't part of
+the key, and nothing today ever produces a second row for one user so
+no current data is affected); `claim_attempts` gains a nullable
+`card_no` column nothing reads yet; `rooms` gains
+`max_cards_per_player smallint NOT NULL DEFAULT 1 CHECK (BETWEEN 1 AND
+20)` -- the default exactly matches today's de facto limit, and nothing
+reads this column yet either. The `round_entries` UNIQUE drop moves to
+ship in the same change as the `join()`/`self._entries` code that
+replaces its enforcement (Phase 2), not standalone.
+
+This preserves the plan's actual safety-critical property -- the
+`round_winners` primary key must be live in production before `claim()`'s
+one-win-per-user guard relaxes, or the first real two-card win crashes
+the settlement transaction and voids the whole room (see the multi-card
+plan's Context section for the exact traced failure mode) -- while
+closing the gap the original single-migration grouping would have
+opened.
+
+Verified: full clean-slate `pytest tests/` genuinely passes unmodified
+against this migration (now provably true, not just claimed), mypy
+clean, and a real up → down → up cycle against a live database
+confirming both directions of all three schema changes.
+
+**A second, unrelated bug caught in the same pass**: verifying this
+migration required a genuine `docker compose down -v` restart of the
+local dev database (Redis connection-pool exhaustion after several
+consecutive full-suite runs — this session's own well-established
+flakiness pattern, confirmed again by the two failing tests passing
+cleanly once isolated with a fresh pool). That forced a real
+from-scratch migration run for the first time since Phase 0's `_POOL_
+SIZE` change — which broke immediately: the *original*
+`89519947d424_cards_pool.py` migration calls `cards_seed.py::seed_rows()`
+live, and since `seed_rows()` calls `generate_card_pool()`, which now
+reads a `_POOL_SIZE` of 150, that historical migration tried to insert
+150 rows into a table its own schema still only allowed 1-100 at that
+point in the chain — a `CheckViolation`, not silently wrong data, but
+still a real break in "can this repo be stood up from scratch." This
+never affected production (its 100 cards were already on disk before
+Phase 0's migration ran, so `89519947d424` was never re-executed there),
+but it's exactly the kind of gap only a genuine fresh-database rebuild
+surfaces, matching this project's own standing "full clean-slate
+rebuild" verification discipline. Fixed by pinning both cards-inserting
+migrations to an explicit range (`card_no <= 100` in the original,
+`100 < card_no <= 150` in Phase 0's) instead of trusting whatever the
+live `seed_rows()` happens to return today — so a future `_POOL_SIZE`
+increase can't silently break either historical migration again.
+Re-verified with a genuine fresh `alembic upgrade head` from an empty
+database.
+
 ## 2026-09-02 — Card pool expanded from 100 to 150 (Phase 0 of multi-card support)
 
 A second, unusually detailed reference (a real ~11-minute video,
