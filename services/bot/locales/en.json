@@ -75,6 +75,7 @@
 
   "play.not_available": "The game screen isn't open yet. Please check back shortly.",
   "play.open": "Tap the button below to play.",
+  "play.direct_link": "Button not opening the game? Try this link: {link}",
 
   "error.generic": "Something went wrong. Please try again.",
   "error.not_registered": "Please register first. Tap /start.",

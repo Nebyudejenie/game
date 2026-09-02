@@ -255,6 +255,24 @@ async def test_start_command_welcomes_back_an_already_registered_user(pool, bot_
     assert "Welcome back" in session.sent[0].text or "እንኳን ደህና መጡ" in session.sent[0].text
 
 
+async def test_start_command_also_sends_a_direct_link_fallback_when_short_name_is_configured(
+    bot_ctx, monkeypatch
+):
+    # Same fallback as /play (see that test's own comment for the full
+    # production incident this is about) -- /start's returning-user
+    # welcome sends the same main_menu_keyboard() button and should carry
+    # the same fallback link.
+    dp, bot, session = bot_ctx
+    monkeypatch.setattr(dp["settings"], "telegram_miniapp_short_name", "arada")
+    telegram_id = await _register(dp, bot, session)
+
+    await dp.feed_update(bot, make_text_update(telegram_id, "/start"))
+    await _settle()
+
+    assert len(session.sent) == 2
+    assert "https://t.me/jobingo_bot/arada" in session.sent[1].text
+
+
 async def test_referral_credit_survives_a_failed_registration_attempt(pool, bot_ctx):
     # Regression: a real code review pass caught that the pending referral
     # was popped (deleted from Redis) *before* attempting registration,
@@ -935,6 +953,29 @@ async def test_play_command_reports_not_available_when_miniapp_url_unset(bot_ctx
 
     assert len(session.sent) == 1
     assert "isn't open yet" in session.sent[0].text or "አልተከፈተም" in session.sent[0].text
+
+
+async def test_play_command_sends_a_direct_link_fallback_when_short_name_is_configured(bot_ctx, monkeypatch):
+    # A real production incident: the persistent menu button and this same
+    # web_app keyboard button both delivered no initData at all for some
+    # clients until the Mini App was also registered via BotFather's
+    # /newapp -- the direct t.me/<bot>/<short_name> link uses that
+    # registration and is confirmed to work even when the button alone
+    # doesn't. bot_setup's shared Settings leaves telegram_miniapp_short_name
+    # unset (every other /play test in this file expects exactly one
+    # message), so this monkeypatches it on for just this test -- same
+    # pattern as test_play_command_reports_not_available_when_miniapp_url_
+    # unset above, not a second Dispatcher (the shared router can only ever
+    # attach to bot_setup's one Dispatcher for the whole session).
+    dp, bot, session = bot_ctx
+    monkeypatch.setattr(dp["settings"], "telegram_miniapp_short_name", "arada")
+    telegram_id = await _register(dp, bot, session)
+
+    await dp.feed_update(bot, make_text_update(telegram_id, "/play"))
+    await _settle()
+
+    assert len(session.sent) == 2
+    assert "https://t.me/jobingo_bot/arada" in session.sent[1].text
 
 
 async def test_history_command_rejects_unregistered_user(bot_ctx):

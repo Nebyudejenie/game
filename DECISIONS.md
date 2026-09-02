@@ -5,6 +5,69 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-02 — A second, independent launch surface: BotFather's /newapp registration, plus a direct-link fallback in the bot's own messages
+
+After the menu-button fix (below), the user reported the Mini App still
+showed a boot-shell error, not the room list -- but this time it was
+the *correct* boot-shell (no crash), and both `tg.initData` and
+`tg.initDataUnsafe.user` were genuinely empty, confirmed by inspecting
+the SDK object directly rather than assumed. Ruled out, in order: the
+client (confirmed real mobile Telegram, not Desktop -- the earlier
+leading theory), any redirect between `arada.fun`/`www.arada.fun`/HTTP/
+HTTPS that could drop the URL fragment Telegram uses to deliver
+`initData` (none exist -- checked all four variants directly), and a
+JS-side timing race (`tg.ready()`/`tg.expand()` already run before
+`initData` is read, correct per Telegram's own documented order).
+
+That left the bot's own Mini App registration. `setChatMenuButton` (the
+raw Bot API call the earlier fix used) is Telegram's documented
+mechanism for a menu-button web_app launch and doesn't itself require
+any additional registration -- but in practice, the user registering the
+same URL as a proper Mini App via **@BotFather's `/newapp` command**
+(producing a direct link, `t.me/aradabbot/arada`) immediately fixed it:
+that direct link delivered real `initData` on the first try. The
+practical implication, not something either Telegram's docs or this
+codebase's own prior investigation made obvious in advance: Telegram's
+willingness to treat a `web_app` button launch as a genuine Mini App
+(and actually inject `initData`) appears tied to the bot having a
+registered Mini App at all, not just a technically-valid `WebAppInfo`
+URL passed to the API.
+
+**Given the menu button and the in-chat "Play" keyboard button
+(`main_menu_keyboard()`) both use the exact same `WebAppInfo(url=...)`
+mechanism and the same URL**, they very likely both work now too (the
+`/newapp` registration isn't scoped to the direct link specifically) --
+but this is Telegram-client behavior no test in this repo can verify,
+and it was never independently confirmed for the menu button itself
+after the `/newapp` registration.
+
+**Belt-and-suspenders fix, not left to that assumption**: `cmd_start`'s
+returning-user welcome and `cmd_play` now both also send a plain-text
+`t.me/<bot_username>/<short_name>` message alongside the existing
+web_app button -- a link confirmed to work even in the one real case a
+button-based launch didn't, for whichever Telegram client quirk any
+individual user might hit. New setting,
+`telegram_miniapp_short_name` (`packages/core/config.py`), empty by
+default so no code path ever constructs a link nobody configured; set
+to `arada` in production's env, matching the short name chosen when
+registering via BotFather. `_miniapp_direct_link()` (`services/bot/
+handlers.py`) is the one place this URL gets built, used by both
+commands.
+
+New tests: `test_play_command_sends_a_direct_link_fallback_when_short_
+name_is_configured` and `test_start_command_also_sends_a_direct_link_
+fallback_when_short_name_is_configured` (`tests/integration/
+test_bot_handlers.py`) -- both use the file's own established
+`monkeypatch.setattr(dp["settings"], ...)` pattern (a second
+`build_dispatcher()` call would hit `bot_setup`'s own documented
+constraint that the shared `router` can only ever attach to one
+Dispatcher per test session).
+
+Full clean-slate verification: mypy clean; the hardcoded-strings AST
+check still passes (`_miniapp_direct_link`'s f-string is exempt under
+the same "URL building, never message text" rule already established);
+`test_bot_handlers.py` 69/69; full `pytest tests/`.
+
 ## 2026-09-02 — The bot's persistent chat menu button never actually launched the Mini App
 
 After the DNS-collision fix, the user reported the Mini App was still

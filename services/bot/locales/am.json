@@ -75,6 +75,7 @@
 
   "play.not_available": "የጨዋታ ገጹ ገና አልተከፈተም። እባክዎ ቆየት ብለው ይሞክሩ።",
   "play.open": "ለመጫወት ከታች ያለውን ቁልፍ ይጫኑ።",
+  "play.direct_link": "ቁልፉ ጨዋታውን ካልከፈተ ይህን አገናኝ ይሞክሩ፦ {link}",
 
   "error.generic": "የሆነ ስህተት ተፈጥሯል። እባክዎ እንደገና ይሞክሩ።",
   "error.not_registered": "እባክዎ በመጀመሪያ ይመዝገቡ። /start ይጫኑ።",

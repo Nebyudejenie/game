@@ -49,6 +49,22 @@ async def _language_for(pool: asyncpg.Pool, telegram_id: int) -> str:
     return resolve_language(row["language"] if row else None)
 
 
+def _miniapp_direct_link(settings: Settings) -> str | None:
+    """A t.me/<bot>/<short_name> direct link -- a second, independent
+    launch surface alongside the web_app button both main_menu_keyboard()
+    calls already send. A real production incident found the persistent
+    menu button and keyboard button (both the same raw setChatMenuButton/
+    web_app API mechanism) delivered no initData at all for some clients
+    until the Mini App was also registered via BotFather's /newapp; this
+    direct link uses that same registered app and is confirmed to work
+    even when a button-based launch doesn't. None when the short name
+    isn't configured -- never construct a link nobody set up.
+    """
+    if not settings.telegram_bot_username or not settings.telegram_miniapp_short_name:
+        return None
+    return f"https://t.me/{settings.telegram_bot_username}/{settings.telegram_miniapp_short_name}"
+
+
 @router.message(CommandStart())
 async def cmd_start(
     message: Message,
@@ -81,6 +97,9 @@ async def cmd_start(
         t("welcome.back", language, name=user.display_name),
         reply_markup=main_menu_keyboard(language, miniapp_url=settings.miniapp_url),
     )
+    direct_link = _miniapp_direct_link(settings)
+    if direct_link:
+        await notifier.send(chat_id, t("play.direct_link", language, link=direct_link))
 
 
 @router.message(F.contact)
@@ -150,6 +169,9 @@ async def cmd_play(message: Message, pool: asyncpg.Pool, notifier: Notifier, set
             t("play.open", language),
             reply_markup=main_menu_keyboard(language, miniapp_url=settings.miniapp_url),
         )
+        direct_link = _miniapp_direct_link(settings)
+        if direct_link:
+            await notifier.send(message.chat.id, t("play.direct_link", language, link=direct_link))
     else:
         await notifier.send(message.chat.id, t("play.not_available", language))
 

@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     # Play button honestly reports the game screen isn't open yet instead
     # of shipping a web_app button pointing nowhere.
     miniapp_url: str = ""
+    # The BotFather /newapp short name (e.g. "arada" for t.me/<bot>/arada)
+    # -- a real production incident found the persistent menu button and
+    # keyboard Play button (both raw setChatMenuButton/web_app API calls)
+    # delivered no initData at all until the Mini App was also registered
+    # this way; empty means cmd_play/cmd_start skip the extra fallback
+    # link entirely rather than construct a broken t.me URL.
+    telegram_miniapp_short_name: str = ""
 
     # Phase 5-6
     chapa_api_key: str = ""
