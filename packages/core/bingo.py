@@ -25,11 +25,14 @@ _COLUMN_RANGES: dict[str, range] = {
 }
 _COLUMNS = ("B", "I", "N", "G", "O")
 
-# Fixed forever: the 100-card pool must never change between deployments, or
-# every player's "lucky card" silently becomes a different grid. Do not
-# change this constant.
+# Fixed forever: every card_no 1.._POOL_SIZE that has ever been dealt must
+# keep mapping to the exact same grid, or a player's "lucky card" silently
+# changes. generate_card_pool() below draws sequentially from one seeded
+# stream, so RAISING this constant is the one safe change -- every existing
+# card_no's grid is unaffected, only new ones get appended. Never lower it,
+# never change _POOL_SEED_LABEL, never change the generation algorithm.
 _POOL_SEED_LABEL = b"jobingo-card-pool-v1"
-_POOL_SIZE = 100
+_POOL_SIZE = 150
 
 
 def letter_for(n: int) -> str:
@@ -57,7 +60,7 @@ def _generate_one_card(rng: random.Random) -> Grid:
 
 
 def generate_card_pool() -> list[Grid]:
-    """The deterministic 100-card pool, card_no 1..100 -> pool[card_no - 1].
+    """The deterministic card pool, card_no 1.._POOL_SIZE -> pool[card_no - 1].
 
     Same output on every machine, forever, because the seed is a fixed
     constant. Cards are regenerated (not rejected-and-kept) on a rare hash

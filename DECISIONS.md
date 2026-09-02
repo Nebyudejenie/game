@@ -5,6 +5,88 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-02 — Card pool expanded from 100 to 150 (Phase 0 of multi-card support)
+
+A second, unusually detailed reference (a real ~11-minute video,
+`video_2026-09-02_15-45-31.mp4`, plus a 71-section written spec) confirmed
+two concrete gaps against the current implementation: the reference
+consistently shows a 150-card selection grid (confirmed directly at the
+video's own "NUMBER_ALREADY_TAKEN" frame, whose grid runs to card 150,
+not 100), and — the larger finding — players holding multiple Bingo cards
+simultaneously in the same round, each with its own independent claim
+button. Everything else the spec describes (server-authoritative engine,
+realtime sync, wallet ledger, bot integration, admin console, i18n) is
+already built; the spec's suggested React/Node.js stack was not adopted,
+since that would mean discarding a tested, live, real-money system for a
+preferred-but-not-required rewrite — explicitly against the spec's own
+closing instruction to "choose the safest production architecture."
+
+This entry covers the 150-card expansion only — genuinely independent of
+multi-card support and shippable alone. Multi-card itself is a much
+larger, financially-sensitive change (it touches stake idempotency keys,
+claim validation, and the `round_winners` payout table's own primary key)
+planned in full via `/home/prophet/.claude/plans/graceful-snacking-quail.md`
+and implemented in separate, independently-verified phases.
+
+**Why this was safe to do as a two-line constant change, not a data
+reset**: `packages/core/bingo.py`'s `generate_card_pool()` draws
+sequentially from one `random.Random` stream seeded by a fixed label —
+raising `_POOL_SIZE` from 100 to 150 only appends new draws, it can never
+change what a lower `card_no` already mapped to. Verified this directly,
+not just asserted it: computed the actual 150-card pool and confirmed
+`pool[:100]`'s hash exactly matches the pre-existing pinned 100-card
+golden hash, *before* touching any other code. A new test,
+`test_card_pool_first_100_cards_are_byte_identical_to_the_original_pool`,
+pins this permanently — the actual machine-verified proof that appending
+never disturbs the cards that already exist, not just a comment claiming
+it.
+
+Migration `b762e8ce264b`: widens `cards`' `CHECK (card_no BETWEEN 1 AND
+100)` to `BETWEEN 1 AND 150`, then inserts only the 50 new rows (`card_no
+> 100`) via the existing `cards_seed.py::seed_rows()`, left completely
+unchanged — the migration filters to the delta itself rather than
+teaching `seed_rows()` about "new vs. existing." Downgrade
+(`DELETE FROM cards WHERE card_no > 100`) is safe without any extra
+guard logic: `round_entries.card_no`'s existing foreign key to `cards`
+already blocks the delete outright the moment any round ever deals a
+card above 100, so a downgrade after real gameplay on the new cards
+fails loudly at the FK rather than silently orphaning data. Tested the
+full up → down → up cycle against a real database before considering
+this done, not just reviewed the SQL.
+
+Also updated (the two other places "100" was hardcoded, found by
+grep rather than assumed): `services/engine/round_engine.py`'s
+`join()` card-number bounds check, changed from a literal `1 <= card_no
+<= 100` range to `card_no not in self._card_pool` — removes the second
+hardcoded constant entirely rather than updating it to 150, so a future
+pool-size change never needs to touch this file again. `web/miniapp/
+js/app.v6.js`'s lobby grid loop bound updated to 150 (a longer-term fix
+deriving this from server state instead of a client literal was
+considered and deferred as unnecessary scope for this change).
+Deliberately left untouched: `rooms.max_players CHECK (... BETWEEN 1 AND
+100)` — a coincidentally-identical but unrelated number (room capacity,
+i.e. distinct players, not card pool size).
+
+Verified live: a real Playwright screenshot of the lobby screen shows
+all 150 cards rendering correctly in the existing scrollable grid, no
+layout changes needed. Full clean-slate verification: mypy clean,
+`test_bingo.py`/`test_cards_seed.py` updated and passing (150-card golden
+hash, prefix-invariant test, seed-row count), `test_miniapp_e2e.py`'s
+grid-cell-count assertion updated to 150, full `pytest tests/`.
+
+Also caught and fixed, while running the full e2e suite repeatedly to
+verify this change: a real, pre-existing bug in this same session's own
+`test_result_screen_shows_the_winning_card_preview` test (from the
+earlier winner-card-preview work) — it hardcoded `len(winning_cells) ==
+5`, but the test room's default `win_patterns` (`tests/integration/
+conftest.py::create_room()`) includes `"corners"`, a genuine 4-cell
+pattern. A real, randomly-played round can legitimately win on corners,
+which would have made this test intermittently and non-deterministically
+fail forever, unrelated to anything actually being broken. Fixed to
+derive the expected count from the pattern the result screen itself
+reports (`#result-meta`'s raw `{pattern}` text) rather than assuming
+every win is 5 cells.
+
 ## 2026-09-02 — A second, independent launch surface: BotFather's /newapp registration, plus a direct-link fallback in the bot's own messages
 
 After the menu-button fix (below), the user reported the Mini App still

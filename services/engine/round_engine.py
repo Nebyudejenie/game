@@ -237,7 +237,7 @@ class RoundEngine:
 
         if self._status != "lobby":
             return JoinResult(False, "not_joinable")
-        if not (1 <= card_no <= 100):
+        if card_no not in self._card_pool:
             return JoinResult(False, "invalid_card")
 
         # Covers the capacity check through the self._entries update below

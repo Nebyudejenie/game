@@ -266,7 +266,7 @@ function updateLobbyMoneyBar(msg) {
 function buildCardGrid() {
   const grid = el("card-grid");
   grid.innerHTML = "";
-  for (let n = 1; n <= 100; n++) {
+  for (let n = 1; n <= 150; n++) {
     const cell = document.createElement("div");
     cell.className = "card-grid-cell";
     cell.textContent = String(n);

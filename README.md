@@ -271,7 +271,7 @@ one CI/CD's own automation can't do for you.
   rejects any transaction whose entries don't sum to zero. `post()` is
   idempotent by key, and safe under concurrency via per-account row locks
   taken in a fixed order.
-- **`packages/core/bingo.py`** — pure game logic: the deterministic 100-card
+- **`packages/core/bingo.py`** — pure game logic: the deterministic 150-card
   pool, win-pattern detection (rows/columns/diagonals/corners), and the
   provably-fair draw (`HMAC-SHA256`-seeded Fisher-Yates over 1–75).
 - **`packages/core/cards_seed.py`** + a migration — seeds the `cards` table

@@ -348,7 +348,7 @@ async def test_miniapp_full_gameplay_flow(gateway_server, browser, pool, redis, 
 
         await page.wait_for_selector("#screen-lobby.active", timeout=10000)
         cells = await page.query_selector_all(".card-grid-cell")
-        assert len(cells) == 100
+        assert len(cells) == 150
 
         # The lobby's own header/status bar (video reference: REFRESH,
         # BALANCE, CONNECTED, Stake, Win) -- real values from state_sync/
@@ -547,9 +547,19 @@ async def test_result_screen_shows_the_winning_card_preview(gateway_server, brow
         assert free_cell is not None
         assert (await free_cell.text_content()) == "★"
 
+        # The room's default win_patterns (tests/integration/conftest.py's
+        # create_room()) includes "corners" alongside row/col/diag -- a
+        # real random round can legitimately win on any of them, and
+        # corners is the one pattern with only 4 cells, not 5. Derive the
+        # expected count from the pattern the result screen itself
+        # reports (result.card_row's raw {pattern} interpolation, e.g.
+        # "corners" or "row_2") rather than assuming every win is 5 cells.
+        result_meta_text = await page.text_content("#result-meta")
+        expected_winning_cells = 4 if "corners" in (result_meta_text or "") else 5
         winning_cells = await page.query_selector_all("#result-card .card-cell.winning")
-        assert len(winning_cells) == 5, (
-            f"expected exactly 5 cells highlighted for the winning pattern, got {len(winning_cells)}"
+        assert len(winning_cells) == expected_winning_cells, (
+            f"expected {expected_winning_cells} cells highlighted for {result_meta_text!r}, "
+            f"got {len(winning_cells)}"
         )
         # Every highlighted cell must also actually be marked-called --
         # a winning cell that were somehow not "marked" would mean the
