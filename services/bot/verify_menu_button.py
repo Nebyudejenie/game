@@ -69,10 +69,17 @@ async def _run(fix: bool, *, settings: Settings | None = None, bot: Bot | None =
         button = await bot.get_chat_menu_button()
         print(f"Current chat menu button: {button.model_dump(exclude_none=True)}")
 
+        # Telegram normalizes a bare-domain URL by appending "/" -- a real
+        # false negative this caught against production: setChatMenuButton
+        # with "https://arada.fun" round-tripped as "https://arada.fun/"
+        # from the very next getChatMenuButton, correct in every way that
+        # matters (the WebView opens the same page either way) but not
+        # byte-equal, which made this check report "still broken" forever
+        # after a genuinely successful --fix.
         is_correct_web_app = (
             isinstance(button, MenuButtonWebApp)
             and settings.miniapp_url
-            and button.web_app.url == settings.miniapp_url
+            and button.web_app.url.rstrip("/") == settings.miniapp_url.rstrip("/")
         )
         if is_correct_web_app:
             print(f"Menu button already correctly launches the Mini App at {settings.miniapp_url}.")

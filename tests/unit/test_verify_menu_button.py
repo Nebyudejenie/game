@@ -59,6 +59,18 @@ async def test_wrong_button_pointing_elsewhere_without_fix_is_also_reported():
     bot.set_chat_menu_button.assert_not_awaited()
 
 
+async def test_a_trailing_slash_telegram_added_itself_is_not_reported_as_wrong():
+    # A real false negative caught against production: setChatMenuButton
+    # with a bare-domain URL round-trips through getChatMenuButton with a
+    # "/" Telegram appended itself -- functionally identical (the WebView
+    # opens the same page), and must not be treated as "still broken" or
+    # a --fix run would just re-set the exact same effective URL forever.
+    bot = _fake_bot(menu_button=MenuButtonWebApp(text="Play", web_app=WebAppInfo(url=MINIAPP_URL + "/")))
+    code = await _run(False, settings=_settings(), bot=bot)
+    assert code == 0
+    bot.set_chat_menu_button.assert_not_awaited()
+
+
 async def test_fix_corrects_a_wrong_menu_button():
     bot = _fake_bot(menu_button=MenuButtonDefault())
     code = await _run(True, settings=_settings(), bot=bot)

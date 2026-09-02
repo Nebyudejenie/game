@@ -5,6 +5,53 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-02 — The bot's persistent chat menu button never actually launched the Mini App
+
+After the DNS-collision fix, the user reported the Mini App was still
+showing a black screen. Checking `jobingo-gateway`'s logs for the
+window around the report found real page loads (index.html, locale
+files) but **zero `/ws` connection attempts at all** since the last
+restart — the client was never even trying to open the game's
+WebSocket, which rules out every server-side theory chased so far (all
+of which require a WS connection to even reach the code in question).
+
+That points at the *launch* itself, not anything downstream of it. This
+project already has `services/bot/verify_menu_button.py` — a CLI built
+in an earlier session specifically because "no code path in this repo
+has ever read or written" the bot's own persistent chat menu button
+(the icon next to the message box, a separate launch surface from the
+in-chat "Play" keyboard button `main_menu_keyboard()` already builds
+correctly) — but it had never actually been run against the real
+production bot token before now, only built and unit-tested against a
+fake `Bot`. Run for real for the first time: **the menu button was set
+to `{'type': 'commands'}` — a plain command list, not a Web App launcher
+at all.** Anyone opening the Mini App through that specific icon (a
+prominent, commonly-used launch surface in Telegram) got no WebView
+opened whatsoever — consistent with "no game, black screen," and fully
+explains the complete absence of `/ws` traffic.
+
+Fixed with the CLI's own `--fix` flag (`docker exec jobingo-bot python -m
+services.bot.verify_menu_button --fix`), which safely no-ops unless the
+button is actually wrong. A re-check immediately after still reported
+"not fixed" — a real, separate bug the fix surfaced: Telegram's own
+`setChatMenuButton`/`getChatMenuButton` round-trip normalizes a
+bare-domain URL by appending `/` (`https://arada.fun` came back as
+`https://arada.fun/`), which the script's exact-string comparison
+treated as still-wrong. Confirmed via raw HTTP calls to the Telegram Bot
+API directly (bypassing aiogram entirely) that the button really had
+changed and this was a check-side false negative, not an unapplied fix
+or an eventual-consistency delay. Fixed the comparison to compare with
+trailing slashes stripped on both sides — functionally identical URLs
+now read as correct, and a real regression test
+(`test_a_trailing_slash_telegram_added_itself_is_not_reported_as_wrong`)
+locks it in, so a future `--fix` run doesn't loop forever "fixing"
+something that was already fixed.
+
+Verified live: `getChatMenuButton` now returns `{'type': 'web_app',
+'text': 'Play', 'web_app': {'url': 'https://arada.fun/'}}`, and
+`verify_menu_button.py`'s own check now reports the button correct
+without needing `--fix` again.
+
 ## 2026-09-02 — The real fix for the app.js rename-per-deploy hack: an explicit Cache-Control on the miniapp's static bundle
 
 Flagged as follow-up debt in this same day's DNS-collision entry ("the
