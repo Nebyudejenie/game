@@ -5,6 +5,53 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-02 — Lobby screen enriched to match the reference video: REFRESH, BALANCE, CONNECTED, live Stake/Win
+
+The second of two concrete gaps found by studying `20260902093014.mp4`'s
+card-selection screen (~t=82s): the deployed lobby was just a countdown
+and a card grid, where the reference shows a REFRESH control, a BALANCE
+readout, a CONNECTED status pill, and live Stake/Win bars.
+
+Every value needed was already available client-side or already
+broadcast by the server for an unrelated reason — no new backend fields:
+`state.user.balance` (already tracked for the room-list header),
+`state.connection` (already driving the top-level connection banner via
+the same `subscribe()` pub/sub `state.js` already provides), and —
+usefully — `lobby_tick`'s existing payload (`round_engine.py`'s
+`_run_lobby()`) already carries `stake`, `pot`, and `derash`, ticking
+once a second the whole time the lobby is open, specifically so the
+prize preview grows live as players take cards, matching the video's own
+"Win: 464 ETB" ticking up. `updateLobbyMoneyBar()` is shared between
+`enterLobby()`'s initial values and every subsequent `lobby_tick`, so
+there's exactly one place that formats these numbers.
+
+The REFRESH button (video: a literal "REFRESH" pill) just re-sends
+`ws.joinRoom(currentRoomId)` — the same request the initial join already
+makes, forcing a fresh `state_sync` rather than inventing a new message
+type for what is, structurally, "reload this room's state."
+
+**Also fixed while in here**: `.card-grid-cell.taken` used a muted
+strikethrough (easy to misread as "already yours" rather than
+"unavailable"); changed to a solid `var(--danger)` fill, the same red
+already used for the B-column and the existing danger/error color
+elsewhere in this app — matching the video's much clearer bold-red
+"taken" language, and reusing an existing token rather than inventing a
+new color.
+
+New assertions added to the existing `test_miniapp_full_gameplay_flow`
+e2e test (not a separate test — this is the same lobby screen that test
+already reaches): the balance pill shows the real funded balance
+("100.00"), the stake pill shows the room's real stake ("10.00"), and
+the connection pill carries `.connected` — plus a real screenshot
+(`/tmp/miniapp-lobby.png`) reviewed directly, confirming the gold
+balance, green connected pill, blue stake value, and green win bar all
+render as designed.
+
+Full clean-slate verification: mypy clean across 76 source files;
+`test_miniapp_e2e.py` 10/10 (`-m e2e`); full `pytest tests/` 927/927 (see
+the entry above — this work landed in the same verification pass as the
+production DNS-collision fix).
+
 ## 2026-09-02 — Root cause of the persistent blank-screen P0: gateway/payments/admin/bot were talking to the wrong Postgres and Redis entirely
 
 The Mini App blank-screen incident had already been through two rounds of

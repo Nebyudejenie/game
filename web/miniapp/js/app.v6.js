@@ -249,6 +249,18 @@ function enterLobby(sync) {
   buildCardGrid();
   updateLobbyCta();
   startLobbyCountdown(sync);
+  updateLobbyMoneyBar(sync);
+  const state = getState();
+  if (state.user) el("lobby-balance-amount").textContent = `${state.user.balance} ETB`;
+}
+
+// Shared by enterLobby() (initial values) and the lobby_tick handler
+// below (live updates every second while players keep joining) --
+// stake/derash/players all already ride lobby_tick's own payload
+// (round_engine.py's _run_lobby()), so this is zero new backend work.
+function updateLobbyMoneyBar(msg) {
+  if (msg.stake !== undefined) el("lobby-stake-amount").textContent = `${msg.stake} ETB`;
+  if (msg.derash !== undefined) el("lobby-win-amount").textContent = `${msg.derash} ETB`;
 }
 
 function buildCardGrid() {
@@ -343,6 +355,28 @@ function startLobbyCountdown(sync) {
 ws.on("lobby_tick", (msg) => {
   if (getState().screen !== "lobby") return;
   el("lobby-countdown").textContent = t("lobby.starts_in", { seconds: msg.seconds_left });
+  updateLobbyMoneyBar(msg);
+});
+
+el("lobby-refresh-btn").addEventListener("click", () => {
+  const state = getState();
+  if (state.currentRoomId === null) return;
+  haptics.lightTap();
+  const btn = el("lobby-refresh-btn");
+  btn.classList.add("spinning");
+  setTimeout(() => btn.classList.remove("spinning"), 300);
+  ws.joinRoom(state.currentRoomId);
+});
+
+// Lobby's own connection pill -- the room-list header only ever shows a
+// top-level banner for actionable states (auth_failed/connect_failed);
+// this gives the lobby screen the video reference's own always-visible
+// "CONNECTED" status alongside the countdown.
+subscribe((state) => {
+  const pill = el("lobby-connection-pill");
+  const connected = state.connection === "connected";
+  pill.classList.toggle("connected", connected);
+  el("lobby-connection-label").textContent = connected ? t("lobby.connected") : t("lobby.not_connected");
 });
 
 // --- game screen (RUNNING) ---------------------------------------------
@@ -1171,6 +1205,9 @@ ws.on("balance_update", (msg) => {
     el("wallet-cash").textContent = `${msg.cash} ETB`;
     el("wallet-bonus").textContent = `${msg.bonus} ETB`;
     el("wallet-locked").textContent = `${msg.locked} ETB`;
+  }
+  if (getState().screen === "lobby") {
+    el("lobby-balance-amount").textContent = `${msg.cash} ETB`;
   }
   if (pendingDeposit && Number(msg.cash) - pendingDeposit.cashBefore >= pendingDeposit.amount - 0.01) {
     setWalletStatus("deposit-status", "wallet.deposit_confirmed", "success");

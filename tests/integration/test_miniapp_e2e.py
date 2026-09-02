@@ -350,6 +350,20 @@ async def test_miniapp_full_gameplay_flow(gateway_server, browser, pool, redis, 
         cells = await page.query_selector_all(".card-grid-cell")
         assert len(cells) == 100
 
+        # The lobby's own header/status bar (video reference: REFRESH,
+        # BALANCE, CONNECTED, Stake, Win) -- real values from state_sync/
+        # lobby_tick, not placeholders.
+        await page.wait_for_function(
+            "document.getElementById('lobby-balance-amount').textContent.includes('100.00')", timeout=5000
+        )
+        await page.wait_for_function(
+            "document.getElementById('lobby-stake-amount').textContent.includes('10.00')", timeout=5000
+        )
+        assert "connected" in (
+            await page.get_attribute("#lobby-connection-pill", "class") or ""
+        )
+        await page.screenshot(path="/tmp/miniapp-lobby.png")
+
         await cells[9].click()  # card #10
         await page.click("#lobby-cta")
         # Proof the take_card ack actually landed, not just that the click

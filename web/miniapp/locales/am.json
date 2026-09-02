@@ -11,6 +11,12 @@
   "lobby.card_taken_change": "ካርድ {card} ተይዟል · ቀይር",
   "lobby.deposit_to_play": "ለመጫወት ገቢ ያድርጉ",
   "lobby.confirm_title": "ካርድ {card} ማረጋገጫ",
+  "lobby.refresh": "አድስ",
+  "lobby.balance_label": "ቀሪ ሂሳብ",
+  "lobby.stake_label": "መደብ",
+  "lobby.win_label": "ደራሽ",
+  "lobby.connected": "ተገናኝቷል",
+  "lobby.not_connected": "በመገናኘት ላይ…",
 
   "game.derash": "ደራሽ",
   "game.players": "ተጫዋቾች",

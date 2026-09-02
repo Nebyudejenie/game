@@ -47,8 +47,30 @@
 
   <!-- 2.2 Card selection (LOBBY) -->
   <main id="screen-lobby" class="screen" data-screen="lobby">
-    <div class="lobby-header">
+    <div class="lobby-topbar">
+      <button id="lobby-refresh-btn" class="lobby-refresh-btn" type="button">
+        <span class="lobby-refresh-icon">&#8635;</span>
+        <span data-i18n="lobby.refresh"></span>
+      </button>
+      <div class="lobby-balance-pill">
+        <span data-i18n="lobby.balance_label"></span>
+        <span id="lobby-balance-amount">-- ETB</span>
+      </div>
+    </div>
+    <div class="lobby-status-row">
+      <div id="lobby-connection-pill" class="lobby-connection-pill">
+        <span class="lobby-connection-dot"></span>
+        <span id="lobby-connection-label"></span>
+      </div>
       <span id="lobby-countdown" class="stat-value"></span>
+      <div class="lobby-stake-pill">
+        <span data-i18n="lobby.stake_label"></span>
+        <span id="lobby-stake-amount">0.00 ETB</span>
+      </div>
+    </div>
+    <div class="lobby-win-bar">
+      <span data-i18n="lobby.win_label"></span>
+      <span id="lobby-win-amount">0.00 ETB</span>
     </div>
     <div id="card-grid" class="card-grid"></div>
     <button id="lobby-cta" class="btn-primary" disabled></button>

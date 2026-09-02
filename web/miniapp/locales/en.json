@@ -11,6 +11,12 @@
   "lobby.card_taken_change": "Card {card} taken · Change",
   "lobby.deposit_to_play": "Deposit to play",
   "lobby.confirm_title": "Confirm card {card}",
+  "lobby.refresh": "Refresh",
+  "lobby.balance_label": "Balance",
+  "lobby.stake_label": "Stake",
+  "lobby.win_label": "Win",
+  "lobby.connected": "Connected",
+  "lobby.not_connected": "Connecting…",
 
   "game.derash": "Derash",
   "game.players": "Players",
