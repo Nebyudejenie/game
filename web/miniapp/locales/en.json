@@ -125,6 +125,7 @@
   "connection.offline": "Disconnected",
   "connection.expired": "Your session has expired. Please close and reopen this app.",
   "connection.connect_failed": "Unable to connect to the game server. Tap to retry.",
+  "connection.retry": "Try Again",
 
   "error.generic": "Something went wrong. Please try again.",
   "error.room_unavailable": "This room isn't available right now.",
