@@ -8839,6 +8839,114 @@ confirmed to fail against the code before this fix (an empty log list)
 before trusting it. Full clean-slate rebuild: mypy clean across 75
 source files, `pytest tests/` 919 passed / 39 deselected.
 
+## 2026-09-01 — A real CLI to diagnose (and fix) the bot's own Telegram chat menu button
+
+Direct follow-up to the blank-screen/rejected-handshake investigation
+above. The user asked this session to investigate and fix the
+`@aradabbot` launch issue directly, but this sandbox has no production
+access (no SSH, no real `TELEGRAM_BOT_TOKEN`) -- the same constraint
+already documented for the earlier two fixes in this arc. What this
+session *can* do without that access: build the real, permanent tool
+that whoever has it needs to actually check and fix the one remaining
+untested hypothesis -- Telegram's persistent chat menu button (the icon
+next to the message box), a launch surface entirely separate from and
+never previously touched by anything in this codebase.
+`services/bot/keyboards.py`'s in-chat "▶️ Play" button
+(`main_menu_keyboard()`) was already confirmed correct (`web_app=
+WebAppInfo(url=miniapp_url)`) by reading the code directly; nothing in
+this repo has ever called `setChatMenuButton`, so whatever the menu
+button currently does was configured (or never configured) entirely
+outside this repo, via BotFather or by hand.
+
+**Built**: `services/bot/verify_menu_button.py` -- `python -m
+services.bot.verify_menu_button` reports the bot's real identity
+(`get_me()`, cross-checked against the configured
+`TELEGRAM_BOT_USERNAME` for a token/username mismatch -- the single
+most likely explanation if a *different* bot's token ended up in
+production's `deploy/.env`) and the menu button's current configuration,
+writing nothing. `--fix` corrects it to a real `web_app` launch pointed
+at `MINIAPP_URL`, but only when it's genuinely wrong and only when
+`MINIAPP_URL` is actually configured -- refuses to touch anything
+otherwise. Never prints the bot token; `get_me()`'s response carries no
+secret.
+
+Tested with a real `unittest.mock.AsyncMock` fake bot (matching
+`test_notifier.py`'s own established pattern for testing aiogram code
+without hitting the real Telegram API, which no test in this repo does
+or should) -- 7 tests covering the mismatch case, already-correct
+no-op, wrong-button-without-`--fix`, `--fix` actually correcting it, and
+refusing to fix without `MINIAPP_URL` configured. mypy clean.
+
+## 2026-09-02 — Wallet screen redesign: a real wallet.css, card-based deposit/withdraw, a live withdrawal summary
+
+The user asked for the wallet/deposit/withdraw screens to be visually
+modernized, using reference screenshots from a different, more
+feature-rich bot as inspiration -- explicitly cleaner/faster than the
+reference, not a literal copy, and explicitly preserving all existing
+backend logic, game rules, and security posture. Two things in the
+references were deliberately *not* built, flagged directly rather than
+silently implemented: a 150-number board (this platform is standard
+75-ball Bingo throughout the ledger, card generator, and every test --
+not a cosmetic choice) and "instant" SMS-paste auto-verification of
+deposits (this system deliberately never auto-credits an unreviewed
+manual deposit; trusting pasted SMS text as payment proof is a real
+fraud vector, not a UI decision).
+
+**A real, pre-existing gap closed along the way**: `tokens.css`'s own
+header comment has said "Wallet/settings screens... see wallet.css" since
+before this session -- no such file ever existed; the wallet styles just
+lived mixed into `screens.css`. Genuinely split out now, `web/miniapp/
+css/wallet.css`, fulfilling what was already documented as the intended
+structure.
+
+**What changed, all pure restyle/UI-polish -- zero backend or game-rule
+changes**:
+- A hero balance card (icon badge + big cash figure) replacing three
+  plain label/value rows, with bonus/locked as secondary figures below.
+- The old bare `<select>` for choosing a manual deposit destination
+  replaced with real selectable cards (icon, name, account ref, a
+  checkmark on the selected one) -- same underlying data, same
+  `manual_destination_id` ultimately submitted, just a real UI control
+  instead of a native dropdown. Closed a latent, admin-only stored-XSS
+  gap while rebuilding this exact code path: destination `account_name`/
+  `account_ref` were interpolated into `innerHTML` completely unescaped
+  before this (new `escapeHtml()` helper, `app.js`).
+- A live "Withdrawal Summary" card under the withdraw form -- amount/
+  account/holder mirrored from the three existing inputs via `input`
+  listeners (pure client-side reflection, no new data), with a real
+  status pill that moves through not-submitted → pending →
+  approved/pending-approval as the existing submit flow actually
+  progresses.
+- History rows restyled as cards with a status dot (green for a won
+  round) instead of plain divider-separated lines.
+- Every existing element id app.js already depended on was kept exactly
+  as-is; only wrapper markup and CSS classes changed. Three e2e tests
+  that drove the old `<select>` via `page.select_option()` were updated
+  to click the new destination cards instead
+  (`test_miniapp_wallet_e2e.py`) -- everything else needed no changes at
+  all, confirming the restyle didn't touch behavior.
+
+`color-mix()` is used for a few theme-aware tinted backgrounds (the
+wallet screen dynamically adopts Telegram's own `themeParams` at
+runtime -- `applyWalletTheme()`, pre-existing -- so a tint needs to be
+computed from the live `--accent`/`--call`/`--near` custom properties,
+not a static hex baked in for one specific theme). Given a real-money
+production app, added a plain solid-color fallback before each
+`color-mix()` declaration for older WebView engines, even though
+`color-mix()` has had broad support since well before this platform's
+2026 target.
+
+Full clean-slate rebuild after a genuine `docker compose down -v` (the
+Redis connection-pool exhaustion this session has hit and documented
+several times before recurred again after a long idle gap between
+messages -- confirmed environmental, not a regression, by the same
+already-established method: a real restart cleanly resolved it, 926/926
+passed afterward where 2/926 had failed before): mypy clean across 76
+source files, `pytest tests/` 926 passed / 39 deselected, full `-m e2e`
+32 passed / 933 deselected. Real Playwright screenshots taken and
+visually reviewed for the balance, deposit, withdraw (with the live
+summary card mid-flow), and history panes.
+
 ## Pre-existing repo state noted, not touched
 
 This directory already had a `.git` folder with `origin` pointing to

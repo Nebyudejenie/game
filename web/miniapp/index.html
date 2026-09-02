@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="css/tokens.css" />
   <link rel="stylesheet" href="css/base.css" />
   <link rel="stylesheet" href="css/screens.css" />
+  <link rel="stylesheet" href="css/wallet.css" />
 </head>
 <body>
   <div id="connection-banner"></div>
@@ -136,7 +137,7 @@
 
   <!-- 2.6 Wallet -->
   <main id="screen-wallet" class="screen" data-screen="wallet">
-    <div class="room-list-header">
+    <div class="wallet-header">
       <h2 data-i18n="wallet.title"></h2>
       <button id="wallet-back-btn">✕</button>
     </div>
@@ -148,9 +149,23 @@
     </div>
 
     <div id="wallet-pane-balance" class="wallet-pane">
-      <div class="wallet-balance-row"><span data-i18n="wallet.cash"></span><span id="wallet-cash">0.00 ETB</span></div>
-      <div class="wallet-balance-row"><span data-i18n="wallet.bonus"></span><span id="wallet-bonus">0.00 ETB</span></div>
-      <div class="wallet-balance-row"><span data-i18n="wallet.locked"></span><span id="wallet-locked">0.00 ETB</span></div>
+      <div class="wallet-card balance-hero">
+        <div class="balance-icon">💰</div>
+        <div class="balance-figures">
+          <div class="balance-label" data-i18n="wallet.cash"></div>
+          <div class="balance-value" id="wallet-cash">0.00 ETB</div>
+        </div>
+      </div>
+      <div class="balance-secondary">
+        <div class="balance-secondary-item">
+          <div class="label" data-i18n="wallet.bonus"></div>
+          <div class="value" id="wallet-bonus">0.00 ETB</div>
+        </div>
+        <div class="balance-secondary-item">
+          <div class="label" data-i18n="wallet.locked"></div>
+          <div class="value" id="wallet-locked">0.00 ETB</div>
+        </div>
+      </div>
     </div>
     <div id="wallet-pane-deposit" class="wallet-pane hidden">
       <div id="deposit-automatic-section">
@@ -184,6 +199,32 @@
         <input type="checkbox" id="withdraw-manual-checkbox" />
         <span data-i18n="wallet.manual_withdraw_toggle"></span>
       </label>
+
+      <div class="summary-card">
+        <div class="summary-header">
+          <span class="summary-title" data-i18n="wallet.summary_title"></span>
+          <span class="status-pill" id="withdraw-summary-status" data-i18n="wallet.summary_not_submitted"></span>
+        </div>
+        <div class="summary-grid">
+          <div>
+            <div class="label" data-i18n="wallet.summary_amount"></div>
+            <div class="value" id="withdraw-summary-amount">0 ETB</div>
+          </div>
+          <div>
+            <div class="label" data-i18n="wallet.summary_account"></div>
+            <div class="value" id="withdraw-summary-account" data-i18n="wallet.summary_not_provided"></div>
+          </div>
+          <div>
+            <div class="label" data-i18n="wallet.summary_holder"></div>
+            <div class="value" id="withdraw-summary-holder" data-i18n="wallet.summary_not_provided"></div>
+          </div>
+          <div>
+            <div class="label" data-i18n="wallet.summary_processing_time"></div>
+            <div class="value" data-i18n="wallet.summary_processing_time_value"></div>
+          </div>
+        </div>
+      </div>
+
       <button id="withdraw-submit-btn" class="btn-primary" data-i18n="wallet.withdraw_submit"></button>
       <p id="withdraw-status" class="wallet-note"></p>
     </div>

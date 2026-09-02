@@ -467,12 +467,13 @@ async def test_manual_deposit_flow_submits_a_real_review_request(gateway_server,
 
     await _open_wallet_tab(page, "deposit")
     await page.click("#deposit-manual-toggle-btn")
-    await page.wait_for_selector("#deposit-manual-destination-select", timeout=10000)
-    # The dropdown lists every active destination (shared, session-wide
-    # data other tests also insert into), ordered by method_kind then id
-    # -- not necessarily this test's own newest row -- so select it
-    # explicitly rather than assuming it's the default option.
-    await page.select_option("#deposit-manual-destination-select", str(destination_row["id"]))
+    destination_selector = f'.destination-card[data-id="{destination_row["id"]}"]'
+    await page.wait_for_selector(destination_selector, timeout=10000)
+    # The card list shows every active destination (shared, session-wide
+    # data other tests also insert into), not necessarily with this
+    # test's own newest row auto-selected -- click it explicitly rather
+    # than assuming it's the default.
+    await page.click(destination_selector)
 
     await page.fill("#deposit-manual-amount-input", "300")
     await page.fill("#deposit-manual-reference-input", "FT-E2E-MINIAPP-1")
@@ -658,8 +659,9 @@ async def test_full_lifecycle_registration_through_withdrawal_using_the_manual_r
         # --- Deposit (manual, real browser submission) ---
         await _open_wallet_tab(page, "deposit")
         await page.click("#deposit-manual-toggle-btn")
-        await page.wait_for_selector("#deposit-manual-destination-select", timeout=10000)
-        await page.select_option("#deposit-manual-destination-select", str(destination_row["id"]))
+        destination_selector = f'.destination-card[data-id="{destination_row["id"]}"]'
+        await page.wait_for_selector(destination_selector, timeout=10000)
+        await page.click(destination_selector)
         await page.fill("#deposit-manual-amount-input", "100")
         await page.fill("#deposit-manual-reference-input", "FT-E2E-LIFECYCLE-1")
         await page.click("#deposit-manual-submit-btn")
