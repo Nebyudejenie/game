@@ -699,6 +699,47 @@ async def test_create_and_update_room_admin_writes_audit_log(pool):
     assert "rooms.update" in actions
 
 
+async def test_max_cards_per_player_settable_at_creation_and_via_update(pool):
+    # Without this, rooms.max_cards_per_player's DEFAULT 1 (migration
+    # deeff3c6228e) can never actually be raised by anyone -- the engine/
+    # gateway support for multiple cards per player has no operational
+    # path to turn on for a real room otherwise.
+    admin_id, *_ = await create_test_admin(pool)
+    room_id = await queries.create_room_admin(
+        pool,
+        admin_id=admin_id,
+        code=f"admin-test-{room_id_suffix()}",
+        stake=Decimal("10.00"),
+        house_cut_bps=2000,
+        min_players=2,
+        max_players=100,
+        max_cards_per_player=4,
+        lobby_seconds=30,
+        call_interval_ms=4000,
+        result_seconds=10,
+        win_patterns=["row"],
+        ip_address="127.0.0.1",
+    )
+    row = await pool.fetchrow("SELECT max_cards_per_player FROM rooms WHERE id = $1", room_id)
+    assert row["max_cards_per_player"] == 4
+
+    rooms = await queries.list_rooms(pool)
+    listed = next(r for r in rooms if r["id"] == room_id)
+    assert listed["max_cards_per_player"] == 4
+
+    updated = await queries.update_room_admin(
+        pool,
+        admin_id=admin_id,
+        room_id=room_id,
+        changes={"max_cards_per_player": 2},
+        reason="lowering the cap",
+        ip_address="127.0.0.1",
+    )
+    assert updated is True
+    row = await pool.fetchrow("SELECT max_cards_per_player FROM rooms WHERE id = $1", room_id)
+    assert row["max_cards_per_player"] == 2
+
+
 async def test_update_room_rejects_unknown_field(pool):
     admin_id, *_ = await create_test_admin(pool)
     room_id = await queries.create_room_admin(

@@ -572,6 +572,16 @@
   padding: 10px;
 }
 
+/* A player can hold more than one card in the same round now (spec:
+   configurable via room.max_cards_per_player) -- js/app.v6.js's
+   buildGameCards() builds one .your-card-item per held card into this
+   list, each with its own grid and its own claim button underneath it. */
+.your-cards-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
 .your-card-title {
   font-size: var(--fs-sm);
   color: var(--muted);

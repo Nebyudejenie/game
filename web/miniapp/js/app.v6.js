@@ -10,7 +10,6 @@ const tg = window.Telegram && window.Telegram.WebApp;
 
 let winPatterns = ["row", "col", "diag", "corners"];
 let countdownTimer = null;
-let hasClaimedThisRound = false;
 
 // --- screen management --------------------------------------------------
 
@@ -211,7 +210,6 @@ function tickRoomCountdowns() {
 // --- entering a room: state_sync decides which screen to show -----------
 
 function enterRoom(roomId) {
-  hasClaimedThisRound = false;
   // Earliest reliable user gesture in the join flow -- satisfies mobile
   // Safari / Telegram WebView's autoplay policy for every announce()
   // later in this session, without needing a gesture on every call.
@@ -229,7 +227,7 @@ ws.on("state_sync", (msg) => {
   } else if (msg.status === "lobby") {
     enterLobby(msg);
   } else if (msg.status === "running" || msg.status === "settling") {
-    if (msg.your_card) {
+    if (msg.your_cards && msg.your_cards.length > 0) {
       enterGame(msg);
     } else {
       enterSpectate(msg);
@@ -239,13 +237,28 @@ ws.on("state_sync", (msg) => {
 
 // --- lobby (card selection) --------------------------------------------
 
-let selectedCard = null;
+// selectedCards is the full UI selection (held + newly tapped); heldCards
+// is only what the server has actually confirmed this user owns. The
+// difference between them is exactly what the CTA commits -- a player
+// can select several cards before ever sending take_card, matching the
+// reference's own "pick, then confirm" flow, rather than one command per
+// tap.
+let selectedCards = new Set();
+let heldCards = new Set();
 const takenCards = new Set();
+let maxCardsPerPlayer = 1;
+// Counts take_card commands sent in the CTA's current batch that haven't
+// acked yet -- see the ack handler below for why this exists.
+let pendingTakeCardAcks = 0;
 
 function enterLobby(sync) {
   showScreen("lobby");
-  selectedCard = sync.your_card || null;
+  const yourCards = sync.your_cards || [];
+  heldCards = new Set(yourCards.map((c) => c.card_no));
+  selectedCards = new Set(heldCards);
+  maxCardsPerPlayer = sync.max_cards_per_player || 1;
   takenCards.clear();
+  pendingTakeCardAcks = 0;
   buildCardGrid();
   updateLobbyCta();
   startLobbyCountdown(sync);
@@ -271,9 +284,15 @@ function buildCardGrid() {
     cell.className = "card-grid-cell";
     cell.textContent = String(n);
     makeKeyboardActivatable(cell, () => {
-      if (takenCards.has(n) && n !== selectedCard) return;
+      if (heldCards.has(n)) return; // already committed -- not toggleable here
+      if (takenCards.has(n)) return; // someone else's
       haptics.lightTap();
-      selectedCard = n;
+      if (selectedCards.has(n)) {
+        selectedCards.delete(n);
+      } else {
+        if (selectedCards.size >= maxCardsPerPlayer) return; // at this room's cap
+        selectedCards.add(n);
+      }
       renderCardGridState();
       updateLobbyCta();
     });
@@ -285,8 +304,8 @@ function buildCardGrid() {
 function renderCardGridState() {
   for (const cellEl of el("card-grid").children) {
     const n = Number(cellEl.textContent);
-    cellEl.classList.toggle("taken", takenCards.has(n) && n !== selectedCard);
-    cellEl.classList.toggle("selected", n === selectedCard);
+    cellEl.classList.toggle("taken", takenCards.has(n) && !selectedCards.has(n));
+    cellEl.classList.toggle("selected", selectedCards.has(n));
   }
 }
 
@@ -294,25 +313,30 @@ function updateLobbyCta() {
   const cta = el("lobby-cta");
   const state = getState();
   const stake = state.round ? state.round.stake : "";
-  const alreadyMine = state.round && state.round.your_card === selectedCard;
+  const newCards = [...selectedCards].filter((n) => !heldCards.has(n));
 
-  if (selectedCard === null) {
-    cta.textContent = t("lobby.pick_card");
+  if (newCards.length === 0) {
     cta.disabled = true;
+    cta.textContent = heldCards.size > 0 ? t("lobby.cards_held", { count: heldCards.size }) : t("lobby.pick_card");
     return;
   }
   cta.disabled = false;
-  cta.textContent = alreadyMine
-    ? t("lobby.card_taken_change", { card: selectedCard })
-    : t("lobby.take_card", { card: selectedCard, stake });
+  const totalStake = stake === "" ? "" : (Number(stake) * newCards.length).toFixed(2);
+  cta.textContent =
+    newCards.length === 1
+      ? t("lobby.take_card", { card: newCards[0], stake: totalStake })
+      : t("lobby.take_cards", { count: newCards.length, stake: totalStake });
 }
 
 el("lobby-cta").addEventListener("click", () => {
   const state = getState();
-  if (selectedCard === null || !state.currentRoomId) return;
-  if (state.round && state.round.your_card === selectedCard) return; // already committed
+  const newCards = [...selectedCards].filter((n) => !heldCards.has(n));
+  if (newCards.length === 0 || !state.currentRoomId) return;
   haptics.mediumTap();
-  ws.takeCard(state.currentRoomId, selectedCard);
+  pendingTakeCardAcks += newCards.length;
+  for (const cardNo of newCards) {
+    ws.takeCard(state.currentRoomId, cardNo);
+  }
 });
 
 ws.on("card_taken", (msg) => {
@@ -322,24 +346,30 @@ ws.on("card_taken", (msg) => {
 });
 
 ws.on("ack", (msg) => {
-  if (!msg.ok) {
-    showToast(msg.reason || "error.generic");
-    return;
-  }
+  if (!msg.ok) showToast(msg.reason || "error.generic");
   if (msg.for === "take_card") {
-    haptics.success();
-    // The ack only confirms success -- it doesn't carry the card's actual
-    // grid (the command channel's replies are deliberately {ok, reason}
-    // only). Re-requesting state_sync is what actually populates
-    // your_card_grid, which enterGame() needs once the round starts;
-    // patching only `your_card` locally left it null and crashed
-    // setCardGrid() the moment round_start fired (a real bug an E2E test
-    // caught -- see DECISIONS.md).
-    const state = getState();
-    if (state.currentRoomId !== null) ws.joinRoom(state.currentRoomId);
-    // enterLobby(), triggered by the state_sync reply just requested
-    // above, is what refreshes the CTA text correctly (it has the fresh
-    // your_card by then); no need to also do it here against stale state.
+    if (msg.ok) haptics.success();
+    // The CTA can fire several take_card commands in one batch (multi-card
+    // selection) -- re-syncing after every single ack would rebuild the
+    // whole lobby grid N times, destroying scroll/focus each time. Wait
+    // until the whole batch has acked (success or failure) before doing
+    // the one re-sync that actually matters.
+    pendingTakeCardAcks = Math.max(0, pendingTakeCardAcks - 1);
+    if (pendingTakeCardAcks === 0) {
+      // The ack only confirms success -- it doesn't carry the card's
+      // actual grid (the command channel's replies are deliberately
+      // {ok, reason} only). Re-requesting state_sync is what actually
+      // populates your_cards, which enterGame() needs once the round
+      // starts; patching held state locally from acks alone left grids
+      // null and crashed setGrid() the moment round_start fired (a real
+      // bug an E2E test caught -- see DECISIONS.md).
+      const state = getState();
+      if (state.currentRoomId !== null) ws.joinRoom(state.currentRoomId);
+      // enterLobby(), triggered by the state_sync reply just requested
+      // above, is what refreshes the CTA text correctly (it has the
+      // fresh your_cards by then); no need to also do it here against
+      // stale state.
+    }
   }
 });
 
@@ -381,28 +411,79 @@ subscribe((state) => {
 
 // --- game screen (RUNNING) ---------------------------------------------
 
+// One entry per card the player holds this round -- a player can hold
+// several (room.max_cards_per_player), each with its own independent
+// createCard() instance and its own claim button, so marking or claiming
+// one can never bleed into another (see render/card.js's factory
+// conversion). { cardNo, instance, btn, claimed }.
+let gameCards = [];
+
 function enterGame(sync) {
   showScreen("game");
-  hasClaimedThisRound = false;
   board.buildBoard(el("board"));
-  card.buildCard(el("your-card"));
-  card.setCardGrid(sync.your_card_grid);
-  board.setYourCardNumbers(sync.your_card_grid ? gridNumbers(sync.your_card_grid) : []);
+  // your_cards is the real, complete list; your_card/your_card_grid stay
+  // as a fallback purely for a state_sync payload from before this synced
+  // (shouldn't happen post-deploy, but costs nothing to tolerate).
+  const yourCards =
+    sync.your_cards && sync.your_cards.length > 0
+      ? sync.your_cards
+      : sync.your_card_grid
+        ? [{ card_no: sync.your_card, grid: sync.your_card_grid, auto_mark: sync.auto_mark }]
+        : [];
+  buildGameCards(yourCards);
+  board.setYourCardNumbers(yourCards.flatMap((c) => gridNumbers(c.grid)));
   board.markAllCalled(sync.called || []);
-  card.markCalledOnCard(new Set(sync.called || []));
+  const calledSet = new Set(sync.called || []);
+  for (const gc of gameCards) gc.instance.markCalled(calledSet);
   updateStatStrip(sync);
-  updateBingoButton(new Set(sync.called || []));
+  updateBingoButtons(calledSet);
 
   const autoOn = sync.auto_mark !== false;
   setState({ autoMark: autoOn });
   el("auto-switch").classList.toggle("on", autoOn);
   el("auto-switch").setAttribute("aria-checked", String(autoOn));
+}
 
-  card.onCellClick((r, c) => {
-    if (getState().autoMark) return;
-    // Optimistic local mark only -- the server never trusts this; it
-    // always recomputes from its own called-numbers set (spec principle 1).
-    haptics.lightTap();
+function buildGameCards(yourCards) {
+  const list = el("your-cards-list");
+  list.innerHTML = "";
+  gameCards = yourCards.map((c) => {
+    const item = document.createElement("div");
+    item.className = "your-card-item";
+
+    const title = document.createElement("div");
+    title.className = "your-card-title";
+    title.textContent = t("game.your_card_no", { card: c.card_no });
+    item.appendChild(title);
+
+    const cardEl = document.createElement("div");
+    item.appendChild(cardEl);
+
+    const btn = document.createElement("button");
+    btn.className = "btn-primary bingo-btn";
+    btn.disabled = true;
+    btn.textContent = t("game.bingo");
+    item.appendChild(btn);
+
+    list.appendChild(item);
+
+    const instance = card.createCard(cardEl);
+    instance.setGrid(c.grid);
+    instance.onCellClick(() => {
+      if (getState().autoMark) return;
+      // Optimistic local mark only -- the server never trusts this; it
+      // always recomputes from its own called-numbers set (spec principle 1).
+      haptics.lightTap();
+    });
+
+    const entry = { cardNo: c.card_no, instance, btn, claimed: false };
+    btn.addEventListener("click", () => {
+      const state = getState();
+      if (btn.disabled || !state.round || !state.round.round_id) return;
+      entry.claimed = true;
+      ws.claim(state.round.round_id, entry.cardNo);
+    });
+    return entry;
   });
 }
 
@@ -432,7 +513,7 @@ ws.on("round_start", (sync) => {
   setState({ round: merged });
   voiceCaller.resetRound();
   if (getState().screen === "lobby" || getState().screen === "game") {
-    if (merged.your_card) enterGame(merged);
+    if (merged.your_cards && merged.your_cards.length > 0) enterGame(merged);
     else enterSpectate(merged);
   }
   updateStatStrip(merged);
@@ -444,7 +525,7 @@ ws.on("call", (msg) => {
   board.markCalled(msg.number);
   const calledSoFar = new Set([...(state.round ? state.round.called || [] : []), msg.number]);
   setState({ round: { ...state.round, called: [...calledSoFar], call_index: msg.index } });
-  card.markCalledOnCard(calledSoFar);
+  for (const gc of gameCards) gc.instance.markCalled(calledSoFar);
 
   const badge = el("call-badge");
   badge.textContent = `${msg.letter}${msg.number}`;
@@ -457,7 +538,7 @@ ws.on("call", (msg) => {
 
   pushRecentCall(msg);
   el("stat-call").textContent = `${msg.index}/75`;
-  updateBingoButton(calledSoFar);
+  updateBingoButtons(calledSoFar);
 });
 
 function pushRecentCall(msg) {
@@ -469,24 +550,21 @@ function pushRecentCall(msg) {
   while (recent.children.length > 3) recent.removeChild(recent.lastChild);
 }
 
-function updateBingoButton(calledSet) {
-  const btn = el("bingo-btn");
-  const complete = card.hasCompletePattern(calledSet, winPatterns);
-  btn.disabled = !complete || hasClaimedThisRound;
-
+// Each held card's completion/claim state is independent -- a false claim
+// or an already-claimed card never disables another card's own button,
+// matching the reference's per-card claim buttons and the engine's
+// per-card lockout (round_engine.py's claim()).
+function updateBingoButtons(calledSet) {
   const state = getState();
-  if (state.autoMark && complete && !hasClaimedThisRound && state.round && state.round.round_id) {
-    hasClaimedThisRound = true;
-    ws.claim(state.round.round_id);
+  for (const gc of gameCards) {
+    const complete = gc.instance.hasCompletePattern(calledSet, winPatterns);
+    gc.btn.disabled = !complete || gc.claimed;
+    if (state.autoMark && complete && !gc.claimed && state.round && state.round.round_id) {
+      gc.claimed = true;
+      ws.claim(state.round.round_id, gc.cardNo);
+    }
   }
 }
-
-el("bingo-btn").addEventListener("click", () => {
-  const state = getState();
-  if (el("bingo-btn").disabled || !state.round || !state.round.round_id) return;
-  hasClaimedThisRound = true;
-  ws.claim(state.round.round_id);
-});
 
 // role="switch" (not the generic "button" makeKeyboardActivatable
 // defaults to), since this is a real on/off toggle -- set before calling
@@ -582,11 +660,15 @@ el("voice-settings-btn").addEventListener("click", () => {
 
 ws.on("claim_result", (msg) => {
   if (msg.valid) return; // the eventual round_end message drives the UI
-  hasClaimedThisRound = false;
-  const btn = el("bingo-btn");
-  btn.classList.remove("shake");
-  void btn.offsetWidth;
-  btn.classList.add("shake");
+  // card_no targets exactly the card that was claimed -- without it, a
+  // false claim on one card would reset/shake every held card's button
+  // instead of just the one that was actually wrong.
+  const gc = gameCards.find((c) => c.cardNo === msg.card_no);
+  if (!gc) return;
+  gc.claimed = false;
+  gc.btn.classList.remove("shake");
+  void gc.btn.offsetWidth;
+  gc.btn.classList.add("shake");
   haptics.warning();
   showToast("game.no_pattern_yet");
 });
@@ -617,28 +699,36 @@ ws.on("round_end", (msg) => {
 
   const state = getState();
   const userId = state.user ? state.user.id : null;
-  const mine = (msg.winners || []).find((w) => w.user_id === userId);
+  // A player can win on more than one of their own cards in the same
+  // round now -- summing every one of their own winning entries (not
+  // just the first) is what keeps the reality-check total and the
+  // result screen's own amount correct once that happens.
+  const myWins = (msg.winners || []).filter((w) => w.user_id === userId);
   const stake = state.round ? state.round.stake : "0";
   // Spectators (joined with no card) never staked this round -- don't
   // touch the reality-check total for them.
-  const participated = Boolean(state.round && state.round.your_card);
+  const participated = Boolean(state.round && state.round.your_cards && state.round.your_cards.length > 0);
 
   if (participated) {
-    const delta = mine
-      ? parseFloat(mine.amount)
-      : (msg.winners || []).length > 0
-        ? -parseFloat(stake)
-        : 0; // no winner: the stake was refunded, net zero
+    const delta =
+      myWins.length > 0
+        ? myWins.reduce((sum, w) => sum + parseFloat(w.amount), 0)
+        : (msg.winners || []).length > 0
+          ? -parseFloat(stake)
+          : 0; // no winner: the stake was refunded, net zero
     setState({ sessionNetPosition: state.sessionNetPosition + delta });
   }
 
   showScreen("result");
-  const shown = mine || (msg.winners || [])[0] || null;
-  if (mine) {
+  const shown = myWins[0] || (msg.winners || [])[0] || null;
+  if (myWins.length > 0) {
+    const totalAmount = myWins.reduce((sum, w) => sum + parseFloat(w.amount), 0);
     el("result-title").textContent = t("result.win_title");
     el("result-title").classList.add("win");
-    el("result-amount").textContent = `+ ${mine.amount} ETB`;
-    el("result-meta").textContent = t("result.card_row", { card: mine.card_no, pattern: mine.pattern });
+    el("result-amount").textContent = `+ ${totalAmount.toFixed(2)} ETB`;
+    el("result-meta").textContent = myWins
+      .map((w) => t("result.card_row", { card: w.card_no, pattern: w.pattern }))
+      .join(" · ");
     haptics.success();
   } else if (shown) {
     // A winner identifier, not just a bare amount -- every other player

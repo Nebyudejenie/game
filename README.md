@@ -62,6 +62,17 @@ python3 -m venv .venv
 #    (mapped to host ports 5433 / 6380, not the defaults, in case another
 #    project on the same machine is already using 5432 / 6379)
 docker compose -f deploy/docker-compose.yml up -d postgres redis
+#
+#    If you ever reset the stack with `down -v`: also clear
+#    backups/wal_archive/ first (a host bind mount, deliberately NOT wiped
+#    by `-v` -- see docker-compose.yml's own comment on why). A fresh
+#    Postgres volume always restarts its WAL numbering at segment 1, which
+#    collides with old segment 1 still sitting in that directory --
+#    archive_command's own overwrite guard (test ! -f) then fails forever,
+#    and any test/script that waits on archiving (test_backup_restore.py,
+#    a real pg_basebackup) hangs indefinitely rather than erroring. This
+#    cost a real multi-hour stall the first time it was hit.
+rm -rf backups/wal_archive/*
 
 # 3. Apply migrations
 .venv/bin/alembic -c migrations/alembic.ini upgrade head

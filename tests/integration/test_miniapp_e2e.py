@@ -367,10 +367,14 @@ async def test_miniapp_full_gameplay_flow(gateway_server, browser, pool, redis, 
         await cells[9].click()  # card #10
         await page.click("#lobby-cta")
         # Proof the take_card ack actually landed, not just that the click
-        # happened: the CTA switches to the "already taken, tap to change"
-        # wording once the server confirms.
+        # happened: selecting an unheld card enables the CTA, and only the
+        # server-confirmed re-sync that follows a real ack (app.v6.js's
+        # ack handler) flips it back to disabled ("holding N cards" with
+        # nothing new selected) -- unlike the old single-card CTA text,
+        # which already named the card number before the ack ever landed,
+        # this can't pass on the click alone.
         await page.wait_for_function(
-            "document.getElementById('lobby-cta').textContent.includes('10')", timeout=5000
+            "document.getElementById('lobby-cta').disabled === true", timeout=5000
         )
 
         await page.wait_for_selector("#screen-game.active", timeout=25000)
@@ -453,7 +457,7 @@ async def test_verify_draw_button_shows_a_verified_seed(gateway_server, browser,
         await cells[9].click()  # card #10
         await page.click("#lobby-cta")
         await page.wait_for_function(
-            "document.getElementById('lobby-cta').textContent.includes('10')", timeout=5000
+            "document.getElementById('lobby-cta').disabled === true", timeout=5000
         )
 
         await page.wait_for_selector("#screen-game.active", timeout=25000)
@@ -529,7 +533,7 @@ async def test_result_screen_shows_the_winning_card_preview(gateway_server, brow
         await cells[9].click()  # card #10
         await page.click("#lobby-cta")
         await page.wait_for_function(
-            "document.getElementById('lobby-cta').textContent.includes('10')", timeout=5000
+            "document.getElementById('lobby-cta').disabled === true", timeout=5000
         )
 
         await page.wait_for_selector("#screen-game.active", timeout=25000)
@@ -641,7 +645,7 @@ async def test_voice_announcement_requests_the_correct_audio_file_for_a_call(
         await cells[9].click()  # card #10
         await page.click("#lobby-cta")
         await page.wait_for_function(
-            "document.getElementById('lobby-cta').textContent.includes('10')", timeout=5000
+            "document.getElementById('lobby-cta').disabled === true", timeout=5000
         )
 
         await page.wait_for_selector("#screen-game.active", timeout=25000)
@@ -733,7 +737,7 @@ async def test_disabling_voice_makes_zero_audio_requests(gateway_server, browser
         await cells[9].click()  # card #10
         await page.click("#lobby-cta")
         await page.wait_for_function(
-            "document.getElementById('lobby-cta').textContent.includes('10')", timeout=5000
+            "document.getElementById('lobby-cta').disabled === true", timeout=5000
         )
 
         await page.wait_for_selector("#screen-game.active", timeout=25000)

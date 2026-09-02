@@ -218,7 +218,10 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
     # that lock rows in a specific order for a reason -- there's no
     # ordering constraint to preserve here.
     room_row, round_row = await asyncio.gather(
-        pool.fetchrow("SELECT stake, win_patterns, max_players FROM rooms WHERE id = $1", room_id),
+        pool.fetchrow(
+            "SELECT stake, win_patterns, max_players, max_cards_per_player FROM rooms WHERE id = $1",
+            room_id,
+        ),
         pool.fetchrow(
             """
             SELECT id, status, call_index, draw_order, pot, derash, house_cut_bps,
@@ -318,6 +321,7 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
         "your_card_grid": your_card_grid,
         "auto_mark": auto_mark,
         "your_cards": your_cards,
+        "max_cards_per_player": room_row["max_cards_per_player"],
         "lobby_deadline_ms": lobby_deadline_ms,
         "server_time": int(time.time() * 1000),
     }

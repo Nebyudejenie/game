@@ -18,6 +18,7 @@ export async function render(container) {
         <label>House cut (bps) <input type="number" name="house_cut_bps" value="2000" /></label>
         <label>Min players <input type="number" name="min_players" value="2" /></label>
         <label>Max players <input type="number" name="max_players" value="100" /></label>
+        <label>Max cards/player <input type="number" name="max_cards_per_player" value="1" min="1" max="20" /></label>
         <label>Lobby seconds <input type="number" name="lobby_seconds" value="30" /></label>
         <label>Call interval (ms) <input type="number" name="call_interval_ms" value="4000" /></label>
         <label>Result seconds <input type="number" name="result_seconds" value="10" /></label>
@@ -63,7 +64,7 @@ export async function render(container) {
       <table class="data-table">
         <thead>
           <tr>
-            <th>ID</th><th>Code</th><th>Stake</th><th>House cut</th><th>Players</th>
+            <th>ID</th><th>Code</th><th>Stake</th><th>House cut</th><th>Players</th><th>Cards/player</th>
             <th>Lobby (s)</th><th>Call (ms)</th><th>Active</th><th></th>
           </tr>
         </thead>
@@ -72,6 +73,7 @@ export async function render(container) {
             <tr data-room-id="${r.id}">
               <td>${r.id}</td><td>${escapeHtml(r.code)}</td><td>${r.stake} ETB</td>
               <td>${r.house_cut_bps / 100}%</td><td>${r.min_players}–${r.max_players}</td>
+              <td>${r.max_cards_per_player}</td>
               <td>${r.lobby_seconds}</td><td>${r.call_interval_ms}</td>
               <td>${r.is_active ? "yes" : "no"}</td>
               <td>
@@ -103,6 +105,7 @@ export async function render(container) {
           <label>House cut (bps) <input type="number" name="house_cut_bps" value="${room.house_cut_bps}" /></label>
           <label>Min players <input type="number" name="min_players" value="${room.min_players}" /></label>
           <label>Max players <input type="number" name="max_players" value="${room.max_players}" /></label>
+          <label>Max cards/player <input type="number" name="max_cards_per_player" value="${room.max_cards_per_player}" min="1" max="20" /></label>
           <label>Lobby seconds <input type="number" name="lobby_seconds" value="${room.lobby_seconds}" /></label>
           <label>Call interval (ms) <input type="number" name="call_interval_ms" value="${room.call_interval_ms}" /></label>
           <label>Result seconds <input type="number" name="result_seconds" value="${room.result_seconds}" /></label>
@@ -141,6 +144,7 @@ export async function render(container) {
       house_cut_bps: Number(data.get("house_cut_bps")),
       min_players: Number(data.get("min_players")),
       max_players: Number(data.get("max_players")),
+      max_cards_per_player: Number(data.get("max_cards_per_player")),
       lobby_seconds: Number(data.get("lobby_seconds")),
       call_interval_ms: Number(data.get("call_interval_ms")),
       result_seconds: Number(data.get("result_seconds")),
@@ -202,6 +206,7 @@ export async function render(container) {
           house_cut_bps: Number(data.get("house_cut_bps")),
           min_players: Number(data.get("min_players")),
           max_players: Number(data.get("max_players")),
+          max_cards_per_player: Number(data.get("max_cards_per_player")),
           lobby_seconds: Number(data.get("lobby_seconds")),
           call_interval_ms: Number(data.get("call_interval_ms")),
           result_seconds: Number(data.get("result_seconds")),

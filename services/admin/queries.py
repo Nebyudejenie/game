@@ -465,19 +465,26 @@ async def set_kyc_level(
 
 
 async def list_rounds(pool: asyncpg.Pool, room_id: int | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    # rounds.player_count is incremented per *card* taken (round_engine.py's
+    # join()/drop_card()), not per distinct user -- correct for the pot
+    # math it also drives, but a player holding several cards would
+    # otherwise inflate this admin-facing "Players" column. A
+    # count(DISTINCT user_id) over round_entries, aliased back onto the
+    # same player_count key, mirrors the identical fix already made for
+    # the gateway's own player-facing list_rooms()/build_state_sync().
+    select = (
+        "SELECT id, room_id, seq, status, stake, pot, derash, "
+        "(SELECT count(DISTINCT user_id) FROM round_entries WHERE round_id = rounds.id) AS player_count, "
+        "started_at, ended_at FROM rounds"
+    )
     if room_id is not None:
         rows = await pool.fetch(
-            "SELECT id, room_id, seq, status, stake, pot, derash, player_count, "
-            "started_at, ended_at FROM rounds WHERE room_id = $1 ORDER BY id DESC LIMIT $2",
+            f"{select} WHERE room_id = $1 ORDER BY id DESC LIMIT $2",
             room_id,
             limit,
         )
     else:
-        rows = await pool.fetch(
-            "SELECT id, room_id, seq, status, stake, pot, derash, player_count, "
-            "started_at, ended_at FROM rounds ORDER BY id DESC LIMIT $1",
-            limit,
-        )
+        rows = await pool.fetch(f"{select} ORDER BY id DESC LIMIT $1", limit)
     return [dict(r) for r in rows]
 
 
@@ -568,8 +575,8 @@ async def void_round_admin(
 async def list_rooms(pool: asyncpg.Pool) -> list[dict[str, Any]]:
     rows = await pool.fetch(
         "SELECT id, code, stake, house_cut_bps, min_players, max_players, "
-        "lobby_seconds, call_interval_ms, result_seconds, win_patterns, is_active "
-        "FROM rooms ORDER BY stake"
+        "max_cards_per_player, lobby_seconds, call_interval_ms, result_seconds, "
+        "win_patterns, is_active FROM rooms ORDER BY stake"
     )
     out = []
     for r in rows:
@@ -588,6 +595,7 @@ async def create_room_admin(
     house_cut_bps: int,
     min_players: int,
     max_players: int,
+    max_cards_per_player: int = 1,
     lobby_seconds: int,
     call_interval_ms: int,
     result_seconds: int,
@@ -600,8 +608,9 @@ async def create_room_admin(
                 """
                 INSERT INTO rooms
                     (code, stake, house_cut_bps, min_players, max_players,
-                     lobby_seconds, call_interval_ms, result_seconds, win_patterns)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                     max_cards_per_player, lobby_seconds, call_interval_ms,
+                     result_seconds, win_patterns)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 RETURNING id
                 """,
                 code,
@@ -609,6 +618,7 @@ async def create_room_admin(
                 house_cut_bps,
                 min_players,
                 max_players,
+                max_cards_per_player,
                 lobby_seconds,
                 call_interval_ms,
                 result_seconds,
@@ -632,6 +642,7 @@ _UPDATABLE_ROOM_FIELDS = {
     "house_cut_bps",
     "min_players",
     "max_players",
+    "max_cards_per_player",
     "lobby_seconds",
     "call_interval_ms",
     "result_seconds",

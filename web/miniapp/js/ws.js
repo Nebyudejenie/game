@@ -236,16 +236,16 @@ export function takeCard(roomId, cardNo) {
   send({ t: "take_card", room_id: roomId, card_no: cardNo, idem: `${roomId}-${cardNo}-${Date.now()}` });
 }
 
-export function dropCard(roomId) {
-  send({ t: "drop_card", room_id: roomId });
+export function dropCard(roomId, cardNo) {
+  send({ t: "drop_card", room_id: roomId, card_no: cardNo });
 }
 
 export function setAuto(roomId, auto) {
   send({ t: "set_auto", room_id: roomId, auto });
 }
 
-export function claim(roundId) {
-  send({ t: "claim", round_id: roundId });
+export function claim(roundId, cardNo) {
+  send({ t: "claim", round_id: roundId, card_no: cardNo });
 }
 
 export function mark(roundId, r, c) {

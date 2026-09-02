@@ -262,9 +262,16 @@ async def test_claim_is_rate_limited_after_three_false_claims_in_one_session(
 
                 await ws.send(json.dumps({"t": "claim", "round_id": round_id}))
                 result = await recv_until(ws, "claim_result", attempts=300)
-                assert result == {"t": "claim_result", "valid": False, "reason": "no_pattern"}, (
-                    f"attempt {attempt}: {result}"
-                )
+                # card_no is the gateway's own server-side resolution (this
+                # frame deliberately sends none, matching every Mini App
+                # build before multi-card support) -- always this session's
+                # one held card, card 1.
+                assert result == {
+                    "t": "claim_result",
+                    "valid": False,
+                    "reason": "no_pattern",
+                    "card_no": 1,
+                }, f"attempt {attempt}: {result}"
 
                 await wait_until(lambda: engine.status == "idle", timeout=15)
 

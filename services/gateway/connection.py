@@ -354,7 +354,14 @@ class ConnectionHandler:
                 if not result.ok and result.reason == "no_pattern":
                     self._false_claim_count += 1
                 await self._ws.send_text(
-                    json.dumps({"t": "claim_result", "valid": result.ok, "reason": result.reason})
+                    json.dumps(
+                        {
+                            "t": "claim_result",
+                            "valid": result.ok,
+                            "reason": result.reason,
+                            "card_no": payload.get("card_no"),
+                        }
+                    )
                 )
             else:
                 await self._ws.send_text(

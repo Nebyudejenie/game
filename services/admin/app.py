@@ -608,6 +608,7 @@ class CreateRoomRequest(BaseModel):
     house_cut_bps: int = 2000
     min_players: int = 2
     max_players: int = 100
+    max_cards_per_player: int = 1
     lobby_seconds: int = 30
     call_interval_ms: int = 4000
     result_seconds: int = 10
@@ -628,6 +629,7 @@ async def create_room(
         house_cut_bps=body.house_cut_bps,
         min_players=body.min_players,
         max_players=body.max_players,
+        max_cards_per_player=body.max_cards_per_player,
         lobby_seconds=body.lobby_seconds,
         call_interval_ms=body.call_interval_ms,
         result_seconds=body.result_seconds,

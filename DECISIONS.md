@@ -5,6 +5,135 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-02 — Multi-card-per-player, Phase 4: the Mini App frontend
+
+The frontend half of `/home/prophet/.claude/plans/graceful-snacking-quail.md`,
+built on top of Phase 2+3's already-live engine/gateway support.
+
+**`web/miniapp/js/render/card.js`**: converted from a module-level
+singleton (`let cells = []; let currentGrid = null;`) to a `createCard
+(container) -> {setGrid, markCalled, hasCompletePattern, onCellClick}`
+factory. This was flagged during planning as the single most dangerous
+unaddressed item: with the old singleton, building a second card for a
+second held card would have silently made every later `markCalled()`/
+`hasCompletePattern()` call operate only on whichever card was built
+*last* -- a silent wrong-answer bug (a genuinely winning first card never
+lighting up), not a crash. `cellsForPattern()` and `renderStaticCard()`
+(the result screen's static preview) needed no changes -- already pure/
+stateless.
+
+**Lobby** (`app.v6.js`): `selectedCard` (single) replaced by two sets --
+`heldCards` (server-confirmed) and `selectedCards` (the full UI selection,
+held + newly tapped). The card grid no longer lets a tap toggle an
+already-held card off; new taps add/remove from the *delta* only, capped
+at the room's `max_cards_per_player`. The CTA computes that delta and
+shows a count-aware label ("Take 3 cards -- 30 ETB" / "Holding 2 card(s)"
+once nothing new is selected).
+
+**Batching the take, not looping the ack**: the CTA can now fire several
+`take_card` commands in one click. The `ack` handler had previously
+re-synced (`ws.joinRoom()`) on every single successful ack; doing that
+per-card in a 3-card batch would have rebuilt the whole lobby grid three
+times, discarding scroll position each time. Added a `pendingTakeCardAcks`
+counter instead -- decremented on every take_card ack (success or
+failure), one re-sync only once it reaches zero. No wire-protocol change
+needed (a batched `take_card` message carrying multiple card numbers, as
+the plan first sketched, would have meant another migration+engine+gateway
+round-trip for a UX-only concern -- the counting approach gets the same
+result over N existing single-card commands).
+
+**Game screen**: `#your-card`/`#bingo-btn` (previously exactly one of
+each, static in `index.html`) replaced by `#your-cards-list`, which
+`buildGameCards()` populates with one `.your-card-item` (title + card +
+its own BINGO button) per entry in `sync.your_cards`. Each entry tracks
+its own `claimed` flag and its own `createCard()` instance -- a false
+claim or an auto-claim on one card never disables or resets another.
+`claim_result` now carries `card_no` (added server-side in Phase 2+3
+already) and is used to target exactly the card whose claim failed,
+instead of shaking a single global button. `screens.css` gained one new
+`.your-cards-list { display: flex; flex-direction: column; gap: 14px; }`
+wrapper rule -- no other card CSS needed changing (no ID selectors on
+cards anywhere in that file).
+
+**Real money-display bug caught by re-reading `round_end`, not by a
+test**: `const mine = (msg.winners || []).find(w => w.user_id === userId)`
+only ever picked the player's *first* winning entry. A player who won on
+two of their own cards in the same round (Phase 2's whole point) would
+have seen only one card's amount added to the session reality-check total
+and shown on the result screen -- a real undercount, silent, in the
+player's own favor from the operator's perspective but wrong either way.
+Fixed to `myWins = winners.filter(...)`, summing every entry's `amount`
+for both the running session total and the displayed amount, and joining
+each won card's `result.card_row` line with " -- " when there's more than
+one. Single-card players see byte-identical output to before (a list of
+exactly one).
+
+**Test fix, not a product change**: five Playwright assertions in
+`test_miniapp_e2e.py` waited for `#lobby-cta`'s text to contain the taken
+card's number as "proof the take_card ack landed." That stopped being
+valid proof under the new CTA copy -- the *pre-ack* text ("Take card 10 --
+10.00 ETB") already contains "10" the instant the card is tapped, before
+any ack. Replaced with waiting for `#lobby-cta.disabled === true`, which
+only becomes true after the real post-ack re-sync collapses the selection
+back into `heldCards` -- an assertion that actually requires the round
+trip to have happened.
+
+**A second gap found by re-reading the surrounding code, not in the
+plan**: `rooms.max_cards_per_player` defaults to 1 (Phase 1's migration)
+and, before this pass, nothing let an operator raise it -- the admin
+console's room create/edit forms and `services/admin/queries.py` never
+touched the column at all. Every backend/frontend piece of this whole
+plan could be fully correct and still have no real path to ever turn on
+in production. Added `max_cards_per_player` to `CreateRoomRequest`,
+`create_room_admin()`, `_UPDATABLE_ROOM_FIELDS` (so the existing generic
+`update_room_admin()` picks it up for free), `list_rooms()`'s SELECT, and
+a "Max cards/player" field on both the create and edit forms in
+`web/admin/js/screens/rooms.js`. Same pass also caught `list_rounds()`'s
+"Players" column reading the raw `rounds.player_count` DB column, which
+`round_engine.py` increments per *card* taken, not per distinct user --
+the exact bug already fixed for the gateway's own `list_rooms()`/
+`build_state_sync()` in Phase 2+3, just missed for this third,
+admin-only read path. Fixed with the identical `count(DISTINCT
+user_id)` correlated-subquery pattern, aliased back onto the same
+`player_count` key so no frontend change was needed.
+
+Explicitly out of scope for this phase, matching the plan: no carousel/
+paging for 3+ stacked cards (they just stack, scroll if needed); no
+separate dimmed "reserved" visual state (`take_card` stays one atomic
+step); `/agent` referral command and the promotional-banner system are
+unrelated features.
+
+**One more real test fix, caught by actually running the suite**:
+`test_gateway_gameplay.py::test_claim_is_rate_limited_after_three_false_
+claims_in_one_session` did a strict `==` dict comparison against
+`claim_result`'s payload, which doesn't yet expect the `card_no` field
+Phase 2+3 added -- updated to assert the full payload including it.
+
+**A local dev-environment gotcha, not a product bug, that cost real
+time during this verification**: a `docker compose down -v` reset always
+restarts Postgres's WAL numbering at segment 1, but `backups/wal_archive/`
+is a host bind mount `-v` deliberately doesn't wipe (see docker-compose
+.yml's own comment) -- so a fresh instance's segment 1 collides with the
+previous instance's already-archived segment 1, `archive_command`'s own
+overwrite guard (`test ! -f`, intentionally strict for real PITR safety)
+fails forever, and anything waiting on archiving (`test_backup_restore
+.py`'s real `pg_basebackup`) hangs indefinitely instead of erroring --
+first hit, this stalled a verification run for close to three hours
+before being noticed and root-caused via `pg_stat_activity`'s
+`BackupWaitWalArchive` wait event. Not fixed at the compose/architecture
+level (would mean changing how `deploy/basebackup.sh`/`restore_pitr.sh`
+reach the archive from the host); documented instead as an explicit
+`rm -rf backups/wal_archive/*` step in the README's own `down -v`
+guidance so the next reset doesn't lose hours to it again.
+
+Full clean-slate verification: mypy clean (`packages`, `services`,
+`migrations`, 79 files); fresh `docker compose down -v && up -d` +
+`alembic upgrade head` from empty through the full multi-card migration
+chain; `pytest tests/` full default suite green -- 935 passed, 40
+deselected (e2e/load/chaos_infra, excluded by default), 0 failed.
+
+---
+
 ## 2026-09-02 — Multi-card-per-player, Phase 2+3: the engine rewrite and gateway wiring, landed together
 
 The money-critical core of the multi-card plan (`/home/prophet/.claude/
