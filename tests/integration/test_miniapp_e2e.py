@@ -755,3 +755,114 @@ async def test_disabling_voice_makes_zero_audio_requests(gateway_server, browser
     finally:
         await engine.stop()
         await asyncio.wait_for(task, timeout=15)
+
+
+async def test_a_player_can_hold_and_play_several_cards_at_once(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    """Multi-card-per-player's own real-browser proof (graceful-snacking-
+    quail.md's verification checklist: "take 2 cards, verify both render
+    independently"). Selects two cards in the lobby in one batched take
+    and confirms the game screen renders two fully independent cards,
+    each with its own distinct grid and its own BINGO button -- not one
+    card silently clobbered by the other, which is exactly the failure
+    mode render/card.js's singleton-to-factory rewrite exists to prevent
+    (the old module-level `cells`/`currentGrid` meant a *second*
+    buildCard() call would have silently repointed every later mark/claim
+    check at whichever card was built last).
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=8, call_interval_ms=300,
+        is_active=True, max_cards_per_player=3,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    try:
+        other_player = await create_funded_user(conn)
+        assert (await engine.join(other_player, 5)).ok
+
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        assert user_row is not None
+        await fund_user(conn, user_row["id"], Decimal("100.00"))
+        await page.reload()
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('100.00')", timeout=10000
+        )
+
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page.wait_for_selector(room_selector, timeout=10000)
+        await page.click(room_selector)
+        await page.wait_for_selector("#screen-lobby.active", timeout=10000)
+
+        cells = await page.query_selector_all(".card-grid-cell")
+        await cells[9].click()  # card #10
+        await cells[19].click()  # card #20
+        await page.click("#lobby-cta")
+        # Proof the batched take_card ack actually landed for BOTH cards,
+        # not just that the click happened -- app.v6.js's own
+        # pendingTakeCardAcks counter only re-syncs (and only then
+        # disables the CTA) once every card in this batch has acked.
+        await page.wait_for_function(
+            "document.getElementById('lobby-cta').disabled === true", timeout=5000
+        )
+
+        # Two separate real stakes actually happened -- not just that the
+        # UI moved on to the next screen.
+        balance_after_stake = await pool.fetchval(
+            """
+            SELECT balance FROM account_balances b
+            JOIN accounts a ON a.id = b.account_id
+            WHERE a.user_id = $1 AND a.kind = 'user_cash'
+            """,
+            user_row["id"],
+        )
+        assert balance_after_stake == Decimal("80.00"), "expected two separate 10.00 ETB stakes"
+
+        await page.wait_for_selector("#screen-game.active", timeout=25000)
+
+        card_items = await page.query_selector_all(".your-card-item")
+        assert len(card_items) == 2, f"expected 2 independently held cards, got {len(card_items)}"
+
+        # Titles must actually distinguish which card is which (language-
+        # agnostic check -- game.your_card_no interpolates the raw card
+        # number the same way in every locale).
+        titles = [await item.query_selector(".your-card-title") for item in card_items]
+        title_texts = [(await t.text_content()) or "" for t in titles if t is not None]
+        assert any("10" in txt for txt in title_texts), title_texts
+        assert any("20" in txt for txt in title_texts), title_texts
+
+        # Each card must have its own full 5x5 grid and its own BINGO
+        # button, and the two grids must actually differ -- the concrete
+        # proof the factory conversion isolated per-card state correctly.
+        grids = []
+        for item in card_items:
+            grid_cells = await item.query_selector_all(".card-cell")
+            assert len(grid_cells) == 25, f"expected a full 5x5 grid, got {len(grid_cells)}"
+            grids.append([await c.text_content() for c in grid_cells])
+            assert await item.query_selector(".bingo-btn") is not None
+
+        assert grids[0] != grids[1], "both held cards rendered the same grid -- factory isolation broken"
+
+        await page.screenshot(path="/tmp/miniapp-multi-card-game.png", full_page=True)
+
+        # Let the round actually run to completion -- proves round_end's
+        # rewritten multi-win handling (summing every one of this
+        # player's own winning entries, not just the first) doesn't crash
+        # regardless of which of the two players ends up winning.
+        await page.wait_for_selector("#screen-result.active", timeout=90000)
+
+        assert console_errors == [], f"JS errors during multi-card gameplay: {console_errors}"
+        await page.close()
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)

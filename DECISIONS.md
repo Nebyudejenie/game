@@ -130,7 +130,16 @@ Full clean-slate verification: mypy clean (`packages`, `services`,
 `migrations`, 79 files); fresh `docker compose down -v && up -d` +
 `alembic upgrade head` from empty through the full multi-card migration
 chain; `pytest tests/` full default suite green -- 935 passed, 40
-deselected (e2e/load/chaos_infra, excluded by default), 0 failed.
+deselected (e2e/load/chaos_infra, excluded by default), 0 failed; the
+full real-browser `-m e2e` suite (Playwright/Chromium) green too -- 34
+passed, including a new `test_a_player_can_hold_and_play_several_cards_
+at_once`, the plan's own closing checklist item ("a real two-card-per-
+player round played through a live browser... verify both render
+independently"). A real screenshot from that test (not just the
+assertions) shows two genuinely distinct cards (#10, #20) stacked with
+their own titles and grids, both correctly marking the same called
+number (31) independently in their own N column, each with its own
+still-disabled BINGO button.
 
 ---
 
