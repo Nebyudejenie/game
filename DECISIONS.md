@@ -29,9 +29,27 @@ response. `no-cache` (not `no-store`) is deliberate — plain `StaticFiles`
 already sends `ETag`/`Last-Modified`, so this doesn't disable caching,
 it forces a revalidation round-trip before using a cached copy: a cheap
 304 when nothing changed, an immediate fresh fetch the moment a file
-does. To be verified live against the real public URL (`curl -D-
-https://arada.fun/js/app.v6.js`) once deployed: `cache-control: no-cache`
-should override whatever Cloudflare would otherwise invent.
+does.
+
+Verified two ways after deploying: directly against the origin
+(bypassing Cloudflare entirely, from inside the `jobingo-gateway`
+container) shows the fix live -- `cache-control: no-cache` on every
+static response. The real public URL (`curl -D-
+https://arada.fun/js/app.v6.js`), though, still came back
+`cache-control: max-age=14400` with `cf-cache-status: HIT` -- Cloudflare
+was already holding this exact URL cached from *before* this fix
+deployed, still within its 4-hour TTL, and an origin header change
+doesn't retroactively touch an entry Cloudflare isn't re-checking yet.
+This is expected, not a failure of the fix itself, but it means every
+static asset already cached before this deploy -- which, on this same
+day, includes the winner-card-preview and lobby-enrichment frontend
+changes below -- may keep serving stale to a given returning player for
+up to 4 hours past whenever Cloudflare last cached it, until either that
+TTL naturally expires or someone purges the Cloudflare cache for
+arada.fun. No Cloudflare dashboard/API access exists in this session to
+do that purge directly -- flagged for the user to do manually if today's
+frontend changes need to be visible immediately rather than over the
+next few hours.
 
 New test, `tests/integration/test_miniapp_static_caching.py`: fetches
 `/` and `/js/app.v6.js` from a real running gateway and asserts the
