@@ -5,6 +5,116 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-02 — Post-merge `/code-review high` on the full multi-card diff: one real money-integrity bug fixed
+
+Once the multi-card-per-player plan's six phases were all committed and
+pushed, ran a structured `/code-review high` pass over the whole feature
+(`e54e3a3~1..HEAD`, 6 commits) -- this project's own established practice
+for accumulated, financially-sensitive work (see the verification-
+discipline notes elsewhere in this file). Eight parallel review angles
+plus direct verification of the strongest candidates against the real
+source. Two real, independently-confirmed bugs fixed; several more real
+but lower-severity findings deliberately left for a future pass.
+
+**Fixed — money-integrity (critical).** `join()`'s stake idempotency key
+and `drop_card()`'s refund key are both static per `(round_id, user_id,
+card_no)`. A genuine drop followed by a genuine rejoin of the *same*
+card_no in the same round reuses the original stake key: `ledger.post()`
+'s own `ON CONFLICT (idempotency_key) DO NOTHING` silently skips the
+second real charge, but `join()` still unconditionally runs `UPDATE
+rounds SET pot = pot + $1` -- inflating `rounds.pot`/`self._pot` with no
+money actually collected behind it. `pot_escrow` is excluded from
+`ledger.py`'s `USER_BALANCE_KINDS`, so it can quietly go negative at
+settlement with no `InsufficientFunds` raised, and `ledger.reconcile()`
+won't catch it (it only checks `account_balances` against
+`ledger_entries`, not `rounds.pot` against real money movement). The
+official Mini App UI doesn't expose a drop control today, but
+`drop_card` is a live engine/WS command any client can send -- this
+codebase's own repeated "the server must be safe against what the wire
+protocol allows, not just what the shipped UI clicks" principle applies
+here as much as anywhere. Redesigning the idempotency-key scheme to make
+repeated holds of the same card safely re-chargeable is real work with
+its own risk of introducing a *worse* double-charge bug for a genuine
+retry if gotten wrong; the safe fix is narrower: a new `self.
+_dropped_this_round: set[tuple[user_id, card_no]]` in `round_engine.py`,
+populated on every successful drop and checked at the top of `join()`
+(`"card_already_dropped"`), refusing the one situation that can trigger
+the collision. Nothing in the product needs a player to retake the exact
+card they just gave up. Verified by reverting the fix and confirming a
+new regression test (`test_rejoining_a_dropped_card_is_refused_not_
+silently_undercharged`) fails exactly as predicted against the
+vulnerable code.
+
+**Fixed — real-money disclosure accuracy.** `round_end`'s session
+reality-check loss branch (`app.v6.js`) still subtracted a flat single-
+card `stake` even when the losing player held more than one card -- the
+untested mirror image of the winning-side multi-card bug Phase 4 already
+found and fixed in the same handler. A player holding 2 cards who loses
+both was seeing half their real loss on the results screen's spec-
+mandated "net position this session" disclosure. Fixed to scale by
+`state.round.your_cards.length`. New e2e test
+(`test_multi_card_session_loss_reports_the_full_amount_not_one_card`)
+forces a deterministic loss by disabling AUTO for the browser player
+directly in the DB (the toggle only lives on the game screen, and this
+needs it off before the round can complete) so their two cards can never
+auto-claim regardless of the draw -- the filler player's own auto-claim
+is the only way the round can end, making "browser player loses on both
+cards" reproducible rather than a race against their own luck. Verified
+against the reverted fix: the un-fixed code showed `-10.00` instead of
+the real `-20.00`.
+
+**Fixed — type-confusion gap.** `services/gateway/connection.py`'s
+`isinstance(card_no, int)` checks (deciding whether to trust a client-
+sent `card_no` as-is or resolve it server-side) accept Python's `bool`,
+since `bool` is a real `int` subclass and `True == 1` under Python's own
+equality/hashing. A frame carrying `"card_no": true` would skip
+resolution entirely and silently act on whichever card is keyed `1` for
+that user instead of the intended fallback. Low practical risk (the
+current official client never sends anything but a real number), but a
+genuine gap in a real-money command path reachable by any other client
+speaking the same wire protocol. Fixed with a small `_is_real_int()`
+helper (`isinstance(value, int) and not isinstance(value, bool)`).
+Verified by reverting and confirming a new WS-level regression test
+(`test_drop_card_true_is_not_treated_as_a_real_card_number`) reproduces
+the exact misattribution -- a user holding cards 5 and 10 sending
+`drop_card` with `card_no: true` got rejected as `not_in_round` (silently
+treated as card 1, which they never held) instead of resolving to their
+real lowest held card.
+
+**Deliberately not fixed this pass, noted for later** (real, lower
+severity than the above, no regression risk from leaving them as-is):
+- `held_card_no_for_room`/`held_card_no_for_round` (`services/gateway/
+  queries.py`) resolve a card-less claim/drop frame to the player's
+  *lowest-numbered* held card, not necessarily a genuinely winning one --
+  only bites during client-version skew (a stale/cached build), since
+  the current frontend always sends `card_no` explicitly.
+- `pendingTakeCardAcks` (`app.v6.js`) has no room/batch correlation; a
+  player who navigates to a different room mid-batch, before the first
+  room's acks return, can have those stale acks corrupt the new room's
+  resync gating. Real, but requires that specific navigation timing.
+- The lobby CTA isn't disabled while a take_card batch is in flight, so
+  a fast second tap can re-send `take_card` for already-requested
+  cards -- harmless server-side (the `(round_id, card_no)` primary key
+  rejects the duplicate as `card_taken`), just a spurious toast.
+- `services/bot/handlers.py::cmd_history()` still carries its own inline
+  copy of `user_history()`'s query rather than calling the shared
+  function (a deliberate tradeoff already noted in this file's Phase 5
+  entry, to avoid coupling the bot service to the gateway module).
+- Several efficiency/duplication findings (repeated `self._entries`
+  scans in `round_engine.py`, `build_state_sync()`'s two sequential
+  queries where one JOIN would do, `repeat_room_pairings()`'s self-join
+  now producing a `cards_per_player²` row-count multiplier before
+  `DISTINCT` dedupes it, three independent copies of the `count(DISTINCT
+  user_id)` correlated subquery) -- none change behavior, all confirmed
+  fine at current scale, worth revisiting only if a specific room ever
+  runs at max configuration (100 players x 20 cards) under real load.
+
+Full clean-slate verification: mypy clean (79 files); `pytest tests/`
+full default suite green -- 941 passed (two new), 42 deselected; full
+`-m e2e` suite green -- 35 passed (one new).
+
+---
+
 ## 2026-09-02 — Multi-card-per-player, Phase 5: the two deferred accuracy fixes + remaining test coverage
 
 Closes out `/home/prophet/.claude/plans/graceful-snacking-quail.md`'s final

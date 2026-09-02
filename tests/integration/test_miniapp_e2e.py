@@ -866,3 +866,89 @@ async def test_a_player_can_hold_and_play_several_cards_at_once(
     finally:
         await engine.stop()
         await asyncio.wait_for(task, timeout=15)
+
+
+async def test_multi_card_session_loss_reports_the_full_amount_not_one_card(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    """A code review pass caught that round_end's session reality-check
+    loss branch subtracted a flat single-card `stake` even when the
+    losing player held more than one card -- the untested mirror image
+    of the winning-side multi-card bug this same feature already fixed
+    (see DECISIONS.md's Phase 4 entry). A player holding 2 cards who
+    loses both must see the full 2-card loss on the results screen's
+    real-money disclosure, not half of it.
+
+    AUTO is turned off for the browser player directly in the DB (the
+    toggle itself only lives on the game screen, reachable after this
+    round already starts) so their own two cards can never auto-claim
+    regardless of what the draw does to them -- the filler player's own
+    auto-claim is then the only way this round can end in a win, making
+    "the browser player loses on both cards" a deterministic outcome to
+    test against, not a race against their own cards' luck.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=8, call_interval_ms=15,
+        is_active=True, max_cards_per_player=2,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    try:
+        other_player = await create_funded_user(conn)
+        assert (await engine.join(other_player, 5, auto_mark=True)).ok
+
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        assert user_row is not None
+        await fund_user(conn, user_row["id"], Decimal("100.00"))
+        await conn.execute(
+            "UPDATE users SET auto_mark_preference = false WHERE id = $1", user_row["id"]
+        )
+        await page.reload()
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('100.00')", timeout=10000
+        )
+
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page.wait_for_selector(room_selector, timeout=10000)
+        await page.click(room_selector)
+        await page.wait_for_selector("#screen-lobby.active", timeout=10000)
+
+        cells = await page.query_selector_all(".card-grid-cell")
+        await cells[9].click()  # card #10
+        await cells[19].click()  # card #20
+        await page.click("#lobby-cta")
+        await page.wait_for_function(
+            "document.getElementById('lobby-cta').disabled === true", timeout=5000
+        )
+
+        balance_after_stake = await pool.fetchval(
+            """
+            SELECT balance FROM account_balances b
+            JOIN accounts a ON a.id = b.account_id
+            WHERE a.user_id = $1 AND a.kind = 'user_cash'
+            """,
+            user_row["id"],
+        )
+        assert balance_after_stake == Decimal("80.00"), "expected two separate 10.00 ETB stakes"
+
+        await page.wait_for_selector("#screen-result.active", timeout=90000)
+
+        session_text = await page.text_content("#result-session")
+        assert "20.00" in (session_text or ""), (
+            f"expected the full 2-card 20.00 ETB loss in the session total, got: {session_text!r}"
+        )
+        assert console_errors == [], f"JS errors during multi-card loss flow: {console_errors}"
+        await page.close()
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)

@@ -339,3 +339,62 @@ async def test_rooms_list_reports_a_real_lobby_deadline(gateway_server, pool, re
     finally:
         await engine.stop()
         await asyncio.wait_for(task, timeout=15)
+
+
+async def test_drop_card_true_is_not_treated_as_a_real_card_number(
+    gateway_server, pool, redis, card_pool, conn
+):
+    """A code review pass caught that connection.py's own `isinstance(
+    card_no, int)` check accepts Python's bool (a real int subclass), so
+    a frame carrying `"card_no": true` would skip the server-side "old/
+    malformed client, resolve their card for them" fallback entirely and
+    be used directly -- `True == 1` under Python's own equality/hashing,
+    so it would silently act on whichever card is keyed 1 for that user
+    instead of triggering resolution. Proven here with a user who does
+    NOT hold card 1 at all: the buggy behavior would reject this as
+    "not_in_round" (no entry keyed (user, 1) exists); the fixed behavior
+    resolves `true` as "not a real card_no" and falls back to the user's
+    actual lowest held card.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=5, max_cards_per_player=2,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        telegram_id = next_telegram_id()
+        async with websockets.connect(gateway_server) as ws:
+            await ws.send(json.dumps({"t": "auth", "init_data": build_init_data(telegram_id)}))
+            authed = json.loads(await ws.recv())
+            user_id = authed["user"]["id"]
+            await fund_user(conn, user_id, Decimal("100.00"))
+
+            await ws.send(json.dumps({"t": "join", "room_id": room_id}))
+            await recv_until(ws, "state_sync")
+
+            # Deliberately doesn't hold card 1 -- cards 5 and 10 only.
+            await ws.send(json.dumps({"t": "take_card", "room_id": room_id, "card_no": 5}))
+            await recv_until(ws, "ack")
+            await ws.send(json.dumps({"t": "take_card", "room_id": room_id, "card_no": 10}))
+            await recv_until(ws, "ack")
+
+            await ws.send(json.dumps({"t": "drop_card", "room_id": room_id, "card_no": True}))
+            result = await recv_until(ws, "ack")
+            assert result["ok"] is True, (
+                f"expected card_no: true to resolve via the same-client fallback and "
+                f"succeed (dropping card 5, the lowest held), got: {result}"
+            )
+
+        row = await pool.fetchrow(
+            "SELECT card_no FROM round_entries WHERE round_id = $1 AND user_id = $2",
+            engine.round_id,
+            user_id,
+        )
+        assert row is not None and row["card_no"] == 10, (
+            "card 5 (the lowest held) should have been the one dropped via resolution; "
+            "only card 10 should remain"
+        )
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)

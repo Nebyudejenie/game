@@ -710,12 +710,19 @@ ws.on("round_end", (msg) => {
   const participated = Boolean(state.round && state.round.your_cards && state.round.your_cards.length > 0);
 
   if (participated) {
+    // A losing player can hold more than one card now -- every one of
+    // them staked real money this round, so a flat single `stake` here
+    // (the pre-multi-card assumption) silently under-reported the real
+    // loss by a factor of however many cards they held. Mirrors the
+    // win-side fix just above: settlement is all-or-nothing per round,
+    // so "no winning card of mine" means every one of your_cards' own
+    // stakes was genuinely lost, not just one.
     const delta =
       myWins.length > 0
         ? myWins.reduce((sum, w) => sum + parseFloat(w.amount), 0)
         : (msg.winners || []).length > 0
-          ? -parseFloat(stake)
-          : 0; // no winner: the stake was refunded, net zero
+          ? -parseFloat(stake) * state.round.your_cards.length
+          : 0; // no winner: every stake was refunded, net zero
     setState({ sessionNetPosition: state.sessionNetPosition + delta });
   }
 

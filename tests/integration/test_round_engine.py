@@ -953,6 +953,57 @@ async def test_drop_card_during_lobby_refunds(pool, redis, card_pool, conn):
         await asyncio.wait_for(task, timeout=10)
 
 
+async def test_rejoining_a_dropped_card_is_refused_not_silently_undercharged(pool, redis, card_pool, conn):
+    """A code review pass caught that join()/drop_card()'s stake/refund
+    idempotency keys are static per (round_id, user_id, card_no) -- a
+    genuine drop followed by a genuine rejoin of the identical card_no
+    would collide with the original stake's key, ledger.post() would
+    silently skip the real second charge (its own ON CONFLICT DO
+    NOTHING), and join() would still unconditionally credit rounds.pot/
+    self._pot for it -- a real money-integrity gap. The official Mini
+    App UI doesn't expose a drop control today, but drop_card is still a
+    live engine/WS command any client can send, and this codebase's own
+    standing rule is that the server must be safe against what the wire
+    protocol allows, not just what the shipped UI happens to click.
+    Proves the fix: rejoining a card already dropped this round is
+    refused outright, before any DB work, so the pot can never drift
+    from real money collected.
+    """
+    room_id = await create_room(conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=5)
+    engine = await make_engine(pool, redis, card_pool, room_id)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        p1 = await create_funded_user(conn, Decimal("50.00"))
+        assert (await engine.join(p1, 1)).ok
+
+        cash1 = await ledger.get_or_create_account(conn, p1, "user_cash")
+        assert await ledger.balance(conn, cash1.id) == Decimal("40.00")
+
+        assert (await engine.drop_card(p1, 1)).ok
+        assert await ledger.balance(conn, cash1.id) == Decimal("50.00")
+
+        rejoin = await engine.join(p1, 1)
+        assert rejoin.ok is False
+        assert rejoin.reason == "card_already_dropped"
+
+        # Refused before any DB work -- balance and pot both stay exactly
+        # where the drop left them, not silently inflated.
+        assert await ledger.balance(conn, cash1.id) == Decimal("50.00")
+        assert engine.card_count() == 0
+        round_row = await pool.fetchrow("SELECT pot FROM rounds WHERE id = $1", engine.round_id)
+        assert round_row["pot"] == Decimal("0.00")
+
+        # A genuinely different card is completely unaffected.
+        assert (await engine.join(p1, 2)).ok
+        assert await ledger.balance(conn, cash1.id) == Decimal("40.00")
+
+        mismatches = await ledger.reconcile(conn)
+        assert mismatches == []
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
 async def test_duplicate_card_and_double_join_rejected(pool, redis, card_pool, conn):
     room_id = await create_room(conn, stake=Decimal("10.00"), min_players=2)
     engine = await make_engine(pool, redis, card_pool, room_id)

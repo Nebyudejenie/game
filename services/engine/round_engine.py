@@ -167,6 +167,23 @@ class RoundEngine:
         self._lobby_deadline_monotonic: float = 0.0
         self._locked_out: set[tuple[int, int]] = set()
         self._auto_claimed: set[tuple[int, int]] = set()
+        # A code review pass caught that join()/drop_card()'s stake/refund
+        # idempotency keys are still static per (round_id, user_id,
+        # card_no) -- correct for deduping a genuine retry of the *same*
+        # in-flight command, but a real drop followed by a real rejoin of
+        # the identical card_no reuses the original stake key. ledger.post
+        # ()'s ON CONFLICT DO NOTHING then silently skips the second real
+        # charge while join() still unconditionally credits rounds.pot/
+        # self._pot for it -- inflating the pot with no money behind it,
+        # which pot_escrow (excluded from ledger.py's USER_BALANCE_KINDS)
+        # can quietly go negative to cover at settlement. Redesigning the
+        # key scheme to make repeated holds of the same card safely
+        # idempotent is real work with its own risk of a *worse* double-
+        # charge bug if gotten wrong; forbidding the one situation that
+        # triggers it -- rejoining a card already dropped this round --
+        # is the safe fix; nothing in the product needs a player to
+        # retake the exact card they just gave up.
+        self._dropped_this_round: set[tuple[int, int]] = set()
         self._pending_winners: list[PendingWinner] = []
         self._winner_window_deadline: float | None = None
 
@@ -261,13 +278,24 @@ class RoundEngine:
         # single-consumer command-stream loop production already
         # naturally serializes joins through.
         async with self._join_lock:
-            already_has_a_card = any(uid == user_id for uid, _ in self._entries)
+            if (user_id, card_no) in self._dropped_this_round:
+                # See __init__'s own comment on self._dropped_this_round --
+                # the idempotency keys below are static per (round_id,
+                # user_id, card_no), so a genuine rejoin of a card already
+                # dropped this round would collide with the original
+                # stake's key: ledger.post() would silently skip the real
+                # charge while this function still credits the pot for
+                # it. Nothing in the product needs a player to retake the
+                # exact card they just gave up, so this is refused
+                # outright rather than risking a money-accounting gap.
+                return JoinResult(False, "card_already_dropped")
+            cards_held = sum(1 for uid, _ in self._entries if uid == user_id)
+            already_has_a_card = cards_held > 0
             # max_players caps distinct players, not total cards -- an
             # existing player taking a 2nd/3rd card doesn't consume a new
             # "player slot", only a genuinely new player does.
             if not already_has_a_card and self.player_count() >= self._room.max_players:
                 return JoinResult(False, "room_full")
-            cards_held = sum(1 for uid, _ in self._entries if uid == user_id)
             if cards_held >= self._room.max_cards_per_player:
                 return JoinResult(False, "max_cards_reached")
 
@@ -393,6 +421,11 @@ class RoundEngine:
             metrics.ledger_transactions_total.labels(kind=txn.kind).inc()
 
         del self._entries[(user_id, card_no)]
+        # See __init__'s own comment on self._dropped_this_round -- this
+        # card_no can't be rejoined by this user again this round, so the
+        # static stake idempotency key above can never collide with a
+        # future real charge.
+        self._dropped_this_round.add((user_id, card_no))
         self._pot -= self._room.stake
         await ledger.publish_balance_update(self._pool, self._redis, user_id)
         await self._publish_room({"t": "card_taken", "card_no": entry.card_no, "taken": False})
@@ -537,6 +570,7 @@ class RoundEngine:
         self._call_index = 0
         self._locked_out = set()
         self._auto_claimed = set()
+        self._dropped_this_round = set()
         self._pending_winners = []
         self._winner_window_deadline = None
         self._settlement_task = None
@@ -907,6 +941,7 @@ class RoundEngine:
         self._call_index = 0
         self._locked_out = set()
         self._auto_claimed = set()
+        self._dropped_this_round = set()
         self._pending_winners = []
         self._winner_window_deadline = None
         self._settlement_task = None

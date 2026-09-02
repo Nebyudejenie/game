@@ -42,6 +42,17 @@ GOING_AWAY_RECONNECT_CODE = 1012  # "service restart" -- reconnect now, don't ba
 FALSE_CLAIM_SESSION_LIMIT = 3
 
 
+def _is_real_int(value: object) -> bool:
+    """isinstance(value, int) alone accepts Python's bool (a real int
+    subclass) -- true for the client-sent card_no checks below, where a
+    frame carrying card_no: true would otherwise skip server-side
+    resolution and be used directly (True == 1, same hash), silently
+    acting on whatever card is keyed 1 for that user instead of the
+    intended "resolve this old/malformed client's card for them" path.
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 class ConnectionHandler:
     def __init__(
         self,
@@ -217,7 +228,15 @@ class ConnectionHandler:
             # explicit card_no (once the frontend catches up) is trusted
             # as-is; join()/drop_card() on the engine side still validate
             # it's really this user's own card either way.
-            if not isinstance(card_no, int) and isinstance(room_id, int):
+            #
+            # bool excluded explicitly -- Python's bool is an int subclass
+            # (isinstance(True, int) is True, and True == 1), so a
+            # malformed/malicious frame sending card_no: true would
+            # otherwise skip resolution entirely and silently act on
+            # whichever card is keyed 1 for this user, a genuine (if
+            # narrow) type-confusion gap in a real-money command path a
+            # code review pass caught.
+            if not _is_real_int(card_no) and isinstance(room_id, int):
                 assert self._user_id is not None
                 card_no = await queries.held_card_no_for_room(self._pool, room_id, self._user_id)
             await self._run_action(
@@ -257,8 +276,9 @@ class ConnectionHandler:
                 return
             card_no = frame.get("card_no")
             # Same resolution as drop_card above -- every pre-multi-card
-            # client never sends card_no at all.
-            if not isinstance(card_no, int):
+            # client never sends card_no at all. See that comment for why
+            # bool is explicitly excluded from "a real int".
+            if not _is_real_int(card_no):
                 assert self._user_id is not None and isinstance(round_id, int)
                 card_no = await queries.held_card_no_for_round(self._pool, round_id, self._user_id)
             await self._run_action(
