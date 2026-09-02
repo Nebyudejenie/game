@@ -5,6 +5,103 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-02 — Multi-card-per-player, Phase 2+3: the engine rewrite and gateway wiring, landed together
+
+The money-critical core of the multi-card plan (`/home/prophet/.claude/
+plans/graceful-snacking-quail.md`). Landed Phase 2 (engine) and Phase 3
+(gateway wire protocol) as one deploy, not two separate ones as the plan
+originally laid out -- discovered mid-implementation that they can't
+safely deploy apart: `join()` had no application-level per-user check at
+all (Phase 1's own entry already covers that), and once `claim()`/
+`drop_card()` require an explicit `card_no` parameter, the *existing*,
+unmodified gateway (which sends `payload={}` for both, since no Mini App
+build before this has ever needed to say which card) would make every
+real player's BINGO button and card-drop silently fail with
+`not_in_round` the moment Phase 2's engine code went live alone.
+
+**Engine** (`services/engine/round_engine.py`): `self._entries` re-keyed
+from `dict[user_id, RoundEntryState]` to `dict[(user_id, card_no),
+RoundEntryState]`. `player_count()` now means distinct users (matching
+`min_players`/`max_players`' own product meaning); new `card_count()` for
+total entries. `min_players`'s gate switched to the distinct count -- the
+real fix, not a rename: before this, one player holding N cards could
+single-handedly satisfy `min_players` and start (and win) a round alone.
+`join()` enforces the new `max_cards_per_player` (Phase 1's column) and
+only checks `max_players` capacity for a genuinely *new* player, not an
+existing one taking another card. `claim()`/`drop_card()` both gained a
+required `card_no` parameter; `claim()`'s per-user `already_pending`
+guard and `_locked_out` set both became per-`(user_id, card_no)` -- a
+false claim on one card no longer blocks a different, genuinely-winning
+card the same player holds (confirmed with the user during planning:
+each of a player's winning cards gets paid, not capped at one win per
+round). Idempotency keys for stake/drop widened to include `card_no`
+(`services/engine/refunds.py` too, for the lobby-underfill/exhausted/
+crash-recovery refund path) -- the single highest-risk item, since
+`ledger.post()`'s dedup-on-conflict is silent: a collision doesn't error,
+it just quietly charges or refunds one fewer time than it should have.
+
+**Gateway** (`services/gateway/connection.py`, `queries.py`): `drop_card`
+and `claim` WS handlers now read `card_no` from the client frame -- but
+resolve it server-side (a read via a new `queries.held_card_no_for_room`/
+`held_card_no_for_round`, not a write, matching this file's own "reads
+go through queries.py" architecture) when the frame doesn't supply one,
+which is every Mini App build before the frontend phase of this plan
+ships. This is what makes today's single-card-only real users keep
+working unchanged through this deploy, and costs nothing once a future
+client does send `card_no` explicitly. `build_state_sync()` gained a real
+`your_cards: [{card_no, grid, auto_mark}, ...]` array alongside the
+existing singular `your_card`/`your_card_grid`/`auto_mark` fields (kept
+populated from the lowest-numbered held card, purely for the same
+backward-compat reason). `list_rooms()`'s and `build_state_sync()`'s own
+`"players"` fields switched from the raw `rounds.player_count` DB column
+(which, like the in-memory count above, now means total cards, not
+players) to a real `count(DISTINCT user_id)`.
+
+**Two real bugs caught by the test suite itself, not found by inspection**:
+1. `your_cards` was only assigned inside `build_state_sync()`'s `if
+   round_row is not None:` branch but referenced unconditionally in the
+   return dict -- a room genuinely idle (no round yet) crashed every
+   join with `UnboundLocalError`, taking the WebSocket connection down
+   with it. Three real integration tests caught this immediately.
+2. `_record_claim_attempt()` inserts `claim_attempts.card_no`, which has
+   a foreign key to `cards(card_no)` -- passing an unresolved/invalid
+   `card_no` (the gateway's own `0` fallback when it truly can't resolve
+   one, or a stale/malformed value from any client) raised a
+   `ForeignKeyViolationError` from *inside* `claim()`'s own `finally`
+   block, which has no exception isolation of its own. Exactly the same
+   failure class already fixed elsewhere in this file for the auto-claim
+   scan (an unguarded audit-log write killing the whole room's engine
+   task over one bad attempt) -- now sanitizes to `NULL` instead of
+   raising, so a real claim_attempts row is still written (just without
+   a card_no it can't attribute), never the whole room.
+
+**Deliberately deferred, lower priority, noted not fixed**:
+`services/gateway/queries.py::user_history()`'s join now returns one row
+per *card* a user held in a round, not one per round -- a player with 2
+cards in the same round sees that round listed twice. Not a money bug
+(each row's own amount is genuinely correct for that card), and the
+plan's own research flagged this as lower priority; deferred rather than
+scope-creeping this already-large change further. `services/admin/
+queries.py::repeat_room_pairings()`'s collusion-detection query (counts
+entry pairs, inflates quadratically under multi-card) is the same kind
+of deferred, non-money-critical accuracy issue.
+
+New tests: `test_a_player_can_hold_several_cards_up_to_the_rooms_
+configured_limit` (asserts real *transaction count*, not just a balance
+delta -- the check that would have actually caught the idempotency-key
+bug if it had shipped broken) and `test_same_user_two_different_winning_
+cards_both_paid` (both of a player's cards independently winning in the
+same round, both settling and both paid, `round_winners` PK holding).
+`test_same_user_double_claim_race_settles_exactly_once` narrowed to
+specifically the same-card race (still real, still a genuine
+regression risk) now that a different-card "race" is legitimate.
+
+Full clean-slate verification: mypy clean; `test_round_engine.py` 22/22;
+full `pytest tests/` 934/934; `test_miniapp_e2e.py` 10/10 (`-m e2e`) --
+confirming the existing, unmodified single-card frontend still works
+end-to-end against the new multi-card-capable backend, which is the
+entire point of the backward-compatible gateway resolution above.
+
 ## 2026-09-02 — Multi-card-per-player, Phase 1: the genuinely-inert half of the schema change
 
 Second phase of the plan at `/home/prophet/.claude/plans/graceful-

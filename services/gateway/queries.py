@@ -92,6 +92,41 @@ async def set_auto_mark_preference(pool: asyncpg.Pool, user_id: int, auto: bool)
     )
 
 
+async def held_card_no_for_room(pool: asyncpg.Pool, room_id: int, user_id: int) -> int | None:
+    """Resolves "the" card a user holds in a room's current round, for a
+    drop_card/claim frame that didn't explicitly say which card (every
+    Mini App build before multi-card support, which never sends card_no at
+    all). Picks the lowest card_no if the user somehow holds more than
+    one -- deliberately arbitrary but deterministic, since an old client
+    genuinely can't express "which one I mean" and this only matters until
+    every client is upgraded to always send card_no explicitly.
+    """
+    value = await pool.fetchval(
+        """
+        SELECT re.card_no
+        FROM round_entries re
+        JOIN rounds r ON r.id = re.round_id
+        WHERE r.room_id = $1 AND re.user_id = $2 AND r.status NOT IN ('done', 'voided')
+        ORDER BY re.card_no
+        LIMIT 1
+        """,
+        room_id,
+        user_id,
+    )
+    return int(value) if value is not None else None
+
+
+async def held_card_no_for_round(pool: asyncpg.Pool, round_id: int, user_id: int) -> int | None:
+    """Same resolution as held_card_no_for_room(), keyed by round_id
+    instead of room_id -- claim frames carry round_id, not room_id."""
+    value = await pool.fetchval(
+        "SELECT card_no FROM round_entries WHERE round_id = $1 AND user_id = $2 ORDER BY card_no LIMIT 1",
+        round_id,
+        user_id,
+    )
+    return int(value) if value is not None else None
+
+
 async def user_history(pool: asyncpg.Pool, user_id: int, limit: int = 10) -> list[dict[str, Any]]:
     rows = await pool.fetch(
         """
@@ -126,11 +161,12 @@ async def list_rooms(pool: asyncpg.Pool) -> list[dict[str, Any]]:
         """
         SELECT
             r.id, r.code, r.stake, r.max_players,
-            latest.status, latest.player_count, latest.pot,
-            latest.lobby_deadline
+            latest.status, latest.pot, latest.lobby_deadline,
+            (SELECT count(DISTINCT user_id) FROM round_entries
+             WHERE round_id = latest.id) AS distinct_players
         FROM rooms r
         LEFT JOIN LATERAL (
-            SELECT status, player_count, pot, lobby_deadline
+            SELECT id, status, pot, lobby_deadline
             FROM rounds
             WHERE room_id = r.id
             ORDER BY seq DESC
@@ -149,7 +185,7 @@ async def list_rooms(pool: asyncpg.Pool) -> list[dict[str, Any]]:
                 "stake": str(row["stake"]),
                 "max_players": row["max_players"],
                 "status": row["status"] or "idle",
-                "players": row["player_count"] or 0,
+                "players": row["distinct_players"] or 0,
                 "pot": str(row["pot"]) if row["pot"] is not None else "0.00",
                 # Mini App spec 2.1: the room list's own countdown ("0:18")
                 # for a room still in its lobby -- the SQL above already
@@ -186,7 +222,9 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
         pool.fetchrow(
             """
             SELECT id, status, call_index, draw_order, pot, derash, house_cut_bps,
-                   stake, player_count, lobby_deadline
+                   stake, lobby_deadline,
+                   (SELECT count(DISTINCT user_id) FROM round_entries
+                    WHERE round_id = rounds.id) AS distinct_players
             FROM rounds
             WHERE room_id = $1
             ORDER BY seq DESC
@@ -205,6 +243,7 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
     your_card: int | None = None
     your_card_grid: list[list[int]] | None = None
     auto_mark: bool | None = None
+    your_cards: list[dict[str, Any]] = []
     status = "idle"
     round_id = None
     call_index = 0
@@ -220,27 +259,48 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
         call_index = round_row["call_index"]
         pot = round_row["pot"]
         derash = round_row["derash"] or Decimal("0")
-        players = round_row["player_count"] or 0
+        players = round_row["distinct_players"] or 0
         stake = round_row["stake"]
         draw_order = round_row["draw_order"] or []
         called = list(draw_order[:call_index])
         if round_row["lobby_deadline"] is not None:
             lobby_deadline_ms = int(round_row["lobby_deadline"].timestamp() * 1000)
 
-        entry = await pool.fetchrow(
-            "SELECT card_no, auto_mark FROM round_entries WHERE round_id = $1 AND user_id = $2",
+        # A player can hold more than one card in the same round now --
+        # ordered by card_no for a deterministic "first" one. your_cards
+        # is the real, complete list; your_card/your_card_grid/auto_mark
+        # below stay populated from that first card too, purely so every
+        # Mini App build that predates multi-card support (which only
+        # ever reads those three singular fields) keeps working exactly
+        # as before without needing to ship at the same time as this.
+        entries = await pool.fetch(
+            "SELECT card_no, auto_mark FROM round_entries WHERE round_id = $1 AND user_id = $2 "
+            "ORDER BY card_no",
             round_id,
             user_id,
         )
-        if entry is not None:
-            your_card = entry["card_no"]
-            auto_mark = entry["auto_mark"]
-            card_row = await pool.fetchrow(
-                "SELECT grid FROM cards WHERE card_no = $1", your_card
+        if entries:
+            card_nos = [e["card_no"] for e in entries]
+            grid_rows = await pool.fetch(
+                "SELECT card_no, grid FROM cards WHERE card_no = ANY($1::smallint[])", card_nos
             )
-            if card_row is not None:
-                grid = card_row["grid"]
-                your_card_grid = json.loads(grid) if isinstance(grid, str) else grid
+            grids_by_card_no = {
+                row["card_no"]: (
+                    json.loads(row["grid"]) if isinstance(row["grid"], str) else row["grid"]
+                )
+                for row in grid_rows
+            }
+            your_cards = [
+                {
+                    "card_no": e["card_no"],
+                    "grid": grids_by_card_no.get(e["card_no"]),
+                    "auto_mark": e["auto_mark"],
+                }
+                for e in entries
+            ]
+            your_card = entries[0]["card_no"]
+            auto_mark = entries[0]["auto_mark"]
+            your_card_grid = grids_by_card_no.get(your_card)
 
     return {
         "t": "state_sync",
@@ -257,6 +317,7 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
         "your_card": your_card,
         "your_card_grid": your_card_grid,
         "auto_mark": auto_mark,
+        "your_cards": your_cards,
         "lobby_deadline_ms": lobby_deadline_ms,
         "server_time": int(time.time() * 1000),
     }

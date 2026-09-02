@@ -55,6 +55,7 @@ class RoomConfig:
     call_interval_ms: int
     result_seconds: int
     win_patterns: list[str]
+    max_cards_per_player: int
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,7 @@ async def load_room_config(pool: asyncpg.Pool, room_id: int) -> RoomConfig:
         call_interval_ms=row["call_interval_ms"],
         result_seconds=row["result_seconds"],
         win_patterns=list(win_patterns),
+        max_cards_per_player=row["max_cards_per_player"],
     )
 
 
@@ -153,14 +155,18 @@ class RoundEngine:
         self._server_seed_hash: str | None = None
         self._client_seed: str | None = None
         self._pot = Decimal("0")
-        self._entries: dict[int, RoundEntryState] = {}
+        # Keyed by (user_id, card_no), not user_id alone -- a player can
+        # hold more than one card per round (spec: configurable via
+        # room.max_cards_per_player). See player_count()/card_count() for
+        # the two different counts this now needs to distinguish.
+        self._entries: dict[tuple[int, int], RoundEntryState] = {}
         self._called: set[int] = set()
         self._draw_order: list[int] = []
         self._call_index: int = 0
         self._running_started_at: float = 0.0
         self._lobby_deadline_monotonic: float = 0.0
-        self._locked_out: set[int] = set()
-        self._auto_claimed: set[int] = set()
+        self._locked_out: set[tuple[int, int]] = set()
+        self._auto_claimed: set[tuple[int, int]] = set()
         self._pending_winners: list[PendingWinner] = []
         self._winner_window_deadline: float | None = None
 
@@ -188,6 +194,15 @@ class RoundEngine:
         return self._pot
 
     def player_count(self) -> int:
+        """Distinct players -- not total cards. Matches how min_players/
+        max_players already read in product terms ("this room fits N
+        people"), and is the real fix for a real abuse vector: before this,
+        one player holding N cards could single-handedly satisfy
+        min_players and start (and win) a round alone.
+        """
+        return len({user_id for user_id, _ in self._entries})
+
+    def card_count(self) -> int:
         return len(self._entries)
 
     def is_lock_held(self) -> bool:
@@ -246,12 +261,19 @@ class RoundEngine:
         # single-consumer command-stream loop production already
         # naturally serializes joins through.
         async with self._join_lock:
-            if len(self._entries) >= self._room.max_players:
+            already_has_a_card = any(uid == user_id for uid, _ in self._entries)
+            # max_players caps distinct players, not total cards -- an
+            # existing player taking a 2nd/3rd card doesn't consume a new
+            # "player slot", only a genuinely new player does.
+            if not already_has_a_card and self.player_count() >= self._room.max_players:
                 return JoinResult(False, "room_full")
+            cards_held = sum(1 for uid, _ in self._entries if uid == user_id)
+            if cards_held >= self._room.max_cards_per_player:
+                return JoinResult(False, "max_cards_reached")
 
             round_id = self._round_id
             assert round_id is not None
-            idem = f"stake-{round_id}-{user_id}"
+            idem = f"stake-{round_id}-{user_id}-{card_no}"
 
             async with self._pool.acquire() as conn:
                 try:
@@ -315,23 +337,27 @@ class RoundEngine:
                     # comment for why it can't safely record this itself
                     # when called nested, which every real call is.
                     metrics.ledger_transactions_total.labels(kind=txn.kind).inc()
-                except asyncpg.exceptions.UniqueViolationError as exc:
-                    reason = "already_joined" if "user_id" in (exc.constraint_name or "") else "card_taken"
-                    return JoinResult(False, reason)
+                except asyncpg.exceptions.UniqueViolationError:
+                    # round_entries' UNIQUE(round_id, user_id) is gone as of
+                    # this same change (a player can hold several cards
+                    # now) -- the PRIMARY KEY (round_id, card_no) is the
+                    # only remaining source of a violation here, always
+                    # meaning someone already holds this exact card.
+                    return JoinResult(False, "card_taken")
                 except InsufficientFunds:
                     return JoinResult(False, "insufficient_funds")
 
-            self._entries[user_id] = RoundEntryState(card_no=card_no, auto_mark=auto_mark)
+            self._entries[(user_id, card_no)] = RoundEntryState(card_no=card_no, auto_mark=auto_mark)
             self._pot += self._room.stake
 
         await ledger.publish_balance_update(self._pool, self._redis, user_id)
         await self._publish_room({"t": "card_taken", "card_no": card_no, "taken": True})
         return JoinResult(True, None)
 
-    async def drop_card(self, user_id: int) -> JoinResult:
+    async def drop_card(self, user_id: int, card_no: int) -> JoinResult:
         if self._status != "lobby":
             return JoinResult(False, "not_droppable")
-        entry = self._entries.get(user_id)
+        entry = self._entries.get((user_id, card_no))
         if entry is None:
             return JoinResult(False, "not_in_round")
 
@@ -345,13 +371,14 @@ class RoundEngine:
                     conn,
                     "refund",
                     [Entry(pot_account.id, -self._room.stake), Entry(cash.id, self._room.stake)],
-                    idempotency_key=f"drop-{round_id}-{user_id}",
+                    idempotency_key=f"drop-{round_id}-{user_id}-{card_no}",
                     round_id=round_id,
                 )
                 await conn.execute(
-                    "DELETE FROM round_entries WHERE round_id = $1 AND user_id = $2",
+                    "DELETE FROM round_entries WHERE round_id = $1 AND user_id = $2 AND card_no = $3",
                     round_id,
                     user_id,
+                    card_no,
                 )
                 await conn.execute(
                     "UPDATE rounds SET pot = pot - $1, player_count = player_count - 1 "
@@ -365,18 +392,23 @@ class RoundEngine:
             # every real call is.
             metrics.ledger_transactions_total.labels(kind=txn.kind).inc()
 
-        del self._entries[user_id]
+        del self._entries[(user_id, card_no)]
         self._pot -= self._room.stake
         await ledger.publish_balance_update(self._pool, self._redis, user_id)
         await self._publish_room({"t": "card_taken", "card_no": entry.card_no, "taken": False})
         return JoinResult(True, None)
 
     async def set_auto(self, user_id: int, auto: bool) -> JoinResult:
-        entry = self._entries.get(user_id)
-        if entry is None:
+        # Applies to every card this user holds, not just one -- there's no
+        # per-card AUTO toggle in the product, and this already correctly
+        # bulk-updates every one of this user's round_entries rows below.
+        held_cards = [card_no for uid, card_no in self._entries if uid == user_id]
+        if not held_cards:
             return JoinResult(False, "not_in_round")
 
-        self._entries[user_id] = RoundEntryState(card_no=entry.card_no, auto_mark=auto)
+        for card_no in held_cards:
+            entry = self._entries[(user_id, card_no)]
+            self._entries[(user_id, card_no)] = RoundEntryState(card_no=entry.card_no, auto_mark=auto)
         if self._round_id is not None:
             await self._pool.execute(
                 "UPDATE round_entries SET auto_mark = $1 WHERE round_id = $2 AND user_id = $3",
@@ -386,7 +418,7 @@ class RoundEngine:
             )
         return JoinResult(True, None)
 
-    async def claim(self, user_id: int, *, source: str = "manual") -> ClaimResult:
+    async def claim(self, user_id: int, card_no: int, *, source: str = "manual") -> ClaimResult:
         # Every attempt is logged to claim_attempts, including ones from a
         # user who isn't even in the round -- that's still an event worth an
         # audit trail, not just the attempts that get as far as a pattern
@@ -394,9 +426,20 @@ class RoundEngine:
         valid = False
         try:
             with metrics.engine_claim_validation_seconds.time():
-                if user_id in self._locked_out:
+                # Per-card lockout, not per-user: a false claim on one card
+                # says nothing about whether a *different* card this same
+                # user holds has a genuine pattern right now -- both are
+                # validated against completely independent grids below
+                # either way, so locking out every other card a player
+                # holds over one false claim on one of them would be worse
+                # UX than the reference with no fraud-prevention benefit.
+                # The existing session-level FALSE_CLAIM_SESSION_LIMIT
+                # (services/gateway/connection.py) and the per-user
+                # rate_limit.CLAIM token bucket already bound the "spam
+                # false claims across many cheap cards" concern.
+                if (user_id, card_no) in self._locked_out:
                     return ClaimResult(False, "locked_out")
-                entry = self._entries.get(user_id)
+                entry = self._entries.get((user_id, card_no))
                 if entry is None:
                     return ClaimResult(False, "not_in_round")
                 if self._status not in ("running", "settling"):
@@ -407,23 +450,30 @@ class RoundEngine:
                 valid = bool(won)
                 if not valid:
                     if source == "manual" and self._status == "running":
-                        self._locked_out.add(user_id)
+                        self._locked_out.add((user_id, card_no))
                     return ClaimResult(False, "no_pattern")
         finally:
             if self._round_id is not None:
-                await self._record_claim_attempt(user_id, valid)
+                await self._record_claim_attempt(user_id, card_no, valid)
 
         now = time.monotonic()
         async with self._winner_lock:
             # A user can reach a valid claim through two independent paths
-            # in the same round -- the server's own AUTO-mode scan
-            # (_call_next_number) and a client-sent `claim` message (a
-            # player with AUTO on client-side races to send one too, or a
-            # manual player double-taps) -- either of which could otherwise
-            # add the same user_id to _pending_winners twice and crash the
-            # round_winners (round_id, user_id) primary key at settlement.
-            # One claim per user per round, full stop, regardless of source.
-            already_pending = any(w.user_id == user_id for w in self._pending_winners)
+            # for the *same card* in the same round -- the server's own
+            # AUTO-mode scan (_call_next_number) and a client-sent `claim`
+            # message (a player with AUTO on client-side races to send one
+            # too, or a manual player double-taps) -- either of which could
+            # otherwise add the same (user_id, card_no) to _pending_winners
+            # twice and crash the round_winners (round_id, user_id,
+            # card_no) primary key at settlement. One claim per *card* per
+            # round -- a player's other, different cards are unaffected and
+            # can each independently claim and win too (each of a player's
+            # winning cards gets its own full share, matching the
+            # reference's independent per-card buttons -- confirmed as the
+            # intended product behavior, not assumed).
+            already_pending = any(
+                w.user_id == user_id and w.card_no == card_no for w in self._pending_winners
+            )
             if already_pending:
                 return ClaimResult(False, "already_claimed")
 
@@ -503,7 +553,8 @@ class RoundEngine:
                 {
                     "t": "lobby_tick",
                     "seconds_left": max(0, round(remaining)),
-                    "players": len(self._entries),
+                    "players": self.player_count(),
+                    "cards": self.card_count(),
                     "pot": str(self._pot),
                     "derash": str(settlement.compute_derash(self._pot, self._room.house_cut_bps)[0]),
                 }
@@ -513,12 +564,12 @@ class RoundEngine:
         if not self._lock.is_held():
             return
 
-        if len(self._entries) >= self._room.min_players:
+        if self.player_count() >= self._room.min_players:
             await self._transition_to_running()
         else:
             round_id = self._round_id
             assert round_id is not None
-            refunded_user_ids = list(self._entries)
+            refunded_user_ids = list({user_id for user_id, _ in self._entries})
             await refunds.refund_round(self._pool, round_id, reason="lobby_underfilled")
             # A code-review pass caught this as the same plain sequential
             # for/await already fixed in _settle_with_winners() below --
@@ -564,7 +615,8 @@ class RoundEngine:
                 "t": "round_start",
                 "round_id": round_id,
                 "seq": self._seq,
-                "players": len(self._entries),
+                "players": self.player_count(),
+                "cards": self.card_count(),
                 "pot": str(self._pot),
                 "derash": str(derash_preview),
                 "seed_hash": self._server_seed_hash,
@@ -599,7 +651,7 @@ class RoundEngine:
             round_id = self._round_id
             assert round_id is not None
             assert self._server_seed is not None
-            refunded_user_ids = list(self._entries)
+            refunded_user_ids = list({user_id for user_id, _ in self._entries})
             await refunds.refund_round(self._pool, round_id, reason="exhausted_no_winner")
             # Same fix as the lobby-underfilled refund path above -- a
             # code-review pass caught both of this file's refund-then
@@ -665,16 +717,16 @@ class RoundEngine:
         # already relies on, per test_two_simultaneous_claims_split_
         # derash_evenly); nothing here needs to short-circuit for that to
         # work, it only needs to not give up early.
-        for user_id, entry in list(self._entries.items()):
+        for (user_id, card_no), entry in list(self._entries.items()):
             if not entry.auto_mark:
                 continue
-            if user_id in self._auto_claimed or user_id in self._locked_out:
+            if (user_id, card_no) in self._auto_claimed or (user_id, card_no) in self._locked_out:
                 continue
             grid = self._card_pool[entry.card_no]
             if bingo.winning_patterns(grid, self._called, self._room.win_patterns):
-                self._auto_claimed.add(user_id)
+                self._auto_claimed.add((user_id, card_no))
                 try:
-                    await self.claim(user_id, source="auto")
+                    await self.claim(user_id, card_no, source="auto")
                 except Exception:
                     # A code review pass caught this had no isolation at
                     # all, unlike _handle_command()'s own identical fix
@@ -700,12 +752,13 @@ class RoundEngine:
                     # about the round was left inconsistent; this user's
                     # winning pattern is still exactly as valid on the
                     # next call as it was on this one.
-                    self._auto_claimed.discard(user_id)
+                    self._auto_claimed.discard((user_id, card_no))
                     logger.exception(
                         "engine_auto_claim_raised",
                         room_id=self._room.id,
                         round_id=round_id,
                         user_id=user_id,
+                        card_no=card_no,
                     )
 
     async def _finalize_after_window(self, deadline: float) -> None:
@@ -859,12 +912,25 @@ class RoundEngine:
         self._settlement_task = None
         self._round_active_event.clear()
 
-    async def _record_claim_attempt(self, user_id: int, valid: bool) -> None:
+    async def _record_claim_attempt(self, user_id: int, card_no: int, valid: bool) -> None:
+        # card_no has a FK to cards(card_no) -- sanitized to NULL, not
+        # passed through raw, for a genuinely unknown value (a client that
+        # never sent one at all, still defaulted to 0 upstream; a stale or
+        # malformed card_no from a buggy/malicious client). This call has
+        # no try/except of its own -- it runs in claim()'s finally block,
+        # unconditionally, on every attempt including ones that never even
+        # found a real entry -- so an FK violation here would raise
+        # straight out of claim(), with nothing isolating it (unlike the
+        # auto-claim scan's own already-fixed exception handling), killing
+        # this room's entire engine over a single bad claim attempt. The
+        # audit trail is still valuable with card_no NULL; a crashed room
+        # is not an acceptable price for logging it precisely.
         await self._pool.execute(
-            "INSERT INTO claim_attempts (round_id, user_id, call_index, valid) "
-            "VALUES ($1, $2, $3, $4)",
+            "INSERT INTO claim_attempts (round_id, user_id, card_no, call_index, valid) "
+            "VALUES ($1, $2, $3, $4, $5)",
             self._round_id,
             user_id,
+            card_no if card_no in self._card_pool else None,
             self._call_index,
             valid,
         )
@@ -917,9 +983,9 @@ class RoundEngine:
                     user_id, payload.get("card_no", 0), auto_mark=payload.get("auto_mark", True)
                 )
             elif action == "drop_card":
-                result = await self.drop_card(user_id)
+                result = await self.drop_card(user_id, payload.get("card_no", 0))
             elif action == "claim":
-                result = await self.claim(user_id, source="manual")
+                result = await self.claim(user_id, payload.get("card_no", 0), source="manual")
             elif action == "set_auto":
                 result = await self.set_auto(user_id, bool(payload.get("auto", True)))
             else:

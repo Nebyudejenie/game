@@ -63,11 +63,15 @@ async def test_claim_set_auto_and_drop_card_commands(pool, redis, card_pool, con
 
         # Round is still in LOBBY, not RUNNING -- claim must be cleanly
         # rejected, not silently accepted or left hanging.
-        claim_result = await commands.send_command(redis, room_id, "claim", p1)
+        claim_result = await commands.send_command(
+            redis, room_id, "claim", p1, {"card_no": 3}
+        )
         assert claim_result.ok is False
         assert claim_result.reason == "round_not_running"
 
-        drop_result = await commands.send_command(redis, room_id, "drop_card", p1)
+        drop_result = await commands.send_command(
+            redis, room_id, "drop_card", p1, {"card_no": 3}
+        )
         assert drop_result.ok
         assert engine.player_count() == 0
     finally:

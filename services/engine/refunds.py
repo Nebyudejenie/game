@@ -73,7 +73,7 @@ async def refund_round_in_transaction(
 
     stake = round_row["stake"]
     entrants = await conn.fetch(
-        "SELECT user_id FROM round_entries WHERE round_id = $1", round_id
+        "SELECT user_id, card_no FROM round_entries WHERE round_id = $1", round_id
     )
     pot_account = await ledger.get_or_create_account(conn, None, "pot_escrow")
 
@@ -81,11 +81,18 @@ async def refund_round_in_transaction(
         cash_account = await ledger.get_or_create_account(
             conn, entrant["user_id"], "user_cash"
         )
+        # Keyed by card_no too, not just (round_id, user_id) -- a player
+        # can hold more than one card in the same round, and each one is
+        # its own real stake that needs its own real refund. Without this,
+        # ledger.post()'s idempotency dedup would silently no-op every
+        # card past a user's first, refunding only one of several real
+        # stakes -- a real production incident this exact fix is for, not
+        # a hypothetical.
         await ledger.post(
             conn,
             "refund",
             [Entry(pot_account.id, -stake), Entry(cash_account.id, stake)],
-            idempotency_key=f"refund-{round_id}-{entrant['user_id']}",
+            idempotency_key=f"refund-{round_id}-{entrant['user_id']}-{entrant['card_no']}",
             round_id=round_id,
             memo=reason,
         )

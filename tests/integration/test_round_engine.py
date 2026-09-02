@@ -122,7 +122,7 @@ async def test_two_simultaneous_claims_split_derash_evenly(pool, redis, card_poo
 
         await wait_until(both_ready, timeout=10)
 
-        results = await asyncio.gather(engine.claim(user_a), engine.claim(user_b))
+        results = await asyncio.gather(engine.claim(user_a, card_a), engine.claim(user_b, card_b))
         assert all(r.ok for r in results), results
 
         await wait_until(lambda: engine.status == "idle", timeout=5)
@@ -334,12 +334,12 @@ async def test_an_unexpected_exception_during_auto_claim_does_not_crash_the_room
         real_claim = engine.claim
         call_count = 0
 
-        async def flaky_claim(user_id, *, source="manual"):
+        async def flaky_claim(user_id, card_no, *, source="manual"):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
                 raise RuntimeError("simulated bug in claim()")
-            return await real_claim(user_id, source=source)
+            return await real_claim(user_id, card_no, source=source)
 
         await wait_until(lambda: engine.status == "running", timeout=5)
         monkeypatch.setattr(round_engine.bingo, "winning_patterns", fake_winning_patterns)
@@ -372,12 +372,16 @@ async def test_same_user_double_claim_race_settles_exactly_once(pool, redis, car
     """Regression test: a real crash found by the Mini App's E2E test.
 
     A single player can produce two independent valid claims for the same
-    round -- the server's own AUTO-mode scan and a client-sent `claim`
-    message racing each other (a player with client-side AUTO on, or a
-    manual double-tap). Both used to land in _pending_winners, crashing
-    round_winners' (round_id, user_id) primary key at settlement. Exactly
-    one must win; the other must be cleanly rejected, and settlement must
-    still complete.
+    *card* in the same round -- the server's own AUTO-mode scan and a
+    client-sent `claim` message racing each other (a player with
+    client-side AUTO on, or a manual double-tap). Both used to land in
+    _pending_winners, crashing round_winners' (round_id, user_id) primary
+    key at settlement. Exactly one must win; the other must be cleanly
+    rejected, and settlement must still complete. (round_winners' key is
+    now (round_id, user_id, card_no) -- a real, *different* card
+    genuinely winning at the same time is a different scenario, covered
+    separately below by test_same_user_two_different_winning_cards_both_
+    paid.)
     """
     room_id = await create_room(conn, stake=Decimal("20.00"), min_players=2, call_interval_ms=15)
     room = await load_room_config(pool, room_id)
@@ -401,8 +405,8 @@ async def test_same_user_double_claim_race_settles_exactly_once(pool, redis, car
         await wait_until(a_ready, timeout=10)
 
         results = await asyncio.gather(
-            engine.claim(user_a, source="auto"),
-            engine.claim(user_a, source="manual"),
+            engine.claim(user_a, card_a, source="auto"),
+            engine.claim(user_a, card_a, source="manual"),
         )
         oks = [r for r in results if r.ok]
         rejected = [r for r in results if not r.ok]
@@ -419,6 +423,78 @@ async def test_same_user_double_claim_race_settles_exactly_once(pool, redis, car
         )
         assert len(winners) == 1
         assert winners[0]["user_id"] == user_a
+
+        mismatches = await ledger.reconcile(conn)
+        assert mismatches == []
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
+async def test_same_user_two_different_winning_cards_both_paid(pool, redis, card_pool, conn):
+    """Multi-card product decision, confirmed with the user while planning
+    this feature: a player whose multiple cards each independently
+    complete a valid pattern in the same round gets paid for *every*
+    winning card, not capped at one payout per round -- matching the
+    reference product's visibly independent per-card claim buttons. Two
+    of the same user's cards claiming at the same time must both win and
+    both get their own full settlement share, proving round_winners'
+    widened (round_id, user_id, card_no) primary key and claim()'s
+    per-card (not per-user) already_pending guard actually deliver this,
+    not just that they no longer crash.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("20.00"), house_cut_bps=2000, min_players=2, call_interval_ms=15,
+        max_cards_per_player=2,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        user_a = await create_funded_user(conn, Decimal("100.00"))
+        user_b = await create_funded_user(conn)
+        card_1, card_2 = 1, 2
+
+        assert (await engine.join(user_a, card_1, auto_mark=False)).ok
+        assert (await engine.join(user_a, card_2, auto_mark=False)).ok
+        assert (await engine.join(user_b, 3, auto_mark=False)).ok
+
+        await wait_until(lambda: engine.status == "running", timeout=5)
+
+        grid_1, grid_2 = card_pool[card_1], card_pool[card_2]
+
+        def both_ready() -> bool:
+            called = engine._called  # noqa: SLF001
+            return bool(
+                bingo.winning_patterns(grid_1, called, room.win_patterns)
+            ) and bool(bingo.winning_patterns(grid_2, called, room.win_patterns))
+
+        await wait_until(both_ready, timeout=10)
+
+        results = await asyncio.gather(
+            engine.claim(user_a, card_1), engine.claim(user_a, card_2)
+        )
+        assert all(r.ok for r in results), results
+
+        await wait_until(lambda: engine.status == "idle", timeout=5)
+
+        round_row = await pool.fetchrow(
+            "SELECT id, pot, derash FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1",
+            room_id,
+        )
+        # 3 cards staked (2 by user_a, 1 by user_b) at 20 ETB, 80% derash.
+        assert round_row["pot"] == Decimal("60.00")
+        assert round_row["derash"] == Decimal("48.00")
+
+        winners = await pool.fetch(
+            "SELECT user_id, card_no, amount FROM round_winners WHERE round_id = $1 ORDER BY card_no",
+            round_row["id"],
+        )
+        assert len(winners) == 2
+        assert {w["card_no"] for w in winners} == {card_1, card_2}
+        assert all(w["user_id"] == user_a for w in winners)
+        assert winners[0]["amount"] == winners[1]["amount"] == Decimal("24.00")
+        assert winners[0]["amount"] + winners[1]["amount"] == round_row["derash"]
 
         mismatches = await ledger.reconcile(conn)
         assert mismatches == []
@@ -454,7 +530,7 @@ async def test_claim_settlement_pushes_a_live_balance_update_to_the_winner(pool,
         await wait_until(a_ready, timeout=10)
 
         async def _claim() -> None:
-            result = await engine.claim(user_a)
+            result = await engine.claim(user_a, card_a)
             assert result.ok, result.reason
 
         push = await recv_balance_update(redis, user_a, _claim)
@@ -498,7 +574,7 @@ async def test_round_end_broadcast_includes_the_winners_display_name(pool, redis
         pubsub = redis.pubsub()
         await pubsub.subscribe(f"room:{room_id}")
         try:
-            result = await engine.claim(user_a)
+            result = await engine.claim(user_a, card_a)
             assert result.ok, result.reason
 
             round_end_msg = None
@@ -537,7 +613,7 @@ async def test_claim_from_user_not_in_round_rejected_and_logged(pool, redis, car
         await engine.join(p2, 2)
         await wait_until(lambda: engine.status == "running", timeout=5)
 
-        result = await engine.claim(intruder)
+        result = await engine.claim(intruder, 99)
         assert result == ClaimResult(False, "not_in_round")
 
         round_id = engine.round_id
@@ -778,7 +854,7 @@ async def test_join_and_drop_card_push_live_balance_updates(pool, redis, card_po
         assert join_push["cash"] == "40.00"
 
         async def _drop() -> None:
-            result = await engine.drop_card(p1)
+            result = await engine.drop_card(p1, 1)
             assert result.ok, result.reason
 
         drop_push = await recv_balance_update(redis, p1, _drop)
@@ -799,7 +875,7 @@ async def test_drop_card_during_lobby_refunds(pool, redis, card_pool, conn):
         cash1 = await ledger.get_or_create_account(conn, p1, "user_cash")
         assert await ledger.balance(conn, cash1.id) == Decimal("40.00")
 
-        drop_result = await engine.drop_card(p1)
+        drop_result = await engine.drop_card(p1, 1)
         assert drop_result.ok
         assert await ledger.balance(conn, cash1.id) == Decimal("50.00")
         assert engine.player_count() == 0
@@ -822,13 +898,65 @@ async def test_duplicate_card_and_double_join_rejected(pool, redis, card_pool, c
         assert same_card.ok is False
         assert same_card.reason == "card_taken"
 
+        # rooms.max_cards_per_player defaults to 1 (create_room() above
+        # didn't raise it) -- a second card by the same user is correctly
+        # rejected, just with a more specific reason than the old DB
+        # constraint gave. test_a_player_can_hold_several_cards_up_to_the_
+        # rooms_configured_limit below covers the actual multi-card
+        # success path with a room that configures a higher limit.
         second_card_same_user = await engine.join(p1, 8)
         assert second_card_same_user.ok is False
-        assert second_card_same_user.reason == "already_joined"
+        assert second_card_same_user.reason == "max_cards_reached"
 
         cash1 = await ledger.get_or_create_account(conn, p1, "user_cash")
         # Only the one successful stake should have been charged.
         assert await ledger.balance(conn, cash1.id) == Decimal("990.00")
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
+async def test_a_player_can_hold_several_cards_up_to_the_rooms_configured_limit(
+    pool, redis, card_pool, conn
+):
+    """The actual multi-card success path, with the highest-value
+    assertion the plan called for: real *transaction count*, not just a
+    balance delta -- a balance debited once can look identical to one
+    debited correctly three times unless the transaction count is also
+    checked, which is exactly what would have caught the original
+    idempotency-key bug (stake-{round_id}-{user_id}, missing card_no,
+    silently no-opped every card past a user's first).
+    """
+    room_id = await create_room(conn, stake=Decimal("10.00"), min_players=2, max_cards_per_player=3)
+    engine = await make_engine(pool, redis, card_pool, room_id)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        p1 = await create_funded_user(conn, Decimal("100.00"))
+
+        assert (await engine.join(p1, 1)).ok
+        assert (await engine.join(p1, 2)).ok
+        assert (await engine.join(p1, 3)).ok
+
+        fourth_card = await engine.join(p1, 4)
+        assert fourth_card.ok is False
+        assert fourth_card.reason == "max_cards_reached"
+
+        cash1 = await ledger.get_or_create_account(conn, p1, "user_cash")
+        assert await ledger.balance(conn, cash1.id) == Decimal("70.00")
+
+        stake_txns = await conn.fetch(
+            "SELECT idempotency_key FROM ledger_transactions "
+            "WHERE kind = 'stake' AND idempotency_key LIKE $1 ORDER BY idempotency_key",
+            f"stake-%-{p1}-%",
+        )
+        assert len(stake_txns) == 3, (
+            "expected 3 separate stake transactions, one per card -- a count of fewer than 3 "
+            "here (even with the right total balance) means the idempotency key collided and "
+            "silently no-opped a real charge"
+        )
+
+        assert engine.player_count() == 1
+        assert engine.card_count() == 3
     finally:
         await engine.stop()
         await asyncio.wait_for(task, timeout=10)

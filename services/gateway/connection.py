@@ -207,8 +207,21 @@ class ConnectionHandler:
                 bucket=rate_limit.TAKE_CARD,
             )
         elif t == "drop_card":
+            room_id = frame.get("room_id")
+            card_no = frame.get("card_no")
+            # Every Mini App build before multi-card frontend support never
+            # sends card_no at all -- resolve it server-side (a read, not a
+            # write, matching this file's own "reads go through queries.py"
+            # architecture) so those clients keep working exactly as
+            # before through this transition. A client that does send an
+            # explicit card_no (once the frontend catches up) is trusted
+            # as-is; join()/drop_card() on the engine side still validate
+            # it's really this user's own card either way.
+            if not isinstance(card_no, int) and isinstance(room_id, int):
+                assert self._user_id is not None
+                card_no = await queries.held_card_no_for_room(self._pool, room_id, self._user_id)
             await self._run_action(
-                frame.get("room_id"), ack_name="drop_card", action="drop_card", payload={}
+                room_id, ack_name="drop_card", action="drop_card", payload={"card_no": card_no}
             )
         elif t == "set_auto":
             # Mini App spec: "Persist the choice per user" -- round_entries
@@ -237,12 +250,23 @@ class ConnectionHandler:
                     "በዚህ ክፍለ ጊዜ ውስጥ በጣም ብዙ የተሳሳቱ የቢንጎ ጥያቄዎች ነበሩ።",
                 )
                 return
-            room_id = await self._room_id_for_round(frame.get("round_id"))
+            round_id = frame.get("round_id")
+            room_id = await self._room_id_for_round(round_id)
             if room_id is None:
                 await self._send_error("bad_round_id", "Unknown round.", "ያልታወቀ ዙር።")
                 return
+            card_no = frame.get("card_no")
+            # Same resolution as drop_card above -- every pre-multi-card
+            # client never sends card_no at all.
+            if not isinstance(card_no, int):
+                assert self._user_id is not None and isinstance(round_id, int)
+                card_no = await queries.held_card_no_for_round(self._pool, round_id, self._user_id)
             await self._run_action(
-                room_id, ack_name="claim", action="claim", payload={}, bucket=rate_limit.CLAIM
+                room_id,
+                ack_name="claim",
+                action="claim",
+                payload={"card_no": card_no},
+                bucket=rate_limit.CLAIM,
             )
         elif t == "mark":
             pass  # advisory only -- the server never trusts a client-reported mark
