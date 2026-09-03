@@ -357,22 +357,31 @@ class _RevalidateStaticFiles(StaticFiles):
     app.js -> app.v5.js -> app.v6.js rename-per-deploy was actually
     working around; see DECISIONS.md.
 
-    index.html itself is the one exception: no-store, not no-cache, and
-    the 304-eligible path below is skipped for it entirely -- returning
-    the header alone isn't enough, since Starlette's own file_response()
-    already decides 304-vs-200 by comparing the request's own If-None-
-    Match/If-Modified-Since against a freshly computed ETag *before* this
-    override ever gets to touch the response; a client whose cached
-    body is already stale or empty but whose ETag still happens to
-    match would keep getting a bodyless 304 no matter what header rides
-    along on it. A real production report (a genuinely blank Mini App:
-    index.html served 304, then not one script or stylesheet request
-    ever followed) pointed at exactly this -- some WebView's own cache
-    entry for "/" was stale or empty while its ETag still matched, so
-    revalidation "succeeded" against nothing to render. The entry-point
-    HTML is one small request on every load either way; there's no real
-    cost to never letting it be conditionally-cached at all, only
-    downside in trusting a client cache this fragile with the one file
+    index.html and every .js file are the exception: no-store, not
+    no-cache, and the 304-eligible path below is skipped for them
+    entirely -- returning the header alone isn't enough, since
+    Starlette's own file_response() already decides 304-vs-200 by
+    comparing the request's own If-None-Match/If-Modified-Since against
+    a freshly computed ETag *before* this override ever gets to touch
+    the response; a client whose cached body is already stale or empty
+    but whose ETag still happens to match would keep getting a
+    bodyless 304 no matter what header rides along on it. A real
+    production report (a genuinely blank Mini App: index.html served
+    304, then not one script or stylesheet request ever followed)
+    pointed at exactly this -- some WebView's own cache entry for "/"
+    was stale or empty while its ETag still matched, so revalidation
+    "succeeded" against nothing to render. index.html was fixed first;
+    .js followed once a *second* real report -- a player's own client
+    still running old, already-fixed-on-the-server application logic
+    (proven by a real WebSocket trace showing a stale response shape)
+    -- showed the identical WebView-cache-corruption pattern applies to
+    the actual code just as easily as to the shell that loads it. CSS/
+    locale/font files stay on no-cache: lower-severity if briefly stale
+    (a delayed style or translation, not broken logic), and the cheap
+    304 revalidation is worth keeping for those. These are all small
+    files on every load either way; there's no real cost to never
+    letting the ones that matter be conditionally-cached at all, only
+    downside in trusting a client cache this fragile with the code
     every single boot depends on.
     """
 
@@ -384,7 +393,8 @@ class _RevalidateStaticFiles(StaticFiles):
         status_code: int = 200,
     ) -> Response:
         response: Response
-        if os.path.basename(os.fspath(full_path)) == "index.html":
+        path_str = os.fspath(full_path)
+        if os.path.basename(path_str) == "index.html" or path_str.endswith(".js"):
             response = FileResponse(full_path, status_code=status_code, stat_result=stat_result)
             response.headers["Cache-Control"] = "no-store"
             return response

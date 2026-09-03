@@ -16,45 +16,53 @@ import httpx
 
 
 async def test_static_miniapp_assets_are_served_with_a_revalidating_cache_header(gateway_server):
+    # CSS/locale/font files stay on the cheaper no-cache/304 pattern --
+    # lower severity if briefly stale (a delayed style or translation,
+    # not broken application logic), unlike index.html and .js below.
     http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
     async with httpx.AsyncClient() as client:
-        js_response = await client.get(f"{http_base}/js/app.v6.js")
+        css_response = await client.get(f"{http_base}/css/screens.css")
 
-    assert js_response.status_code == 200
-    assert js_response.headers.get("cache-control") == "no-cache", (
-        f"{js_response.request.url}: expected a revalidating Cache-Control, "
-        f"got {js_response.headers.get('cache-control')!r}"
+    assert css_response.status_code == 200
+    assert css_response.headers.get("cache-control") == "no-cache", (
+        f"{css_response.request.url}: expected a revalidating Cache-Control, "
+        f"got {css_response.headers.get('cache-control')!r}"
     )
     # no-cache still allows a cheap 304 via these -- only the "serve a
     # stale copy without asking" behavior is what's being refused here.
-    assert js_response.headers.get("etag")
-    assert js_response.headers.get("last-modified")
+    assert css_response.headers.get("etag")
+    assert css_response.headers.get("last-modified")
 
 
-async def test_index_html_is_never_conditionally_cached(gateway_server):
-    # index.html is the one exception to the no-cache/304 pattern above --
-    # a real production incident (a genuinely blank Mini App: index.html
-    # served 304, then not a single script or stylesheet request ever
-    # followed) traced to some client's own cached body for "/" being
-    # stale or empty while its ETag still happened to match, so
-    # revalidation "succeeded" against nothing to render. no-store, and a
-    # repeat request carrying the ETag this same response just handed
-    # back must never get a bodyless 304 for it.
+async def test_index_html_and_js_are_never_conditionally_cached(gateway_server):
+    # index.html and every .js file are the exception to the no-cache/304
+    # pattern above -- a real production incident (a genuinely blank Mini
+    # App: index.html served 304, then not a single script or stylesheet
+    # request ever followed) traced to some client's own cached body for
+    # "/" being stale or empty while its ETag still happened to match, so
+    # revalidation "succeeded" against nothing to render. A second real
+    # report -- a player's own client still running old application logic
+    # the server had already fixed -- showed the identical WebView-cache-
+    # corruption pattern applies just as easily to the actual code as to
+    # the shell that loads it. no-store, and a repeat request carrying
+    # the ETag this same response just handed back must never get a
+    # bodyless 304 for either kind of file.
     http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
     async with httpx.AsyncClient() as client:
-        first = await client.get(f"{http_base}/")
-        assert first.status_code == 200
-        assert first.headers.get("cache-control") == "no-store", (
-            f"expected index.html to never be conditionally cacheable, "
-            f"got {first.headers.get('cache-control')!r}"
-        )
-        assert first.content, "index.html must always come back with a real body"
+        for path in ("/", "/js/app.v6.js"):
+            first = await client.get(f"{http_base}{path}")
+            assert first.status_code == 200
+            assert first.headers.get("cache-control") == "no-store", (
+                f"{path}: expected this to never be conditionally cacheable, "
+                f"got {first.headers.get('cache-control')!r}"
+            )
+            assert first.content, f"{path} must always come back with a real body"
 
-        etag = first.headers.get("etag")
-        assert etag, "FileResponse should still set an ETag even though it's never honored for a 304"
-        second = await client.get(f"{http_base}/", headers={"If-None-Match": etag})
-        assert second.status_code == 200, (
-            "a repeat request with a matching ETag must still get a full body, never a 304 -- "
-            "that's the exact bug this test guards against"
-        )
-        assert second.content == first.content
+            etag = first.headers.get("etag")
+            assert etag, f"{path}: FileResponse should still set an ETag even though it's never honored for a 304"
+            second = await client.get(f"{http_base}{path}", headers={"If-None-Match": etag})
+            assert second.status_code == 200, (
+                f"{path}: a repeat request with a matching ETag must still get a full body, "
+                "never a 304 -- that's the exact bug this test guards against"
+            )
+            assert second.content == first.content

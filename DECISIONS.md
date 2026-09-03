@@ -5,6 +5,63 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-03 — The idle-room fix, and extending no-store from index.html to every .js file
+
+Two more entries in the same live-diagnosis session as the blank-screen
+incident below.
+
+**The actual root cause of "clicking a room does nothing":** traced with
+a real Playwright session against the live production domain, real
+signed initData, and raw WebSocket frame capture -- `join` was sent
+correctly, the server replied `state_sync` with `status: "idle"`
+(`queries.py`'s own default when a room has zero round history, which
+`round_engine.py` only ever creates lazily on the first `take_card`),
+and `app.v6.js`'s own `state_sync` handler routed `"idle"` straight back
+to the room list. There is no other path anywhere in the client to the
+card-selection screen -- a room's first-ever player could open it and
+then never take a card, permanently. Every existing e2e test missed
+this because every one of them pre-seeds the room via a direct
+`engine.join()` before the browser ever connects, which always leaves
+the room already in `"lobby"` status by the time a real click lands;
+none of them ever exercised a genuinely virgin room. Fixed by routing
+`"idle"` through the same path as `"lobby"` (`enterLobby()` already
+tolerates the fields an idle sync doesn't have yet -- no `round_id`, no
+`lobby_deadline_ms`, `your_cards: []`), plus a small UX fix so the
+countdown label doesn't show a nonsensical "starts in 0s" before any
+deadline exists. New test deliberately runs with *no* `RoundEngine`
+running at all, proving `state_sync` for a fresh room is served
+correctly straight from Postgres either way. Verified against the
+pre-fix code first: the new test genuinely timed out waiting for
+`#screen-lobby`, reproducing the incident exactly. Deployed, then
+personally played and won a complete real round through it end to end
+(real stake, real second player, real numbers called, real win, real
+16.00 ETB payout, clean `ledger.reconcile()`) to prove it beyond the
+automated tests alone.
+
+**`no-store` extended from `index.html` to every `.js` file.** After the
+idle-room fix deployed and was proven working by a live browser
+session, the user's own real client still showed the old, already-fixed
+behavior -- their real balance (106.00 ETB, matching the just-completed
+test round) proved the connection and auth were genuinely fine, so the
+gap had to be downstream: the client was still running old application
+logic. Same root cause as the index.html incident, just not yet applied
+to the file that actually carries the fix -- a WebView cache entry for
+`/js/app.v6.js` that's stale or corrupted while its ETag still matches
+serves 304s against a body that was never really there, same as it did
+for the HTML shell. `_RevalidateStaticFiles.file_response()` now takes
+the same no-store, bypass-the-304-check path for any `.js` file, not
+just `index.html`; CSS/locale/font files stay on the cheaper `no-cache`
+pattern, since a briefly stale style or translation is a much smaller
+problem than briefly stale game logic. Verified the same way as the
+first incident: reverted, confirmed the new test assertion for
+`/js/app.v6.js` genuinely fails against the old code (`no-cache`, not
+`no-store`), then restored and confirmed it passes.
+
+Full clean-slate verification after each of these two: mypy clean,
+`pytest tests/` full default suite green.
+
+---
+
 ## 2026-09-03 — Diagnosed and fixed a real production blank-screen incident, live, with the user watching
 
 After the CI/CD and manual-deploy work below actually got this session's
