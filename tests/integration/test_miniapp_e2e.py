@@ -174,6 +174,58 @@ async def test_a_genuinely_fresh_room_with_no_round_history_can_still_be_entered
     await page.close()
 
 
+async def test_a_room_whose_last_round_ended_can_still_be_reentered(gateway_server, browser, conn):
+    """A real, currently-live production incident, worse than the "genuinely
+    fresh room" one above: RoundEngine._reset_to_idle() (round_engine.py)
+    flips the *in-memory* engine back to "idle" the instant a round voids
+    or finishes settling, but build_state_sync() reads Postgres, where that
+    same round's row keeps its terminal status ('voided'/'done') forever
+    until a brand-new round is inserted. The only thing that ever inserts
+    one is RoundEngine.join() (via take_card), which only ever runs once a
+    player is actually looking at the lobby/card-grid screen -- and the
+    state_sync handler routes "voided"/"done" straight back to the room
+    list, never to the lobby. Before the fix, that's a permanent deadlock:
+    every room goes unplayable forever the moment its first-ever round
+    ends, since nobody can ever reach the lobby again to take a card that
+    would start the next one. Not caught earlier because no round had ever
+    actually finished end-to-end against a real Telegram client until this
+    session's has_main_web_app fix let one complete for the first time --
+    the very next real player to tap that same room hit this immediately.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, is_active=True, max_cards_per_player=1,
+    )
+    await conn.execute(
+        "INSERT INTO rounds (room_id, seq, status, stake, house_cut_bps, server_seed_hash, ended_at) "
+        "VALUES ($1, 1, 'voided', 10.00, 2000, 'test-hash', now())",
+        room_id,
+    )
+
+    telegram_id = next_telegram_id()
+    page, console_errors = await prepare_page(browser, telegram_id)
+
+    http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+    await page.goto(http_base + "/")
+    await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+    await page.wait_for_function(
+        "document.getElementById('balance-amount').textContent.includes('.')", timeout=10000
+    )
+
+    room_selector = f'.room-card[data-room-id="{room_id}"]'
+    await page.wait_for_selector(room_selector, timeout=10000)
+    await page.click(room_selector)
+
+    # The actual bug: this used to bounce straight back to #screen-rooms
+    # (state_sync reporting status "voided" forever) no matter how long you
+    # waited or how many times you tapped the room again.
+    await page.wait_for_selector("#screen-lobby.active", timeout=10000)
+    cells = await page.query_selector_all(".card-grid-cell")
+    assert len(cells) == 150, "the lobby's own card grid must render for the next round"
+
+    assert console_errors == [], f"JS errors reentering a room whose last round ended: {console_errors}"
+    await page.close()
+
+
 async def test_miniapp_shows_a_retry_banner_instead_of_a_permanent_blank_screen_when_ws_never_connects(
     gateway_server, browser
 ):

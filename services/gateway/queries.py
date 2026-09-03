@@ -270,7 +270,24 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
     stake = room_row["stake"]
     lobby_deadline_ms: int | None = None
 
-    if round_row is not None:
+    # A terminal round (voided/done) is treated exactly like "no round at
+    # all" here -- a real production incident: RoundEngine._reset_to_idle()
+    # already flips the *in-memory* engine back to "idle" the instant a
+    # round voids or finishes settling (round_engine.py), but this query
+    # reads Postgres, where that same round's row keeps its terminal status
+    # forever until a brand-new round is inserted. The only thing that ever
+    # inserts one is RoundEngine.join() (via a take_card), which only runs
+    # once a player is actually looking at the lobby/card-grid screen --
+    # and app.v6.js's own state_sync handler routes "voided"/"done" straight
+    # back to the room list, never to the lobby. Left as `round_row["status"]`,
+    # every room went permanently unplayable the moment its first-ever round
+    # ended: nobody could ever reach the lobby again to take a card, so no
+    # new round could ever be created, forever -- not caught earlier because
+    # no round had ever actually finished end-to-end against a real client
+    # until this session's has_main_web_app fix let one complete for the
+    # first time.
+    round_is_terminal = round_row is not None and round_row["status"] in ("voided", "done")
+    if round_row is not None and not round_is_terminal:
         status = round_row["status"]
         round_id = round_row["id"]
         call_index = round_row["call_index"]
