@@ -5,6 +5,106 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-03 — Rounds are now server-owned and continuous, not player-triggered
+
+A detailed, explicit product correction: card selection must never be what
+starts a round. A round's selection timer is created and owned entirely by
+the server; a player selecting a card only ever joins an already-live
+round. This must hold even before any player has ever connected (a fresh
+room should already be showing a live selection countdown), and it must
+keep holding forever afterward (the moment one round ends, the next one's
+selection window opens automatically -- no admin button, no player action,
+nothing waiting on a human).
+
+The previous implementation violated this in one specific, narrow way:
+`RoundEngine.join()`'s own `if self._status == "idle": ... start a round`
+branch was the *only* thing that ever created a round -- meaning the very
+first player to ever tap a card in a room was, mechanically, the thing
+that started that room's timer. Every round after the first *did* already
+run on a pure server timer with no reset-on-join (confirmed by direct
+reading of `_run_lobby()` before touching anything -- players joining
+mid-countdown never touched `_lobby_deadline_monotonic`), but nothing
+proactively created round N+1 once round N finished; the engine just went
+back to blocking on `self._round_active_event.wait()` until the next
+player's join() lazily created the next one. A room's first-ever player,
+and every returning player after any single round ended, was -- from the
+game's own point of view -- "starting" that round.
+
+Fix: `run_forever()`'s own loop now proactively creates a round the
+instant it observes `self._status == "idle"` (reusing the exact same
+`_round_start_lock` double-checked-locking pattern `join()`'s branch
+already used, so the two can never race into creating two rounds for the
+same room). `join()`'s branch is untouched and stays in place as a
+defensive fallback -- harmless in real production, where the engine
+always wins the race, but load-bearing for the large number of existing
+tests that construct a `RoundEngine` and call `join()` directly without
+ever running a `run_forever()` task. This was a deliberately additive
+choice over rewriting every such test to depend on the new proactive path:
+lower risk, in a financially-sensitive state machine, than an invasive
+rewrite across ~50 call sites for equivalent real-world behavior.
+
+A new `rooms.no_player_next_round_delay_seconds` column (default 5s)
+governs the pause after a round returns to idle before the next one is
+created -- shared by the underfilled-lobby and exhausted-no-winner paths
+(the winner path already had its own equivalent pause, `result_seconds`).
+This isn't just pacing: without *some* gap, a room that keeps failing to
+fill would have the engine recreate the next round again instantly, a
+tight insert-void-insert loop hammering Postgres for no player's benefit
+-- and, just as real a problem, one that left `self._status` back at
+"lobby" again within microseconds of going "idle", far too narrow a
+window for anything polling for "idle" (this project's own test suite
+included -- see below) to reliably observe. The delay lives in
+`run_forever()`'s own loop, applied once, uniformly, right where it
+already checks `self._status == "idle"` -- not duplicated across each
+termination branch -- and is skipped entirely for a room's very first-
+ever round (`self._seq == 0`), which must become live immediately, not
+sit idle for a few seconds first. No value for this delay is evidenced in
+the reference video (unlike `lobby_seconds`/`call_interval_ms`/
+`result_seconds`, which are); 5s is a reasonable placeholder judgment
+call, tunable per room like every other timing constant.
+
+Fallout, caught by the existing test suite rather than in production: 10
+tests broke on the first pass, all via the same mechanism -- they polled
+`engine.status == "idle"` (or `round_id is None`) as a stand-in for "the
+specific round I was testing has finished," which stopped being a safe
+assumption the moment idle became a state the engine cycles through
+continuously rather than rests in. Fixed by relocating the delay (an
+earlier attempt placed it *before* `_reset_to_idle()` rather than *after*,
+which didn't actually widen the idle-observability window at all and left
+those 10 tests still failing) rather than rewriting the tests' own polling
+strategy, since the delay fix is both correct on its own terms and
+sufficient. Two new tests lock the actual rule in directly:
+`test_a_room_gets_a_live_round_before_any_player_ever_joins` (never calls
+`join()` at all -- proves a round exists before any player touches the
+room) and `test_an_empty_room_automatically_opens_the_next_round_with_no_
+join_at_all` (proves the loop actually continues on its own, not just
+that the first round exists). Both verified against the pre-fix code via
+a real revert-test (genuine timeouts, not assumed).
+
+A separate, explicit claim in this same product correction -- that the
+reference video's card-selection grid spans 0 through 420, not the 1-150
+pool this project shipped and migrated to production a few hours earlier
+in this same session -- was checked directly against the video rather
+than taken on faith or dismissed, given the two claims directly
+contradict each other and 150 was itself the product of this exact same
+video's earlier analysis. Frame-by-frame review (delegated to a
+sub-agent, then spot-verified) found the card-selection grid itself
+renders as a complete, unscrolled 1-150 grid in every clean frame checked
+across multiple independent rounds, with room to spare below row 150 --
+no partial row, no "load more," no evidence it extends further. The one
+counter-data-point, a real "Card #407" in a winner announcement from an
+earlier round in the same recording, is a genuine, unexplained anomaly
+(four *other* independent "Card #" sightings all fall cleanly within
+1-150) most plausibly explained by that reference app using a separate
+internal card-catalog/serial number distinct from the room-facing 1-150
+selection slot, though this can't be fully confirmed from screen frames
+alone. Flagged back to the user with the concrete evidence rather than
+silently keeping 150 or silently switching to 420; not changed pending
+that answer, since it would mean discarding a live, migrated, tested
+system on the strength of one contradicted data point.
+
+---
+
 ## 2026-09-03 — Every room went permanently dead after its first round ended
 
 The real blocker behind "the game shows the room list, then does nothing"

@@ -339,6 +339,7 @@ async def create_room(
     win_patterns: list[str] | None = None,
     is_active: bool = False,
     max_cards_per_player: int = 1,
+    no_player_next_round_delay_seconds: int = 1,
 ) -> int:
     """Fast-timing test room by default -- lobby closes in 1s, a number is
     called every 20ms (so all 75 calls take ~1.5s worst case), and there's
@@ -365,8 +366,8 @@ async def create_room(
         INSERT INTO rooms
             (code, stake, house_cut_bps, min_players, max_players,
              lobby_seconds, call_interval_ms, result_seconds, win_patterns, is_active,
-             max_cards_per_player)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             max_cards_per_player, no_player_next_round_delay_seconds)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         RETURNING id
         """,
         f"test-room-{uuid.uuid4()}",
@@ -380,5 +381,6 @@ async def create_room(
         json.dumps(win_patterns if win_patterns is not None else ["row", "col", "diag", "corners"]),
         is_active,
         max_cards_per_player,
+        no_player_next_round_delay_seconds,
     )
     return row["id"]

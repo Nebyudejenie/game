@@ -898,6 +898,85 @@ async def test_lobby_underfilled_all_refunded_room_returns_to_idle(pool, redis, 
         await asyncio.wait_for(task, timeout=10)
 
 
+async def test_a_room_gets_a_live_round_before_any_player_ever_joins(pool, redis, card_pool, conn):
+    """The core rule behind this whole product correction: a round is
+    server-owned and server-created, not started by a player's own card
+    selection. Deliberately never calls engine.join() at all -- if a round
+    only ever existed because someone joined, this test would time out
+    exactly the way the pre-fix version of
+    test_a_room_whose_last_round_ended_can_still_be_reentered (gateway/
+    queries.py's own history) did.
+    """
+    room_id = await create_room(conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=5)
+    engine = await make_engine(pool, redis, card_pool, room_id)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        await wait_until(lambda: engine.status == "lobby", timeout=5)
+        assert engine.round_id is not None
+        assert engine.player_count() == 0
+
+        round_row = await pool.fetchrow(
+            "SELECT status, lobby_deadline FROM rounds WHERE id = $1", engine.round_id
+        )
+        assert round_row["status"] == "lobby"
+        assert round_row["lobby_deadline"] is not None
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
+async def test_an_empty_room_automatically_opens_the_next_round_with_no_join_at_all(
+    pool, redis, card_pool, conn
+):
+    """The other half of the same rule: the loop actually continues on its
+    own, forever, with zero player involvement -- not just that the first
+    round exists. min_players=2 and zero joins guarantees every round in
+    this test voids as underfilled; no_player_next_round_delay_seconds=1
+    (conftest's own fast-test default) keeps this quick without needing to
+    fake the clock.
+    """
+    room_id = await create_room(conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=1)
+    engine = await make_engine(pool, redis, card_pool, room_id)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        await wait_until(lambda: engine.status == "lobby", timeout=5)
+        first_round_id = engine.round_id
+        assert first_round_id is not None
+
+        # The first round voids (nobody joined) -- wait for its OWN row to
+        # go terminal, not just for engine.status, which is exactly the
+        # kind of transient in-memory signal a continuously-cycling engine
+        # makes unreliable to poll for a *specific* round's own outcome.
+        async def first_round_is_terminal() -> bool:
+            status = await pool.fetchval("SELECT status FROM rounds WHERE id = $1", first_round_id)
+            return status == "voided"
+
+        for _ in range(500):
+            if await first_round_is_terminal():
+                break
+            await asyncio.sleep(0.02)
+        else:
+            raise AssertionError("first round never voided")
+
+        # With nobody ever joining, only the engine itself can ever create
+        # a second round -- proving the continuous loop, not a one-shot.
+        for _ in range(500):
+            if engine.round_id is not None and engine.round_id != first_round_id:
+                break
+            await asyncio.sleep(0.02)
+        else:
+            raise AssertionError("no second round was ever created without a join")
+
+        second_round_row = await pool.fetchrow(
+            "SELECT seq, status FROM rounds WHERE id = $1", engine.round_id
+        )
+        assert second_round_row["status"] == "lobby"
+        assert second_round_row["seq"] == 2
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
 async def test_lobby_underfilled_refund_pushes_a_live_balance_update(pool, redis, card_pool, conn):
     room_id = await create_room(conn, stake=Decimal("10.00"), min_players=5, lobby_seconds=1)
     engine = await make_engine(pool, redis, card_pool, room_id)

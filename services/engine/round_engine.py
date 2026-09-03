@@ -56,6 +56,7 @@ class RoomConfig:
     result_seconds: int
     win_patterns: list[str]
     max_cards_per_player: int
+    no_player_next_round_delay_seconds: int
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,7 @@ async def load_room_config(pool: asyncpg.Pool, room_id: int) -> RoomConfig:
         result_seconds=row["result_seconds"],
         win_patterns=list(win_patterns),
         max_cards_per_player=row["max_cards_per_player"],
+        no_player_next_round_delay_seconds=row["no_player_next_round_delay_seconds"],
     )
 
 
@@ -233,9 +235,46 @@ class RoundEngine:
         commands_task = asyncio.create_task(self._serve_commands())
         try:
             while not self._stop_requested and self._lock.is_held():
-                await self._round_active_event.wait()
-                if self._stop_requested or not self._lock.is_held():
-                    break
+                # Server-owned, continuous round lifecycle: a room's round
+                # is created proactively the moment this engine claims the
+                # room (and again immediately after every previous round
+                # resets to idle), never lazily by a player's own
+                # take_card. A player selecting a card only ever joins a
+                # round that already exists -- there is no path left where
+                # "a card was selected" is what causes a round to start.
+                # The double-checked _round_start_lock is the exact same
+                # one join()'s own (now purely a defensive fallback, for
+                # the brief window before this has run, and for tests that
+                # construct an engine without a run_forever() task) idle
+                # -handling below already uses, so the two can never race
+                # each other into creating two rounds for the same room.
+                if self._status == "idle":
+                    if self._seq > 0:
+                        # Not this engine's very first round (self._seq
+                        # only advances inside _start_new_round()) -- give
+                        # idle a real, observable resting window before
+                        # proactively creating the next one. Every
+                        # termination path (a winner, an exhausted round
+                        # with none, an underfilled lobby) funnels through
+                        # here, so this is the one place that needs it,
+                        # rather than duplicating a wait at each of those
+                        # call sites. Without it, self._status went
+                        # "idle" and immediately back to "lobby" again
+                        # within microseconds -- a tight insert-void
+                        # -insert loop hammering Postgres for an empty
+                        # room's benefit, and too narrow a window for
+                        # anything polling for "idle" (this file's own
+                        # tests included) to reliably observe. The very
+                        # first round skips this: a room should become
+                        # live the instant its engine claims it, not sit
+                        # idle for a few seconds first.
+                        await self._wait_before_next_round()
+                        if self._stop_requested or not self._lock.is_held():
+                            break
+                    async with self._round_start_lock:
+                        if self._status == "idle":
+                            await self._start_new_round()
+                            self._round_active_event.set()
                 await self._run_lobby()
         finally:
             commands_task.cancel()
@@ -252,16 +291,25 @@ class RoundEngine:
 
     async def join(self, user_id: int, card_no: int, *, auto_mark: bool = True) -> JoinResult:
         if self._status == "idle":
-            # Many joins can arrive concurrently against a genuinely idle
-            # room (a burst of players hitting an empty room at once) --
-            # without this lock, every one of them would see "idle" before
-            # the first had a chance to flip it to "lobby", and each would
-            # try to INSERT the same next round seq number, raising a
+            # A defensive fallback now, not the primary mechanism -- in
+            # real production run_forever()'s own loop always beats any
+            # join() to creating a room's round (a player joins an
+            # already-live round; joining never itself starts one). This
+            # only ever actually fires in the brief window before that
+            # loop's first iteration completes, and for tests that
+            # construct a RoundEngine and call join() without ever running
+            # a run_forever() task at all. Many joins can arrive
+            # concurrently against a genuinely idle room either way (a
+            # burst of players hitting an empty room at once) -- without
+            # this lock, every one of them would see "idle" before the
+            # first had a chance to flip it to "lobby", and each would try
+            # to INSERT the same next round seq number, raising a
             # UniqueViolationError on rounds_room_id_seq_key instead of
             # just joining the one round that actually got created. The
             # inner re-check is what makes only the first caller actually
-            # start a round; everyone else finds it already started once
-            # they get the lock.
+            # start a round; everyone else (including run_forever()'s own
+            # loop, guarded by the exact same lock) finds it already
+            # started once they get the lock.
             async with self._round_start_lock:
                 if self._status == "idle":
                     await self._start_new_round()
@@ -581,7 +629,7 @@ class RoundEngine:
             remaining = self._lobby_deadline_monotonic - time.monotonic()
             if remaining <= 0:
                 break
-            if not self._lock.is_held():
+            if not self._lock.is_held() or self._stop_requested:
                 return
             await self._publish_room(
                 {
@@ -595,7 +643,7 @@ class RoundEngine:
             )
             await asyncio.sleep(min(1.0, remaining))
 
-        if not self._lock.is_held():
+        if not self._lock.is_held() or self._stop_requested:
             return
 
         if self.player_count() >= self._room.min_players:
@@ -927,6 +975,25 @@ class RoundEngine:
         self._set_status("done")
         await asyncio.sleep(self._room.result_seconds)
         self._reset_to_idle()
+
+    async def _wait_before_next_round(self) -> None:
+        """Called from run_forever()'s own loop, right after it observes
+        this engine is back at "idle" (every termination path -- a winner,
+        an exhausted round with none, an underfilled lobby -- funnels
+        through here), before it proactively creates the next round. See
+        that call site's own comment for why this needs to exist at all
+        once round creation stopped being player-triggered.
+
+        Polled in short steps (matching _run_lobby()'s own 1s granularity),
+        not a single sleep, so a real stop() during a genuinely empty
+        room's idle stretch is still noticed promptly rather than blocking
+        shutdown.
+        """
+        delay_deadline = time.monotonic() + self._room.no_player_next_round_delay_seconds
+        while time.monotonic() < delay_deadline:
+            if self._stop_requested or not self._lock.is_held():
+                return
+            await asyncio.sleep(min(1.0, delay_deadline - time.monotonic()))
 
     def _reset_to_idle(self) -> None:
         self._round_id = None
