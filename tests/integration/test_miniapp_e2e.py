@@ -168,7 +168,7 @@ async def test_a_genuinely_fresh_room_with_no_round_history_can_still_be_entered
     # matter how long you waited, because nothing ever transitioned it.
     await page.wait_for_selector("#screen-lobby.active", timeout=10000)
     cells = await page.query_selector_all(".card-grid-cell")
-    assert len(cells) == 150, "the lobby's own card grid must render even with no round yet"
+    assert len(cells) == 432, "the lobby's own card grid must render even with no round yet"
 
     assert console_errors == [], f"JS errors entering a genuinely fresh room: {console_errors}"
     await page.close()
@@ -220,7 +220,7 @@ async def test_a_room_whose_last_round_ended_can_still_be_reentered(gateway_serv
     # waited or how many times you tapped the room again.
     await page.wait_for_selector("#screen-lobby.active", timeout=10000)
     cells = await page.query_selector_all(".card-grid-cell")
-    assert len(cells) == 150, "the lobby's own card grid must render for the next round"
+    assert len(cells) == 432, "the lobby's own card grid must render for the next round"
 
     assert console_errors == [], f"JS errors reentering a room whose last round ended: {console_errors}"
     await page.close()
@@ -458,7 +458,7 @@ async def test_miniapp_full_gameplay_flow(gateway_server, browser, pool, redis, 
 
         await page.wait_for_selector("#screen-lobby.active", timeout=10000)
         cells = await page.query_selector_all(".card-grid-cell")
-        assert len(cells) == 150
+        assert len(cells) == 432
 
         # The lobby's own header/status bar (video reference: REFRESH,
         # BALANCE, CONNECTED, Stake, Win) -- real values from state_sync/

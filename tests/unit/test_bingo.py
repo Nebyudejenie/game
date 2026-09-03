@@ -123,9 +123,9 @@ def test_letter_for_and_label():
 # --- card pool ---
 
 
-def test_card_pool_has_150_distinct_cards_with_correct_column_ranges():
+def test_card_pool_has_432_distinct_cards_with_correct_column_ranges():
     pool = bingo.generate_card_pool()
-    assert len(pool) == 150
+    assert len(pool) == 432
 
     seen = set()
     for grid in pool:
@@ -137,7 +137,7 @@ def test_card_pool_has_150_distinct_cards_with_correct_column_ranges():
             assert non_free == sorted(non_free)
             assert len(set(values)) == len(values)  # no repeats within column
         seen.add(tuple(v for row in grid for v in row))
-    assert len(seen) == 150  # all cards distinct
+    assert len(seen) == 432  # all cards distinct
 
 
 def test_card_pool_is_deterministic_across_calls():
@@ -151,7 +151,7 @@ def test_card_pool_golden_hash_is_pinned():
     """
     pool = bingo.generate_card_pool()
     digest = hashlib.sha256(json.dumps(pool).encode("utf-8")).hexdigest()
-    assert digest == "d82ac03fd31694170a303d5f3926e258ddc21775bd3e256547b18df2e13dad03"
+    assert digest == "790561fb265cca080e371f38c8433e004c100b44ad7982f84cf653162a251d12"
 
 
 def test_card_pool_first_100_cards_are_byte_identical_to_the_original_pool():
@@ -161,11 +161,27 @@ def test_card_pool_first_100_cards_are_byte_identical_to_the_original_pool():
     seeded stream, so every card_no that was ever dealt before this change
     must still map to the exact same grid. This is the original 100-card
     pool's own golden hash (pinned before the pool size changed), asserted
-    here against just the first 100 entries of the now-150 pool.
+    here against just the first 100 entries of the now-432 pool.
     """
     pool = bingo.generate_card_pool()
     digest = hashlib.sha256(json.dumps(pool[:100]).encode("utf-8")).hexdigest()
     assert digest == "ba46c87210f7c3fd7d21748293aa6a26953bc7689586d75ee00e9d866da0bcca"
+
+
+def test_card_pool_first_150_cards_are_byte_identical_to_the_previous_pool():
+    """The actual machine-verified proof that raising _POOL_SIZE from 150 to
+    432 (2026-09-03) was a pure append. The first 150 was itself shipped and
+    briefly live in production on the strength of an unscrolled video frame
+    that happened to end exactly at row 150 and looked complete -- a second,
+    longer recording of the same reference app proved the real grid keeps
+    going, scrolled to a confirmed, clean end at card 432 across four
+    independent frames. This is the 150-card pool's own golden hash (the one
+    pinned above before this change), asserted here against just the first
+    150 entries of the now-432 pool.
+    """
+    pool = bingo.generate_card_pool()
+    digest = hashlib.sha256(json.dumps(pool[:150]).encode("utf-8")).hexdigest()
+    assert digest == "d82ac03fd31694170a303d5f3926e258ddc21775bd3e256547b18df2e13dad03"
 
 
 # --- provably fair draw ---

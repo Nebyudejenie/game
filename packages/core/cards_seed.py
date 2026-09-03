@@ -9,5 +9,5 @@ from packages.core.bingo import Grid, generate_card_pool
 
 
 def seed_rows() -> list[tuple[int, Grid]]:
-    """Returns (card_no, grid) pairs for card_no 1..150, card_no = index + 1."""
+    """Returns (card_no, grid) pairs for card_no 1.._POOL_SIZE, card_no = index + 1."""
     return [(i + 1, grid) for i, grid in enumerate(generate_card_pool())]

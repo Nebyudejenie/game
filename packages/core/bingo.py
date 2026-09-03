@@ -31,8 +31,21 @@ _COLUMNS = ("B", "I", "N", "G", "O")
 # stream, so RAISING this constant is the one safe change -- every existing
 # card_no's grid is unaffected, only new ones get appended. Never lower it,
 # never change _POOL_SEED_LABEL, never change the generation algorithm.
+#
+# 432, not the 150 this project shipped a few hours earlier in the same
+# session: that number came from a video frame showing the card-selection
+# grid's *unscrolled* first screen, which happens to end at exactly row
+# 150 and looks complete (empty space below, no visible scrollbar) --
+# genuinely indistinguishable from the real end without scrolling further.
+# A second, longer recording of the same reference app scrolled the
+# identical-looking grid well past that point; 432 is the confirmed true
+# end, verified directly (not by inference) across four independent
+# frames all showing the same final "...431, 432" row followed by clean
+# empty space, and cross-checked against three real winning "Card #"
+# numbers from the same video (194, 403, 126) that only make sense
+# against a pool this large.
 _POOL_SEED_LABEL = b"jobingo-card-pool-v1"
-_POOL_SIZE = 150
+_POOL_SIZE = 432
 
 
 def letter_for(n: int) -> str:

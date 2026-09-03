@@ -5,6 +5,46 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-03 — Card pool corrected: 150 was wrong, true size is 432
+
+Settles a dispute opened by two conflicting claims about the reference
+video's card-selection grid: this project's own earlier analysis (same
+day, same session) concluded 1-150 and shipped/migrated/deployed it; a
+later user message asserted 0-420 (421 positions) instead. Neither was
+right.
+
+The 150 conclusion came from a real video frame of the card-selection
+grid that renders as a complete-looking, unscrolled 1-150 grid with empty
+space below and no visible scrollbar -- genuinely indistinguishable from
+the true end without actually scrolling further. It wasn't: a second,
+longer recording of the exact same reference app scrolled the
+identical-looking grid well past that point. Verified directly, not by
+inference -- four independent frames (at different points in the
+recording, different rounds) all show the grid's real last row as
+"...431, 432" followed by clean empty space, no cut-off, no "load more."
+Cross-checked against three real winning "Card #" numbers visible
+elsewhere in the same video (194, 403, 126) plus one from the earlier
+video (407) -- all four fall within 1-432 and none support either 150 or
+420/421. I personally viewed the cited frame directly before acting on
+this, not just a sub-agent's report, given how consequential the number
+is.
+
+Fix: `packages/core/bingo.py`'s `_POOL_SIZE` 150 -> 432, exactly the same
+append-only pattern already established for the 100 -> 150 change earlier
+this session (`generate_card_pool()` draws sequentially from one seeded
+stream, so raising this constant leaves every existing card_no's grid
+untouched -- machine-verified here too: a new test asserts the first 150
+entries of the 432-pool still hash to the exact pinned 150-pool hash,
+alongside the existing test making the same proof for the original
+100-card prefix). New migration widens `cards_card_no_check` and inserts
+exactly the new 151-432 rows, mirroring migration `b762e8ce264b`'s own
+established shape. Only one hardcoded frontend reference existed
+(`app.v6.js`'s lobby grid loop) -- the engine side was already dynamic
+(`card_no not in self._card_pool`) from the earlier change, so nothing
+there needed touching.
+
+---
+
 ## 2026-09-03 — Rounds are now server-owned and continuous, not player-triggered
 
 A detailed, explicit product correction: card selection must never be what

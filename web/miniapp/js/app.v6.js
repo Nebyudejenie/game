@@ -237,7 +237,7 @@ ws.on("state_sync", (msg) => {
     // before the browser ever connects, so "idle" was never actually
     // exercised end-to-end. enterLobby() already tolerates the fields
     // an idle sync doesn't have yet (no round_id, no lobby_deadline_ms,
-    // your_cards: []) -- it just shows an open 150-card grid with no
+    // your_cards: []) -- it just shows an open 432-card grid with no
     // countdown running yet, which is exactly correct for "nobody has
     // taken a card in this room yet."
     enterLobby(msg);
@@ -267,7 +267,7 @@ let maxCardsPerPlayer = 1;
 // Counts take_card commands sent that haven't acked yet -- see the ack
 // handler below for why this exists.
 let pendingTakeCardAcks = 0;
-// The grid's 150 cells are always just the numbers 1-150 -- room-
+// The grid's 432 cells are always just the numbers 1-432 -- room-
 // independent -- so the DOM only ever needs building once, not on every
 // enterLobby() call. That matters more now than it used to: a tap commits
 // immediately (see the ack handler below), so a resync can land while a
@@ -322,7 +322,7 @@ function updateLobbyMoneyBar(msg) {
 function buildCardGrid() {
   const grid = el("card-grid");
   grid.innerHTML = "";
-  for (let n = 1; n <= 150; n++) {
+  for (let n = 1; n <= 432; n++) {
     const cell = document.createElement("div");
     cell.className = "card-grid-cell";
     cell.textContent = String(n);

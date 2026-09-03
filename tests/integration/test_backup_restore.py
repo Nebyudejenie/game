@@ -93,11 +93,11 @@ async def test_a_real_backup_restores_with_the_data_intact(pool, conn, tmp_path)
             assert restored_balance == source_balance == Decimal("543.21")
 
             # Prove this is a full restore, not a lucky single-row match --
-            # the whole cards pool (150 rows, seeded once in migrations)
+            # the whole cards pool (432 rows, seeded once in migrations)
             # must have made it across intact too.
             restored_card_count = await drill_conn.fetchval("SELECT count(*) FROM cards")
             source_card_count = await pool.fetchval("SELECT count(*) FROM cards")
-            assert restored_card_count == source_card_count == 150
+            assert restored_card_count == source_card_count == 432
         finally:
             await drill_conn.close()
 
