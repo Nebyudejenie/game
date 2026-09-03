@@ -287,12 +287,6 @@ let pendingTakeCardAcks = 0;
 // real -- Playwright's own "Element is not attached to the DOM" on the
 // second of two quick taps).
 let cardGridBuilt = false;
-// takenCards *is* room-scoped (the same card number means something
-// different in a different room) -- only reset it on a genuine room
-// change, not on every resync, or a mid-lobby take_card ack would wipe
-// out every other player's already-taken cards this client had learned
-// about from live card_taken broadcasts since the last resync.
-let lobbyRoomId = null;
 
 function enterLobby(sync) {
   showScreen("lobby");
@@ -303,11 +297,19 @@ function enterLobby(sync) {
   pendingTakeCardAcks = 0;
   renderLobbyCards(yourCards);
 
-  const state = getState();
-  if (lobbyRoomId !== state.currentRoomId) {
-    lobbyRoomId = state.currentRoomId;
-    takenCards.clear();
-  }
+  // A real production gap, caught live: a player who joined a room after
+  // someone else already took a card saw that card as still available --
+  // takenCards used to only ever learn about a taken card from a live
+  // card_taken broadcast, which a client that joins *after* the take
+  // already happened was never subscribed to receive. state_sync now
+  // carries the room's real, complete taken_cards list on every sync
+  // (join, resync after an ack, reconnect), so this can just be
+  // rebuilt from the server's own authoritative answer every time,
+  // instead of the client trying to reconstruct it from a stream of
+  // broadcasts it may have joined partway through.
+  takenCards.clear();
+  for (const cardNo of sync.taken_cards || []) takenCards.add(cardNo);
+
   if (!cardGridBuilt) {
     buildCardGrid();
     cardGridBuilt = true;
@@ -318,6 +320,7 @@ function enterLobby(sync) {
   updateLobbyCta();
   startLobbyCountdown(sync);
   updateLobbyMoneyBar(sync);
+  const state = getState();
   if (state.user) el("lobby-balance-amount").textContent = `${state.user.balance} ETB`;
 }
 

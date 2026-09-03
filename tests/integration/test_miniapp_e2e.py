@@ -383,6 +383,85 @@ async def test_taking_a_card_shows_the_generated_bingo_card_immediately_in_the_l
         await asyncio.wait_for(task, timeout=15)
 
 
+async def test_a_late_joiner_sees_an_already_taken_card_as_taken(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    """A real production gap, caught while building an unrelated real
+    two-player production test: Player A takes a card, then Player B
+    connects to the same room for the first time. Before this fix, B's
+    own state_sync (build_state_sync() in services/gateway/queries.py)
+    never included a taken_cards list at all -- only a live card_taken
+    broadcast ever taught a client a given card was unavailable, and B
+    was never subscribed to receive the one that would have covered A's
+    card, since it happened before B ever joined. B's own tap on that
+    card would still have been correctly rejected server-side (join()'s
+    own PRIMARY KEY on round_entries(round_id, card_no)), but B's grid
+    kept showing it as available with nothing telling them otherwise.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=30, is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    try:
+        telegram_id_a = next_telegram_id()
+        page_a, _ = await prepare_page(browser, telegram_id_a, first_name="PlayerA")
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page_a.goto(http_base + "/")
+        await page_a.wait_for_selector("#screen-rooms.active", timeout=10000)
+        user_a = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id_a)
+        assert user_a is not None
+        await fund_user(conn, user_a["id"], Decimal("100.00"))
+        await page_a.reload()
+        await page_a.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page_a.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('100.00')", timeout=10000
+        )
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page_a.wait_for_selector(room_selector, timeout=10000)
+        await page_a.click(room_selector)
+        await page_a.wait_for_selector("#screen-lobby.active", timeout=10000)
+        cells_a = await page_a.query_selector_all(".card-grid-cell")
+        await cells_a[0].click()  # card #1
+        await page_a.wait_for_selector("#lobby-your-cards-section:not(.hidden)", timeout=10000)
+
+        # Only now does Player B ever connect -- entirely after A's take_card
+        # has already fully landed, so B was never subscribed to receive
+        # that specific card_taken broadcast.
+        telegram_id_b = next_telegram_id()
+        page_b, console_errors_b = await prepare_page(browser, telegram_id_b, first_name="PlayerB")
+        await page_b.goto(http_base + "/")
+        await page_b.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page_b.click(room_selector)
+        await page_b.wait_for_selector("#screen-lobby.active", timeout=10000)
+
+        cell_1_b = page_b.locator(".card-grid-cell").first
+        await asyncio.wait_for(
+            _wait_for_class(cell_1_b, "taken"),
+            timeout=5,
+        )
+        classes = await cell_1_b.get_attribute("class")
+        assert "taken" in (classes or ""), f"card #1 must show as taken for a fresh joiner, got: {classes!r}"
+        assert "selected" not in (classes or ""), "taken, not B's own selection"
+
+        assert console_errors_b == [], f"JS errors for the late joiner: {console_errors_b}"
+        await page_a.close()
+        await page_b.close()
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
+async def _wait_for_class(locator, class_name: str, interval: float = 0.05) -> None:
+    while True:
+        classes = await locator.get_attribute("class")
+        if class_name in (classes or ""):
+            return
+        await asyncio.sleep(interval)
+
+
 async def test_miniapp_shows_a_retry_banner_instead_of_a_permanent_blank_screen_when_ws_never_connects(
     gateway_server, browser
 ):

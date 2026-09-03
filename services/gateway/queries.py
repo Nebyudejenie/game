@@ -261,6 +261,7 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
     your_card_grid: list[list[int]] | None = None
     auto_mark: bool | None = None
     your_cards: list[dict[str, Any]] = []
+    taken_cards: list[int] = []
     status = "idle"
     round_id = None
     call_index = 0
@@ -300,6 +301,21 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
         if round_row["lobby_deadline"] is not None:
             lobby_deadline_ms = int(round_row["lobby_deadline"].timestamp() * 1000)
 
+        # A production gap, caught live: a player who joins after someone
+        # else already took a card saw that card as still available --
+        # taken_cards was never part of this reconnect payload, only ever
+        # learned from a live card_taken broadcast, which a client that
+        # joins *after* the take happened was never subscribed to receive.
+        # A second player's tap on an already-taken card was always
+        # correctly rejected server-side (join()'s own PRIMARY KEY on
+        # round_entries(round_id, card_no) never let two owners share a
+        # card), but the client had no way to show it as taken up front.
+        all_entries = await pool.fetch(
+            "SELECT user_id, card_no, auto_mark FROM round_entries WHERE round_id = $1 ORDER BY card_no",
+            round_id,
+        )
+        taken_cards = [e["card_no"] for e in all_entries]
+
         # A player can hold more than one card in the same round now --
         # ordered by card_no for a deterministic "first" one. your_cards
         # is the real, complete list; your_card/your_card_grid/auto_mark
@@ -307,12 +323,7 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
         # Mini App build that predates multi-card support (which only
         # ever reads those three singular fields) keeps working exactly
         # as before without needing to ship at the same time as this.
-        entries = await pool.fetch(
-            "SELECT card_no, auto_mark FROM round_entries WHERE round_id = $1 AND user_id = $2 "
-            "ORDER BY card_no",
-            round_id,
-            user_id,
-        )
+        entries = [e for e in all_entries if e["user_id"] == user_id]
         if entries:
             card_nos = [e["card_no"] for e in entries]
             grid_rows = await pool.fetch(
@@ -352,6 +363,7 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
         "your_card_grid": your_card_grid,
         "auto_mark": auto_mark,
         "your_cards": your_cards,
+        "taken_cards": taken_cards,
         "max_cards_per_player": room_row["max_cards_per_player"],
         "lobby_deadline_ms": lobby_deadline_ms,
         "server_time": int(time.time() * 1000),

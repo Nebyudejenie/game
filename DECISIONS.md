@@ -5,6 +5,46 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-03 — A late joiner now sees an already-taken card as taken
+
+Caught building an unrelated real two-player production test (verifying
+the full round lifecycle end to end) -- Player A took card #1, then
+Player B connected fresh, and B's own card grid still showed #1 as
+available. B's own tap on it would still have been correctly rejected
+server-side (`round_entries`' own `PRIMARY KEY (round_id, card_no)` never
+lets two owners share a card), but nothing told B's client not to show it
+as pickable in the first place.
+
+Root cause: `taken_cards` was never part of `build_state_sync()`'s
+payload (services/gateway/queries.py) -- the only thing that ever taught
+a client a given card was unavailable was a live `card_taken` broadcast,
+and a client that joins *after* another player's take_card already
+happened was never subscribed to receive that specific broadcast. This
+was a documented, deliberately-deferred gap from the multi-card work
+earlier this session ("takenCards is never seeded from state_sync
+today... cards taken before a player joins render as available") --
+deferred then because multi-card shipped with only one real, low-traffic
+production room, low-likelihood to actually collide in practice. Worth
+fixing now that a second real recording put an actual multi-player flow
+under a magnifying glass.
+
+Fix: `build_state_sync()` now returns every card_no currently held in the
+round (not just the requesting user's own), sourced from the same
+`round_entries` query already run for `your_cards` -- one query, split
+two ways, not two round trips. `app.v6.js`'s `enterLobby()` now rebuilds
+`takenCards` from this authoritative list on every sync instead of only
+clearing it on a room change and otherwise trusting whatever it happened
+to learn from broadcasts received while already connected -- simpler
+than the room-tracking workaround it replaces, now that the server
+answers the question directly every time.
+
+New e2e test drives two real, separate browser sessions -- Player A takes
+a card, only then does Player B ever connect -- and asserts B's grid
+shows it taken immediately, no broadcast timing required. Verified
+failing against the pre-fix code via a genuine revert-test.
+
+---
+
 ## 2026-09-03 — Taking a card now shows the generated Bingo card immediately, in the lobby
 
 A concrete gap named against a user's own screen recording: tapping a card
