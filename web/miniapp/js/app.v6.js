@@ -221,10 +221,25 @@ ws.on("state_sync", (msg) => {
   setState({ round: msg });
   winPatterns = msg.win_patterns || winPatterns;
 
-  if (msg.status === "idle" || msg.status === "voided" || msg.status === "done") {
+  if (msg.status === "voided" || msg.status === "done") {
     showScreen("rooms");
     refreshRoomList();
-  } else if (msg.status === "lobby") {
+  } else if (msg.status === "idle" || msg.status === "lobby") {
+    // "idle" means no round has ever been created for this room yet --
+    // round_engine.py only creates one lazily, on the very first
+    // take_card. A genuinely fresh room (every room in a brand-new
+    // deployment, before its first-ever player) has no other path to
+    // the card-selection screen: routing "idle" back to the room list
+    // here left the very first player able to open a room but never
+    // take a card, permanently, since nothing else in this client ever
+    // requests the lobby UI. The whole e2e suite missed this because
+    // every existing test pre-seeds a round via a direct engine.join()
+    // before the browser ever connects, so "idle" was never actually
+    // exercised end-to-end. enterLobby() already tolerates the fields
+    // an idle sync doesn't have yet (no round_id, no lobby_deadline_ms,
+    // your_cards: []) -- it just shows an open 150-card grid with no
+    // countdown running yet, which is exactly correct for "nobody has
+    // taken a card in this room yet."
     enterLobby(msg);
   } else if (msg.status === "running" || msg.status === "settling") {
     if (msg.your_cards && msg.your_cards.length > 0) {
@@ -376,6 +391,16 @@ ws.on("ack", (msg) => {
 function startLobbyCountdown(sync) {
   clearInterval(countdownTimer);
   const label = el("lobby-countdown");
+  // An "idle" room (nobody has ever taken a card in it yet) has no real
+  // deadline -- round_engine.py only sets one once the first take_card
+  // creates the round. Showing "Starts in 0s" against a null deadline
+  // would be actively misleading here; the CTA below is the real call
+  // to action until a real round_start/state_sync hands back a genuine
+  // lobby_deadline_ms.
+  if (sync.lobby_deadline_ms == null) {
+    label.textContent = t("lobby.pick_card");
+    return;
+  }
   countdownTimer = setInterval(() => {
     const secondsLeft = Math.max(0, Math.round((sync.lobby_deadline_ms - serverNow()) / 1000));
     label.textContent = t("lobby.starts_in", { seconds: secondsLeft });

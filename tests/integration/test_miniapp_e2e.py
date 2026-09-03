@@ -116,6 +116,64 @@ async def test_miniapp_loads_authenticates_and_shows_balance(gateway_server, bro
     await page.close()
 
 
+async def test_a_genuinely_fresh_room_with_no_round_history_can_still_be_entered(
+    gateway_server, browser, conn
+):
+    """A real production incident: every room in a brand-new deployment
+    starts with zero round history -- round_engine.py only creates a
+    round row lazily, on the very first take_card. Before that,
+    build_state_sync() reports status "idle" (queries.py's own default
+    when the round_row lookup finds nothing). The state_sync handler
+    used to route "idle" straight back to the room list with no other
+    path to the card-selection screen anywhere in the client -- a real
+    first player could open a room and then never take a card, ever,
+    since nothing else in the app ever requests the lobby UI.
+
+    Every other e2e test in this file pre-seeds the room via a direct
+    engine.join() before the browser ever connects, which always leaves
+    the room already in "lobby" status by the time a real click lands --
+    that's exactly why the whole suite never caught this. This test is
+    deliberately the one exception: the browser is the *first and only*
+    participant to ever touch this room, reproducing the real incident
+    precisely (found live, diagnosed with a real Playwright session
+    against the actual production domain, capturing the real WebSocket
+    frames -- join sent, state_sync came back status: "idle", and the
+    screen simply never left #screen-rooms).
+    """
+    # Deliberately no RoundEngine running for this room at all -- the WS
+    # "join" handler serves state_sync straight from Postgres
+    # (services/gateway/queries.py::build_state_sync(), by design: "works
+    # correctly even if the room's engine just crashed and hasn't been
+    # replaced yet"), so reaching the lobby screen genuinely doesn't
+    # depend on a live engine. This also keeps the test honest: no engine
+    # means no join() call could have silently pre-seeded a round either.
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, is_active=True, max_cards_per_player=1,
+    )
+    telegram_id = next_telegram_id()
+    page, console_errors = await prepare_page(browser, telegram_id)
+
+    http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+    await page.goto(http_base + "/")
+    await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+    await page.wait_for_function(
+        "document.getElementById('balance-amount').textContent.includes('.')", timeout=10000
+    )
+
+    room_selector = f'.room-card[data-room-id="{room_id}"]'
+    await page.wait_for_selector(room_selector, timeout=10000)
+    await page.click(room_selector)
+
+    # The actual bug: this used to stay on #screen-rooms forever, no
+    # matter how long you waited, because nothing ever transitioned it.
+    await page.wait_for_selector("#screen-lobby.active", timeout=10000)
+    cells = await page.query_selector_all(".card-grid-cell")
+    assert len(cells) == 150, "the lobby's own card grid must render even with no round yet"
+
+    assert console_errors == [], f"JS errors entering a genuinely fresh room: {console_errors}"
+    await page.close()
+
+
 async def test_miniapp_shows_a_retry_banner_instead_of_a_permanent_blank_screen_when_ws_never_connects(
     gateway_server, browser
 ):
