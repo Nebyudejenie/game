@@ -277,15 +277,19 @@ let maxCardsPerPlayer = 1;
 // Counts take_card commands sent that haven't acked yet -- see the ack
 // handler below for why this exists.
 let pendingTakeCardAcks = 0;
-// The grid's 432 cells are always just the numbers 1-432 -- room-
-// independent -- so the DOM only ever needs building once, not on every
-// enterLobby() call. That matters more now than it used to: a tap commits
-// immediately (see the ack handler below), so a resync can land while a
-// player is still mid-tap on a second card, and rebuilding via
-// grid.innerHTML = "" right then would both flicker the whole grid and
-// detach the very cell they're about to tap (an E2E test caught this for
-// real -- Playwright's own "Element is not attached to the DOM" on the
-// second of two quick taps).
+// The grid's cell count is always just 1..card_pool_size -- server-told,
+// never a hardcoded literal (a real production incident: the frontend
+// used to hardcode this number itself, a separate value from packages/
+// core/bingo.py's own _POOL_SIZE and from the cards table's real seeded
+// rows, with nothing forcing them to agree -- see state_sync's own
+// card_pool_size field). Room-independent, so the DOM only ever needs
+// building once, not on every enterLobby() call. That matters more now
+// than it used to: a tap commits immediately (see the ack handler below),
+// so a resync can land while a player is still mid-tap on a second card,
+// and rebuilding via grid.innerHTML = "" right then would both flicker
+// the whole grid and detach the very cell they're about to tap (an E2E
+// test caught this for real -- Playwright's own "Element is not attached
+// to the DOM" on the second of two quick taps).
 let cardGridBuilt = false;
 
 function enterLobby(sync) {
@@ -311,7 +315,7 @@ function enterLobby(sync) {
   for (const cardNo of sync.taken_cards || []) takenCards.add(cardNo);
 
   if (!cardGridBuilt) {
-    buildCardGrid();
+    buildCardGrid(sync.card_pool_size);
     cardGridBuilt = true;
   } else {
     renderCardGridState();
@@ -365,10 +369,10 @@ function updateLobbyMoneyBar(msg) {
   if (msg.derash !== undefined) el("lobby-win-amount").textContent = `${msg.derash} ETB`;
 }
 
-function buildCardGrid() {
+function buildCardGrid(cardPoolSize) {
   const grid = el("card-grid");
   grid.innerHTML = "";
-  for (let n = 1; n <= 432; n++) {
+  for (let n = 1; n <= cardPoolSize; n++) {
     const cell = document.createElement("div");
     cell.className = "card-grid-cell";
     cell.textContent = String(n);

@@ -646,7 +646,21 @@ class RoundEngine:
         if not self._lock.is_held() or self._stop_requested:
             return
 
-        if self.player_count() >= self._room.min_players:
+        # Zero real players is not the same case as "some players joined
+        # but not enough": nothing was ever staked, so there's nothing to
+        # refund and no fairness reason to void -- and an explicit,
+        # repeated product requirement is that the public room must never
+        # look dead just because nobody has bought a card yet. Rather than
+        # invent a separate "empty round" code path, this runs the exact
+        # same _transition_to_running() a real round uses: claim()'s own
+        # "not_in_round" guard already makes an empty self._entries safe
+        # (nobody can ever claim a card that was never taken), and
+        # _run_running()'s existing exhausted-no-winner branch already
+        # handles zero entrants correctly (refund_round()'s refund loop is
+        # a no-op over zero rows) -- this was already the exact path two
+        # real players take when nobody happens to win, just never
+        # reached before with zero players from the start.
+        if self.player_count() >= self._room.min_players or self.player_count() == 0:
             await self._transition_to_running()
         else:
             round_id = self._round_id

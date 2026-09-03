@@ -5,6 +5,87 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-03 — A zero-player round now goes active and calls real numbers
+
+A further, sharper correction on top of the min_players change above: the
+user accepted 1-player and 2+-player gameplay as proven, but rejected
+"0 players -> void -> next round opens" as insufficient. Voiding
+immediately is still *technically* a form of "the engine didn't die,"
+but it means the public room looks like WAITING/VOID rather than an
+actual running game to anyone who opens the Mini App between selection
+windows with no cards ever having been taken -- and the explicit
+requirement is that a spectator can open the app *at any moment* and see
+a real, live, moving Bingo game, not just a room that exists.
+
+The fix is one condition, not new machinery: `_run_lobby()`'s decision
+point already routed "enough players" into `_transition_to_running()`;
+it now also routes "exactly zero players" there, leaving only the
+genuine middle case (some players joined, real money staked, but not
+enough to meet a room's own min_players) on the refund path. This is
+safe by construction, not by new special-casing: `_transition_to_running
+()` already tolerates an empty `self._entries` (an empty `card_numbers`
+list just produces a slightly degenerate but still valid client_seed),
+`claim()`'s own `not_in_round` guard already makes a claim against an
+empty round impossible, and `_run_running()`'s existing exhausted-no
+-winner branch already handles zero entrants correctly -- `refund_round
+()`'s refund loop is a no-op over zero rows. This is, in fact, the exact
+code path two real players already take whenever nobody happens to win;
+a genuinely empty round now just reaches it from the start instead of
+being intercepted before ever calling a number.
+
+Deliberately did not invent a shorter, separate "empty round" duration --
+an empty round now runs the full configured call sequence (the same
+`call_interval_ms`, the same real 75-number draw) before completing, the
+same real length any actual round has. An admin who wants empty rooms to
+cycle faster already has the knob for it (lower call_interval_ms for
+that room), rather than this needing a second, parallel timing constant
+whose relationship to the real one would itself need explaining.
+
+New test (`test_a_genuinely_empty_round_still_goes_active_and_calls_
+real_numbers`) never calls `engine.join()` at all and asserts the round
+still reaches "running", still calls all 75 numbers (`call_index == 75`
+on the terminal row, not just a transition that could have been faked),
+and still cycles into a second live round afterward. Verified failing
+against the pre-fix code via a genuine revert-test (a real 5-second
+timeout waiting to ever reach "running" with zero players). The existing
+zero-player continuity test (`test_an_empty_room_automatically_opens_
+the_next_round_with_no_join_at_all`, written for the *previous* zero
+-player correction, still using `min_players=2` deliberately to prove
+that value alone doesn't change this) was re-verified to still pass --
+its own room now also runs a real (if brief) active phase before voiding,
+exactly as intended, and its assertions were already loose enough about
+*how* the round reaches "voided" to still hold.
+
+---
+
+## 2026-09-03 — Card pool size: one authoritative source, not a duplicated literal
+
+Closes a gap named explicitly and specifically: "do not leave conflicting
+values such as frontend = 150, backend = 420, database = 430... define
+CARD_ID_MIN/CARD_ID_MAX in one authoritative location." The 150-vs-432
+saga earlier this session already demonstrated exactly this risk in
+practice, not hypothetically -- the frontend's own `web/miniapp/js/
+app.v6.js` carried a hardcoded `<= 150`, then a hand-edited `<= 432`,
+a separate literal from `packages/core/bingo.py`'s own `_POOL_SIZE` and
+from whatever the `cards` table actually had seeded, with nothing
+forcing any of the three to agree the next time this number needs to
+change.
+
+`build_state_sync()` (services/gateway/queries.py) now returns a real
+`card_pool_size` field, sourced from `SELECT max(card_no) FROM cards` --
+the actual seeded rows a player can really be dealt, not the Python
+constant that produced them, added as a third query already running
+concurrently alongside the existing room/round reads. `app.v6.js`'s
+`buildCardGrid()` now takes this as a parameter instead of a literal;
+`enterLobby()` passes `sync.card_pool_size` through on the one call this
+ever needs it (the grid is still built once and cached, same as before --
+this only changes where the number it's built from comes from). If the
+pool is ever widened again, every connected client picks up the new
+range the next time it syncs, with no frontend deploy required to keep
+the two in step.
+
+---
+
 ## 2026-09-03 — Solo play allowed: min_players lowered from 2 to 1
 
 An explicit, repeated, final product correction, overriding an earlier

@@ -1035,6 +1035,73 @@ async def test_a_single_player_is_enough_to_go_active_and_win(pool, redis, card_
         await asyncio.wait_for(task, timeout=10)
 
 
+async def test_a_genuinely_empty_round_still_goes_active_and_calls_real_numbers(
+    pool, redis, card_pool, conn
+):
+    """The "zero-player round must not look dead" correction: a room the
+    public can watch at any moment must never present as WAITING or VOID
+    just because nobody has taken a card yet -- the live call board,
+    current ball, and call history must all be genuinely real and moving,
+    not merely "the room still exists." Deliberately never calls
+    engine.join() at all -- self._entries stays empty the whole time.
+    This is not a new code path: claim()'s own "not_in_round" guard
+    already makes an empty entries set safe (nobody can ever claim
+    against it), and _run_running()'s exhausted-no-winner branch already
+    handles zero entrants correctly (refund_round()'s refund loop is a
+    no-op over zero rows) -- this is the exact path two real players
+    already take when nobody happens to win, just reached now with zero
+    players from the very start instead.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=1, lobby_seconds=1, call_interval_ms=10,
+    )
+    engine = await make_engine(pool, redis, card_pool, room_id)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        first_round_id = None
+
+        def reached_running_with_zero_players() -> bool:
+            nonlocal first_round_id
+            if engine.status == "running" and engine.player_count() == 0:
+                first_round_id = engine.round_id
+                return True
+            return False
+
+        await wait_until(reached_running_with_zero_players, timeout=5)
+        assert first_round_id is not None
+
+        # Real numbers actually get called -- not a frozen "active" label
+        # with nothing moving behind it.
+        await wait_until(lambda: engine.status == "idle", timeout=15)
+
+        round_row = await pool.fetchrow(
+            "SELECT status, call_index, pot, started_at, ended_at FROM rounds WHERE id = $1",
+            first_round_id,
+        )
+        assert round_row["status"] == "voided", "no possible winner with zero cards -- correctly terminal"
+        assert round_row["call_index"] == 75, "the full real draw actually ran, not a skipped/faked one"
+        assert round_row["pot"] == Decimal("0.00")
+        assert round_row["started_at"] is not None, "genuinely entered the running phase"
+
+        winners = await pool.fetch("SELECT 1 FROM round_winners WHERE round_id = $1", first_round_id)
+        assert winners == []
+
+        # The continuous loop still closes: a second live round opens on
+        # its own, still with nobody watching or playing.
+        for _ in range(500):
+            if engine.round_id is not None and engine.round_id != first_round_id:
+                break
+            await asyncio.sleep(0.02)
+        else:
+            raise AssertionError("no second round was ever created after the empty one completed")
+
+        mismatches = await ledger.reconcile(conn)
+        assert mismatches == []
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
 async def test_lobby_underfilled_refund_pushes_a_live_balance_update(pool, redis, card_pool, conn):
     room_id = await create_room(conn, stake=Decimal("10.00"), min_players=5, lobby_seconds=1)
     engine = await make_engine(pool, redis, card_pool, room_id)

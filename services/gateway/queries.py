@@ -231,7 +231,7 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
     # unlike the get_or_create_account chains elsewhere in this codebase
     # that lock rows in a specific order for a reason -- there's no
     # ordering constraint to preserve here.
-    room_row, round_row = await asyncio.gather(
+    room_row, round_row, card_pool_size = await asyncio.gather(
         pool.fetchrow(
             "SELECT stake, win_patterns, max_players, max_cards_per_player FROM rooms WHERE id = $1",
             room_id,
@@ -249,6 +249,18 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
             """,
             room_id,
         ),
+        # The one authoritative source for the card-selection range, not a
+        # duplicated literal -- a real production incident: the frontend
+        # had its own hardcoded "1..150" (and, briefly, a hand-edited
+        # "1..432" after a video re-analysis corrected the pool size), a
+        # separate number from packages/core/bingo.py's own _POOL_SIZE and
+        # from whatever the cards table actually had seeded, with nothing
+        # forcing them to agree. max(card_no) over the real seeded rows is
+        # the actual ground truth (what a player can really be dealt),
+        # not the Python constant that produced it -- if the pool is ever
+        # widened again, every client picks up the new range automatically
+        # the next time it syncs, no frontend deploy required.
+        pool.fetchval("SELECT max(card_no) FROM cards"),
     )
     if room_row is None:
         raise ValueError(f"no such room: {room_id}")
@@ -364,6 +376,7 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
         "auto_mark": auto_mark,
         "your_cards": your_cards,
         "taken_cards": taken_cards,
+        "card_pool_size": card_pool_size,
         "max_cards_per_player": room_row["max_cards_per_player"],
         "lobby_deadline_ms": lobby_deadline_ms,
         "server_time": int(time.time() * 1000),
