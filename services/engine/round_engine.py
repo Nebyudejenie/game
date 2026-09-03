@@ -666,6 +666,23 @@ class RoundEngine:
                     for refunded_user_id in refunded_user_ids
                 )
             )
+            # A real production incident, caught on video: a player who
+            # took a card, then just waited (never touching the app
+            # again), saw the lobby countdown hit 0 and freeze there
+            # forever -- the countdown reaching 0 is a purely local
+            # client computation from lobby_deadline_ms, and lobby_tick's
+            # own broadcast loop above has already stopped by the time
+            # this branch runs, so nothing was ever telling an already
+            # -connected client this round had voided and a new one had
+            # already opened (server-side, correctly, per run_forever()'s
+            # own continuous-lifecycle loop) -- only a fresh "join" ever
+            # produces another state_sync, and nothing prompts a player
+            # sitting still to send one. Every other termination path
+            # (a winner, an exhausted round) already broadcasts something
+            # (round_end); this was the one silent path.
+            await self._publish_room(
+                {"t": "round_voided", "round_id": round_id, "reason": "lobby_underfilled"}
+            )
             self._reset_to_idle()
 
     async def _transition_to_running(self) -> None:

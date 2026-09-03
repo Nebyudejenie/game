@@ -729,6 +729,21 @@ el("reserve-card-btn").addEventListener("click", () => {
   if (state.currentRoomId !== null) enterRoom(state.currentRoomId);
 });
 
+// A real production incident, caught on video: a player who took a card
+// during a lobby that then failed to fill (too few players) saw the
+// countdown hit 0 and just freeze there forever -- nothing was telling an
+// already-connected client the round had voided (every OTHER termination
+// path broadcasts round_end; this was the one silent one, now fixed
+// server-side too). Mirrors state_sync's own "voided"/"done" handling: a
+// clean bounce back to the room list, not a misleading result screen
+// (unlike round_end, this round never actually started -- there's no
+// "no winner" to report, just "not enough players joined").
+ws.on("round_voided", () => {
+  showToast("lobby.round_voided_underfilled");
+  showScreen("rooms");
+  refreshRoomList();
+});
+
 // --- result (SETTLING) --------------------------------------------------
 
 ws.on("round_end", (msg) => {

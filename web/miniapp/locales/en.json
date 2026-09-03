@@ -7,6 +7,7 @@
 
   "lobby.pick_card": "Pick your card",
   "lobby.starts_in": "Starts {seconds}s",
+  "lobby.round_voided_underfilled": "Not enough players joined — your stake was refunded.",
   "lobby.cards_held": "Holding {count} card(s)",
   "lobby.card_taken_change": "Card {card} taken · Change",
   "lobby.deposit_to_play": "Deposit to play",

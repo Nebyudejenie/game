@@ -226,6 +226,95 @@ async def test_a_room_whose_last_round_ended_can_still_be_reentered(gateway_serv
     await page.close()
 
 
+async def test_a_player_who_took_a_card_in_an_underfilled_round_is_not_left_frozen_at_zero(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    """A real production incident, caught on video from a real Android
+    device: a player takes a card, the lobby countdown ticks normally,
+    reaches 0 -- and then just freezes there forever. The countdown
+    reaching 0 is a client-local computation from lobby_deadline_ms;
+    nothing was ever pushed to an already-connected client telling it the
+    round had actually voided (too few players) and a new one had already
+    opened server-side. Every OTHER termination path already broadcasts
+    something (round_end for a winner or an exhausted round); the
+    underfilled-lobby path was the one silent one. min_players=2 and only
+    this one browser player ever joining guarantees the round underfills.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=4,
+        no_player_next_round_delay_seconds=1, is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    try:
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        assert user_row is not None
+        await fund_user(conn, user_row["id"], Decimal("100.00"))
+        await conn.execute("UPDATE users SET language = 'en' WHERE id = $1", user_row["id"])
+        await page.reload()
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('100.00')", timeout=10000
+        )
+
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page.wait_for_selector(room_selector, timeout=10000)
+        await page.click(room_selector)
+        await page.wait_for_selector("#screen-lobby.active", timeout=10000)
+
+        cells = await page.query_selector_all(".card-grid-cell")
+        await cells[74].click()  # card #75, matching the real incident
+
+        # Polled, not a single immediate fetch: a tap fires take_card and
+        # moves on with no confirm step to wait on, so the async gateway
+        # -> engine round trip may still be in flight the instant this runs.
+        balance_query = """
+            SELECT balance FROM account_balances b
+            JOIN accounts a ON a.id = b.account_id
+            WHERE a.user_id = $1 AND a.kind = 'user_cash'
+        """
+        for _ in range(100):
+            balance_after_stake = await pool.fetchval(balance_query, user_row["id"])
+            if balance_after_stake == Decimal("90.00"):
+                break
+            await asyncio.sleep(0.05)
+        assert balance_after_stake == Decimal("90.00"), "the stake must actually be charged first"
+
+        # The bug: before the fix, the screen just sat here at "0" forever,
+        # no matter how long this waited -- there was nothing to wake it up.
+        await page.wait_for_selector("#screen-rooms.active", timeout=15000)
+
+        toast_text = await page.text_content("#toast")
+        assert toast_text and "refunded" in toast_text.lower(), (
+            f"expected a refund toast explaining why, got: {toast_text!r}"
+        )
+
+        for _ in range(100):
+            balance_after_refund = await pool.fetchval(
+                balance_query,
+                user_row["id"],
+            )
+            if balance_after_refund == Decimal("100.00"):
+                break
+            await asyncio.sleep(0.05)
+        assert balance_after_refund == Decimal("100.00"), "the stake must be refunded back in full"
+
+        assert console_errors == [], f"JS errors during the underfilled-round bounce-back: {console_errors}"
+        await page.close()
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
 async def test_miniapp_shows_a_retry_banner_instead_of_a_permanent_blank_screen_when_ws_never_connects(
     gateway_server, browser
 ):

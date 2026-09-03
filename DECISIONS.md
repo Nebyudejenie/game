@@ -5,6 +5,60 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-03 — The real "frozen at 0 seconds" bug: the underfilled-lobby path never told anyone
+
+Caught on a real screen recording from a real Android device, of our own
+production app (not the reference product) -- the first such recording
+this session had of our own app's actual behavior rather than the
+competitor's. It showed: take a card, watch the countdown tick down
+normally, watch it hit 0 -- and then nothing. No transition, no error, no
+toast. Just frozen at "0ሰ" for the rest of the ~25-second clip, card still
+shown as held, pot silently reverting to 0.00 partway through.
+
+Cross-referenced against the production database using the recording's
+own on-screen timestamp (phone clock "3:38", Ethiopia is UTC+3, so
+12:38 UTC): found the exact round (id 111, card 75, user_id 2), voided
+44ms after its lobby_deadline. The server had done exactly the right
+thing -- this room's min_players is 2, only one real player ever joined,
+so it correctly refunded and, per this session's own earlier
+continuous-round-lifecycle fix, went on to create rounds 112 through 130
+on schedule, all still cycling correctly at the moment this was
+diagnosed. The server was never stuck. The client was.
+
+Root cause: `_run_lobby()`'s underfilled branch (round_engine.py) refunds
+and resets to idle, but never calls `_publish_room()` -- unlike every
+other termination path (a winner or an exhausted round both broadcast
+`round_end`). A client sitting in the lobby has no way to learn its round
+voided except by receiving a fresh `state_sync`, which only a `"join"`
+request ever produces -- and nothing prompts a player who's just sitting
+still, watching a countdown they already fired their one action on, to
+send one. The countdown hitting "0" is a purely client-local computation
+from `lobby_deadline_ms`; once `lobby_tick`'s own broadcast loop stops
+(the moment the deadline passes), there was nothing left to ever tell
+that client anything again.
+
+Fix: the underfilled branch now broadcasts a new `round_voided` event
+(round_id, reason) before resetting to idle -- deliberately not reusing
+`round_end` (that message's shape carries winner semantics that don't fit
+"the round never actually started") and deliberately not a full
+`state_sync` resend (this project's own small-incremental-events
+principle: a lobby full of connected-but-not-yet-committed spectators
+doesn't need a full state resync just to be told to go check the room
+list again). `app.v6.js` handles it exactly like `state_sync`'s existing
+"voided"/"done" branch -- back to the room list -- plus a toast
+explaining why, since silently vanishing back to the room list with no
+explanation is its own small confusion this fix might as well also close
+while touching this exact code path.
+
+New e2e test (`test_a_player_who_took_a_card_in_an_underfilled_round_is_
+not_left_frozen_at_zero`) reproduces the incident with a real browser and
+a real underfilled round, verified failing against the pre-fix code via a
+genuine revert-test (a real 15-second Playwright timeout, not assumed) --
+the exact class of bug a pure backend test could never have caught, since
+the server-side behavior (refund, correctly) was never wrong.
+
+---
+
 ## 2026-09-03 — Card pool corrected: 150 was wrong, true size is 432
 
 Settles a dispute opened by two conflicting claims about the reference
