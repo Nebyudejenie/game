@@ -147,6 +147,73 @@ async def test_two_simultaneous_claims_split_derash_evenly(pool, redis, card_poo
         await asyncio.wait_for(task, timeout=10)
 
 
+async def test_a_valid_claim_stops_the_round_immediately_no_further_calls(pool, redis, card_pool, conn):
+    """Real-money fairness requirement, not just UX polish: once a player's
+    "Bingo" is valid, the round must freeze right there -- calling even one
+    more number after a winning claim already landed would be indistinguishable
+    from the house quietly getting one more free draw once it already knows
+    who won. _run_running()'s call loop (round_engine.py) checks
+    self._status before every single _call_next_number(), and claim()
+    flips status to "settling" synchronously the moment a valid claim is
+    processed (no await between the pattern check and the flip) -- this
+    proves that actually holds under real timing, not just by reading the
+    code: call_interval_ms is set low enough that several more calls
+    *would* have fired in the sleep window below if the freeze didn't work.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("20.00"), house_cut_bps=2000, min_players=2, call_interval_ms=150
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        user_a = await create_funded_user(conn)
+        user_b = await create_funded_user(conn)
+        card_a, card_b = 1, 2
+
+        assert (await engine.join(user_a, card_a, auto_mark=False)).ok
+        assert (await engine.join(user_b, card_b, auto_mark=False)).ok
+
+        await wait_until(lambda: engine.status == "running", timeout=5)
+
+        grid_a = card_pool[card_a]
+
+        def ready() -> bool:
+            return bool(bingo.winning_patterns(grid_a, engine._called, room.win_patterns))  # noqa: SLF001
+
+        await wait_until(ready, timeout=10)
+
+        call_index_at_claim = engine._call_index  # noqa: SLF001
+        round_id_at_claim = engine._round_id  # noqa: SLF001
+        claim_started_at = asyncio.get_running_loop().time()
+        result = await engine.claim(user_a, card_a)
+        claim_latency = asyncio.get_running_loop().time() - claim_started_at
+        assert result.ok, result
+
+        assert engine.status == "settling"
+        assert claim_latency < 1.0, f"claim() itself took {claim_latency:.3f}s -- too slow to feel immediate"
+
+        # The real proof: sleep several call intervals' worth of real time
+        # (long enough that _run_running()'s loop would have called at
+        # least 2-3 more numbers by now if the freeze were broken), then
+        # read the round's own persisted call_index back from Postgres --
+        # the in-memory engine can't be read directly here since
+        # _reset_to_idle() (settlement's own cleanup, which the sleep
+        # window is deliberately long enough to also let finish) zeroes
+        # self._call_index back out once this round is done.
+        await asyncio.sleep(room.call_interval_ms / 1000 * 4)
+        await wait_until(lambda: engine.status == "idle", timeout=5)
+        final_call_index = await pool.fetchval(
+            "SELECT call_index FROM rounds WHERE id = $1", round_id_at_claim
+        )
+        assert final_call_index == call_index_at_claim, (
+            "a number was called after a valid claim already landed"
+        )
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
 async def test_two_simultaneous_auto_mark_winners_both_split_derash(pool, redis, card_pool, conn, monkeypatch):
     # Regression: a real code review pass caught that _call_next_number()'s
     # own auto-mark scan returned as soon as the *first* winning entry
