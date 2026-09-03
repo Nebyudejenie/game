@@ -5,6 +5,59 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-03 — Found and fixed: CI has been failing on every push, so CD never once deployed this session's work
+
+Checked `gh run list` after the multi-card feature and its code-review
+follow-up were both pushed, expecting to confirm the automated CD
+pipeline (`.github/workflows/cd.yml`, triggered on CI success on `main`)
+had picked them up. It hadn't -- every CI run this session (Phase 2+3's
+push, Phase 5's push, and the code-review-fix push) shows `conclusion:
+failure`, and CD's own trigger condition (`workflow_run` with `conclusion
+== 'success'`) means it never even attempted to run. **Nothing from this
+entire session had actually reached production via the pipeline meant to
+put it there**, despite every local clean-slate verification (mypy, the
+full suite, the full e2e suite) passing every single time.
+
+Root cause, from the actual CI log (`gh run view <id> --log-failed`):
+`tests/integration/test_backup_restore.py` fails 3 tests, every time, on
+GitHub's hosted `ubuntu-latest` runner specifically -- never locally.
+`deploy/docker-compose.yml` bind-mounts `../backups/wal_archive` into
+the Postgres container; `backups/` is entirely gitignored
+(`git ls-files backups/` returns nothing), so on the CI job's fresh
+checkout it doesn't exist yet. The very first `docker compose up`
+(`Start Postgres and Redis`, several steps before the test suite even
+runs) is what causes Docker to auto-create the missing bind-mount source
+-- and it creates the *whole* intermediate path, `backups/` and
+`backups/wal_archive/` both, as `root:root`, before the unprivileged
+`runner` user doing the actual test run ever gets a turn. One test tries
+to `os.chmod()` that root-owned directory and gets a flat
+`PermissionError`; the other two try to write a `.dump` file into the
+now-root-owned `backups/` itself and get `Permission denied`. The
+failing test file's own `_ensure_wal_archive_dir_writable()` docstring
+already named this exact failure mode and its fix ("a real deployment
+does this once, host-user-owned and world-writable, BEFORE the postgres
+container's first start") -- it just wasn't wired into CI itself.
+
+Fixed with one new step in `ci.yml`'s `test` job, before Postgres/Redis
+ever start: `mkdir -p backups/wal_archive && chmod 777 backups/
+wal_archive`. Since `mkdir -p` runs as the `runner` user, this makes
+`backups/` runner-owned (sufficient for `backup.sh`'s own dump writes)
+and the leaf `wal_archive/` world-writable (needed because a *different*
+uid -- the postgres container's own -- is what actually writes WAL
+segments into it), both before Docker ever gets a chance to create
+either as root. Not touched: `load-test`'s own identical `docker compose
+up` (that job never runs the backup tests, so it was never actually
+broken); `cd.yml`'s production compose file has the same bind-mount
+shape, but the real production server has had a correctly-owned
+`backups/wal_archive` since it was first deployed, so this is a CI-only
+fix, not a production one. This is the second time this exact "Docker
+auto-creates a missing bind-mount source as root before anyone else
+gets a turn" failure mode has cost real time this session -- see this
+file's own entry on the local `down -v` WAL-archive collision for the
+first.
+
+---
+
 ## 2026-09-02 — Post-merge `/code-review high` on the full multi-card diff: one real money-integrity bug fixed
 
 Once the multi-card-per-player plan's six phases were all committed and

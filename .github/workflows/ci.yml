@@ -38,6 +38,21 @@ jobs:
           pip install -r requirements-dev.lock
           pip install -e . --no-deps
 
+      - name: Pre-create the WAL archive bind mount
+        # docker-compose.yml bind-mounts ../backups/wal_archive into the
+        # postgres container. On a fresh checkout this hosted runner has
+        # never seen that path before, so Docker's own compose-up below
+        # would auto-create it as root:root before the unprivileged
+        # `runner` user ever gets a turn -- exactly the failure mode
+        # test_backup_restore.py's own _ensure_wal_archive_dir_writable()
+        # comment already documents ("Docker auto-creates a missing
+        # bind-mount source as root:root, which neither of those uids can
+        # write into"). Creating it host-user-owned and world-writable
+        # here, before compose ever starts postgres, is the same fix a
+        # real first-time deployment needs -- this just does it every run
+        # since the runner's workspace is thrown away between runs.
+        run: mkdir -p backups/wal_archive && chmod 777 backups/wal_archive
+
       - name: Start Postgres and Redis
         run: docker compose -f deploy/docker-compose.yml up -d postgres redis
 
