@@ -5,6 +5,82 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-03 — The real "Play button does nothing" bug: a stale persistent ReplyKeyboard
+
+The last entry in this same live-diagnosis session -- and the one that
+finally explained every remaining symptom the user kept reporting after
+the idle-room and JS-caching fixes below were both already live.
+
+The user's own screenshot was the key: the bot's message literally says
+"press the button below" (`play.open`), but the message bubble shown had
+no button attached to it at all -- yet the persistent row of buttons at
+the very bottom of the screen ("🎮 ይጫወቱ", "💰 ቀሪ ሂሳብ", ...) was still
+there, unchanged, exactly as before. That row is a Telegram
+`ReplyKeyboardMarkup` (`main_menu_keyboard()`, `services/bot/
+keyboards.py`) -- a persistent keyboard attached to the *chat*, not to
+any one message -- and "the button below" in the text actually refers
+to it, not to anything on the message bubble itself. `cmd_play()`'s Play
+button is a `KeyboardButton(web_app=WebAppInfo(url=...))`, which can
+open the Mini App directly when tapped -- but only if the specific
+button Telegram's client currently has cached actually carries that
+`web_app` attribute. This bot's very first keyboard, sent before
+`MINIAPP_URL` was ever configured, used the plain-`KeyboardButton`
+branch in `main_menu_keyboard()` (no `web_app` at all, by design, so an
+unconfigured deployment never shipped a button that would error). A
+long-registered user's Telegram client had been holding onto exactly
+that first keyboard ever since -- Telegram does not guarantee it
+redraws a chat's `ReplyKeyboardMarkup` just because the bot sends
+another one with identical-looking button labels, so a genuinely fixed,
+`web_app`-carrying keyboard sent by every later `/start` and `/play`
+never actually reached the user's screen. Tapping "ይጫወቱ" kept sending
+the plain text "ይጫወቱ" instead of opening anything, which `on_menu_text()`
+correctly routed straight back into `cmd_play()` -- an invisible loop:
+the bot re-sent the exact fix the client kept refusing to display.
+
+Fixed with `_send_refreshed_main_menu()`: an explicit
+`ReplyKeyboardRemove()` sent immediately before the real keyboard, in
+both `cmd_start()` and `cmd_play()` (the two paths this bug could be
+hit from) -- forcing the client to actually discard whatever it was
+showing before the real one replaces it, rather than trusting it to
+notice the difference on its own. Both messages carry the same text;
+the only difference is which keyboard rides along.
+
+A real, if narrower, secondary finding surfaced while chasing this:
+`getMe` reports `has_main_web_app: false` for this bot. That field
+governs the bot's *default*/menu-triggered Mini App launch (the
+persistent chat menu button, and very likely the `t.me/<bot>/<short
+name>` direct link, which has been unreliable throughout this entire
+session) -- it does not gate an explicit `web_app` `KeyboardButton` or
+`InlineKeyboardButton` sent in a message, which is the mechanism
+`cmd_play()`/`cmd_start()` actually use and which this fix addresses.
+Enabling it is a manual BotFather action (`/mybots` -> bot -> Bot
+Settings), not something reachable through the Bot API -- left for the
+user to do, and noted here so a future session doesn't have to
+rediscover it.
+
+**Test fallout, not a logic bug**: `_settle()` (`tests/integration/
+test_bot_handlers.py`) is a fixed `asyncio.sleep()` standing in for "the
+notifier's queue has drained." `notifier.py` deliberately rate-limits
+successful sends to one every `1/GLOBAL_RATE_PER_SECOND` (~40ms) --
+correct, real behavior. A handler that used to send one message and now
+sends two or three needs proportionally more wall-clock time to fully
+drain, or the test moves on before the notifier does; worse, the
+*next* test's `bot_ctx` fixture clears `session.sent` right as the
+*previous* test's still-draining message lands, corrupting an unrelated
+test's own assertion (`test_start_shows_registration_prompt_for_new_
+user` failed this way, despite `cmd_start()`'s new-user branch never
+being touched by this fix at all). Fixed by giving `_settle()` an
+optional `messages` count that scales its wait accordingly, defaulting
+to 1 so every existing call site's behavior is unchanged. Verified
+against the pre-fix code first: all three affected tests failed exactly
+as predicted (2 messages captured, not 3) before trusting the fix.
+
+Full clean-slate verification: mypy clean, `pytest tests/` full default
+suite green, the specific bot-handler test file re-run 3x with no
+flakiness.
+
+---
+
 ## 2026-09-03 — The idle-room fix, and extending no-store from index.html to every .js file
 
 Two more entries in the same live-diagnosis session as the blank-screen

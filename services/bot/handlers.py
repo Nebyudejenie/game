@@ -12,7 +12,7 @@ from decimal import Decimal, InvalidOperation
 import asyncpg
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import Message
+from aiogram.types import Message, ReplyKeyboardRemove
 from redis.asyncio import Redis
 
 from packages.core import ledger, responsible_gaming
@@ -65,6 +65,33 @@ def _miniapp_direct_link(settings: Settings) -> str | None:
     return f"https://t.me/{settings.telegram_bot_username}/{settings.telegram_miniapp_short_name}"
 
 
+async def _send_refreshed_main_menu(
+    notifier: Notifier, chat_id: int, text: str, language: str, settings: Settings
+) -> None:
+    """A real, live production incident: a player's persistent keyboard
+    kept showing a plain "Play" button that just sent text (routing to
+    on_menu_text() -> cmd_play() again, an unhelpful loop) instead of
+    opening the Mini App directly -- even after MINIAPP_URL was fully
+    configured and this exact chat had been sent a fresh
+    main_menu_keyboard() with a real web_app button attached. Telegram's
+    own client only ever redraws a chat's persistent ReplyKeyboardMarkup
+    when it decides one is needed; a keyboard that already looks the
+    same (identical button labels) to one already on screen isn't
+    guaranteed to be replaced even though the web_app attribute
+    underneath actually changed -- this player's client had been holding
+    onto the very first keyboard this bot ever sent it, from before
+    MINIAPP_URL existed at all, when Play truly was a plain text button.
+    An explicit ReplyKeyboardRemove sent first forces the client to
+    genuinely discard whatever it was showing before the real keyboard
+    (with its real web_app button) replaces it, rather than trusting the
+    client to notice the difference on its own.
+    """
+    await notifier.send(chat_id, text, reply_markup=ReplyKeyboardRemove())
+    await notifier.send(
+        chat_id, text, reply_markup=main_menu_keyboard(language, miniapp_url=settings.miniapp_url)
+    )
+
+
 @router.message(CommandStart())
 async def cmd_start(
     message: Message,
@@ -92,10 +119,8 @@ async def cmd_start(
         return
 
     language = await _language_for(pool, telegram_id)
-    await notifier.send(
-        chat_id,
-        t("welcome.back", language, name=user.display_name),
-        reply_markup=main_menu_keyboard(language, miniapp_url=settings.miniapp_url),
+    await _send_refreshed_main_menu(
+        notifier, chat_id, t("welcome.back", language, name=user.display_name), language, settings
     )
     direct_link = _miniapp_direct_link(settings)
     if direct_link:
@@ -164,10 +189,8 @@ async def cmd_play(message: Message, pool: asyncpg.Pool, notifier: Notifier, set
     if not await _require_registered(message, pool, notifier, language):
         return
     if settings.miniapp_url:
-        await notifier.send(
-            message.chat.id,
-            t("play.open", language),
-            reply_markup=main_menu_keyboard(language, miniapp_url=settings.miniapp_url),
+        await _send_refreshed_main_menu(
+            notifier, message.chat.id, t("play.open", language), language, settings
         )
         direct_link = _miniapp_direct_link(settings)
         if direct_link:

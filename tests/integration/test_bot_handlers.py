@@ -105,10 +105,17 @@ def make_bot() -> tuple[Bot, FakeSession]:
     return bot, session
 
 
-async def _settle() -> None:
+async def _settle(messages: int = 1) -> None:
     import asyncio
 
-    await asyncio.sleep(0.05)
+    # notifier.py rate-limits successful sends to one every
+    # MIN_INTERVAL_SECONDS (1/25s) -- a handler that queues more than one
+    # message needs proportionally more real wall-clock time for all of
+    # them to actually drain, not just the fixed budget a single-message
+    # handler needs. Pass the number of messages a given call under test
+    # actually sends; every existing call site keeps the same 0.05s
+    # default it always had.
+    await asyncio.sleep(0.05 + max(0, messages - 1) * 0.05)
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
@@ -249,10 +256,20 @@ async def test_start_command_welcomes_back_an_already_registered_user(pool, bot_
     telegram_id = await _register(dp, bot, session)
 
     await dp.feed_update(bot, make_text_update(telegram_id, "/start"))
-    await _settle()
+    await _settle(messages=2)
 
-    assert len(session.sent) == 1
+    # Two messages, not one: a real production incident found a
+    # player's client still showing a stale persistent keyboard from
+    # before MINIAPP_URL was ever configured, which never opened the
+    # Mini App no matter how many times the bot resent a visually-
+    # identical-looking keyboard -- _send_refreshed_main_menu() now
+    # always precedes the real keyboard with an explicit
+    # ReplyKeyboardRemove to force the client to actually discard
+    # whatever it was holding onto. Both messages carry the same
+    # welcome text; only the keyboard attached differs.
+    assert len(session.sent) == 2
     assert "Welcome back" in session.sent[0].text or "እንኳን ደህና መጡ" in session.sent[0].text
+    assert "Welcome back" in session.sent[1].text or "እንኳን ደህና መጡ" in session.sent[1].text
 
 
 async def test_start_command_also_sends_a_direct_link_fallback_when_short_name_is_configured(
@@ -267,10 +284,12 @@ async def test_start_command_also_sends_a_direct_link_fallback_when_short_name_i
     telegram_id = await _register(dp, bot, session)
 
     await dp.feed_update(bot, make_text_update(telegram_id, "/start"))
-    await _settle()
+    await _settle(messages=3)
 
-    assert len(session.sent) == 2
-    assert "https://t.me/jobingo_bot/arada" in session.sent[1].text
+    # 3 messages: the keyboard-refresh pair (remove, then real keyboard),
+    # then the direct-link fallback.
+    assert len(session.sent) == 3
+    assert "https://t.me/jobingo_bot/arada" in session.sent[2].text
 
 
 async def test_referral_credit_survives_a_failed_registration_attempt(pool, bot_ctx):
@@ -972,10 +991,14 @@ async def test_play_command_sends_a_direct_link_fallback_when_short_name_is_conf
     telegram_id = await _register(dp, bot, session)
 
     await dp.feed_update(bot, make_text_update(telegram_id, "/play"))
-    await _settle()
+    await _settle(messages=3)
 
-    assert len(session.sent) == 2
-    assert "https://t.me/jobingo_bot/arada" in session.sent[1].text
+    # 3 messages: the keyboard-refresh pair (an explicit ReplyKeyboardRemove
+    # first, then the real keyboard -- see _send_refreshed_main_menu()'s own
+    # comment for the real production incident this guards against), then
+    # the direct-link fallback.
+    assert len(session.sent) == 3
+    assert "https://t.me/jobingo_bot/arada" in session.sent[2].text
 
 
 async def test_history_command_rejects_unregistered_user(bot_ctx):
