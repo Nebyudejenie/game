@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Response, WebSocket
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
@@ -355,6 +356,24 @@ class _RevalidateStaticFiles(StaticFiles):
     fetch the moment a deploy changes the file. This is what the
     app.js -> app.v5.js -> app.v6.js rename-per-deploy was actually
     working around; see DECISIONS.md.
+
+    index.html itself is the one exception: no-store, not no-cache, and
+    the 304-eligible path below is skipped for it entirely -- returning
+    the header alone isn't enough, since Starlette's own file_response()
+    already decides 304-vs-200 by comparing the request's own If-None-
+    Match/If-Modified-Since against a freshly computed ETag *before* this
+    override ever gets to touch the response; a client whose cached
+    body is already stale or empty but whose ETag still happens to
+    match would keep getting a bodyless 304 no matter what header rides
+    along on it. A real production report (a genuinely blank Mini App:
+    index.html served 304, then not one script or stylesheet request
+    ever followed) pointed at exactly this -- some WebView's own cache
+    entry for "/" was stale or empty while its ETag still matched, so
+    revalidation "succeeded" against nothing to render. The entry-point
+    HTML is one small request on every load either way; there's no real
+    cost to never letting it be conditionally-cached at all, only
+    downside in trusting a client cache this fragile with the one file
+    every single boot depends on.
     """
 
     def file_response(
@@ -364,6 +383,11 @@ class _RevalidateStaticFiles(StaticFiles):
         scope: MutableMapping[str, Any],
         status_code: int = 200,
     ) -> Response:
+        response: Response
+        if os.path.basename(os.fspath(full_path)) == "index.html":
+            response = FileResponse(full_path, status_code=status_code, stat_result=stat_result)
+            response.headers["Cache-Control"] = "no-store"
+            return response
         response = super().file_response(full_path, stat_result, scope, status_code)
         response.headers["Cache-Control"] = "no-cache"
         return response

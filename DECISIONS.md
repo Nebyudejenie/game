@@ -5,6 +5,86 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-03 — Diagnosed and fixed a real production blank-screen incident, live, with the user watching
+
+After the CI/CD and manual-deploy work below actually got this session's
+work live, the user reported the Mini App still not working -- three
+different symptoms across three attempts, each isolated with real
+production access rather than guessed at:
+
+**Attempt 1**: `insufficient_funds`, invisibly. The player's account had
+never been funded (`account_balances` had no `user_cash` row at all for
+either real registered user) -- taking a card silently failed before
+ever reaching the game screen. Credited a real, audited test deposit
+(100 ETB, `kind="deposit"`, through `packages.core.ledger.post()`
+directly -- the same double-entry shape `approve_manual_deposit_admin()`
+uses, not a raw balance UPDATE) with the user's explicit go-ahead;
+`ledger.reconcile()` confirmed clean afterward.
+
+**Attempt 2 and 3**: the "connection.connect_failed" screen, but for two
+different underlying reasons that happen to render identical text.
+Traced by constructing genuinely valid, HMAC-signed `initData` inside
+the running `jobingo-gateway` container (the same technique `tests/
+integration/conftest.py::build_init_data()` uses, against the real
+production bot token, never exposed) and driving the actual handshake
+both directly (`ws://localhost:8000/ws`, 0.17s, clean `authed` reply)
+and through the complete real public path (`wss://arada.fun/ws`, 0.51s,
+same clean reply) -- proving the backend, the ledger, and the entire
+Cloudflare Tunnel -> Traefik -> gateway chain were all genuinely healthy
+end to end. That ruled out the server; `app.v6.js`'s own `boot()`
+explained the rest: when `tg.initData` is empty, it renders the exact
+same `connection.connect_failed` text as a real WebSocket auth timeout,
+several lines *before* `ws.connect()` is ever called -- so a screenshot
+alone can't distinguish "Telegram gave no init data" from "the socket
+never got an authed reply," and the gateway logs settled it (zero
+WebSocket connection attempts reached the server during the failed
+attempts, confirming the first, earlier-diagnosed cause: launching via
+the inline Play button rather than the already-confirmed-reliable
+`t.me/aradabbot/arada` direct link).
+
+**Attempt 4, using the direct link**: a genuinely blank screen -- worse
+than an error message, no UI at all. Gateway logs showed `index.html`
+served (304 Not Modified) and then *nothing else* -- not one script,
+stylesheet, or locale file request followed. A 304 has no body by HTTP
+spec; the client is trusted to already hold a valid cached copy. Some
+WebView's own cache entry for `/` was stale or empty while its ETag
+still happened to match the current file, so revalidation "succeeded"
+against nothing to actually render -- the September 2nd Cache-Control
+fix (`services/gateway/app.py`'s `_RevalidateStaticFiles`) had already
+fixed the *origin* header for every static file including index.html,
+but `no-cache` still permits exactly this failure mode for the one file
+every single boot depends on, since a 304 is still a 304 no matter what
+header rides along on it.
+
+Fixed by giving index.html its own path through
+`_RevalidateStaticFiles.file_response()`: `no-store`, and -- the part a
+response header alone can't do -- Starlette's own conditional-request
+check (`is_not_modified()`, which decides 304-vs-200 by comparing the
+request's `If-None-Match` against a freshly computed ETag) is bypassed
+entirely for this one file by constructing the `FileResponse` directly
+instead of going through `super().file_response()`. Every other static
+asset (JS/CSS/locales) keeps the existing `no-cache`-with-304 behavior
+unchanged -- there's real value in a cheap revalidation round-trip for
+those, just never for the one file that decides whether anything else
+ever gets requested at all.
+
+New test, `test_index_html_is_never_conditionally_cached`: asserts
+`no-store` on the first request, then replays the exact ETag that
+response handed back as a second request's `If-None-Match` and asserts
+a full 200 with a real body comes back anyway, not a bodyless 304 --
+verified against the pre-fix code first (failed exactly as predicted:
+`no-cache`, not `no-store`) before trusting it.
+
+Diagnosis method worth naming: every step here was a real, live
+production check -- `gh run list`/`--log-failed` for the CI/CD state, a
+`ledger.post()` call against the real database (not a mock), a real
+WebSocket handshake against the real bot token and the real public
+domain, real `docker logs`/`journalctl` inspection, all narrated to the
+user in real time while they tried each attempt from their own phone --
+never a guess dressed up as a diagnosis.
+
+---
+
 ## 2026-09-03 — Found and fixed: CI has been failing on every push, so CD never once deployed this session's work
 
 Checked `gh run list` after the multi-card feature and its code-review
