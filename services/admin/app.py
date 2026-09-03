@@ -606,7 +606,7 @@ class CreateRoomRequest(BaseModel):
     code: str
     stake: str
     house_cut_bps: int = 2000
-    min_players: int = 2
+    min_players: int = 1
     max_players: int = 100
     max_cards_per_player: int = 1
     lobby_seconds: int = 30

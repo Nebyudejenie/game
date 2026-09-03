@@ -383,6 +383,73 @@ async def test_taking_a_card_shows_the_generated_bingo_card_immediately_in_the_l
         await asyncio.wait_for(task, timeout=15)
 
 
+async def test_a_solo_player_reaches_active_gameplay_and_a_real_result(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    """An explicit, repeated product correction: the live round must never
+    be gated on player count beyond what settlement genuinely needs.
+    min_players=1 (this same change's own migration widens the room
+    constraint to allow it) proves the whole real user-facing flow for a
+    single real player, end to end through a real browser: card tap ->
+    generated card shown -> selection timer expires with nobody else ever
+    joining -> the round still goes ACTIVE, not underfilled-and-refunded
+    -> real automatic ball calling -> a real terminal result. This is the
+    exact case that used to bounce back to the room list ("not enough
+    players joined... refunded") when this room's own min_players was 2.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=1, lobby_seconds=8, call_interval_ms=15,
+        is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    try:
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        assert user_row is not None
+        await fund_user(conn, user_row["id"], Decimal("100.00"))
+        await page.reload()
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('100.00')", timeout=10000
+        )
+
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page.wait_for_selector(room_selector, timeout=10000)
+        await page.click(room_selector)
+        await page.wait_for_selector("#screen-lobby.active", timeout=10000)
+
+        cells = await page.query_selector_all(".card-grid-cell")
+        await cells[0].click()  # card #1
+        await page.wait_for_selector("#lobby-your-cards-section:not(.hidden)", timeout=10000)
+
+        # Deliberately do nothing else -- no second player, ever. This is
+        # the exact case min_players=2 used to bounce back to the room
+        # list for, permanently, once the timer ran out.
+        await page.wait_for_selector("#screen-game.active", timeout=20000)
+        await page.wait_for_function(
+            "document.getElementById('call-badge').textContent.length > 0", timeout=15000
+        )
+        await page.wait_for_selector("#screen-result.active", timeout=90000)
+
+        result_amount = await page.text_content("#result-amount")
+        assert result_amount, "a real terminal result, win or refund, either way not stuck"
+
+        assert console_errors == [], f"JS errors during solo gameplay: {console_errors}"
+        await page.close()
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
 async def test_a_late_joiner_sees_an_already_taken_card_as_taken(
     gateway_server, browser, pool, redis, card_pool, conn
 ):

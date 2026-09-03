@@ -5,6 +5,55 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-03 — Solo play allowed: min_players lowered from 2 to 1
+
+An explicit, repeated, final product correction, overriding an earlier
+decision made in this same session: the live round engine must never be
+gated on player count beyond what settlement genuinely requires. A room
+that needs 2 real players before a round goes active meant a single
+tester on one device could never see the round reach ACTIVE_GAME at all
+-- every round would correctly wait, then correctly void as underfilled,
+which (even now that it correctly explains itself instead of freezing)
+still isn't the same thing as actually playing. The user's own
+acceptance test explicitly requires a lone player who takes a card, does
+nothing else, and still reaches real automatic ball calling and a real
+result.
+
+This was already fully config-driven -- `_run_lobby()`'s own gate is
+`player_count() >= self._room.min_players`, nothing else in the engine
+hardcodes a threshold -- so the fix is the config's own floor, not new
+logic. `rooms_min_players_check` (added deliberately earlier this session
+after the user's own manual `UPDATE rooms SET min_players = 1` was
+rejected by it) now allows `>= 1` instead of `>= 2`; the column's own
+default and the admin API's create-room default both move from 2 to 1;
+the one existing production room is set to 1 in the same migration, not
+left to a separate manual step.
+
+`player_count()`'s own distinct-user counting (added earlier specifically
+to stop one player's multiple cards from impersonating multiple players
+and single-handedly satisfying min_players) needs no change: a real lone
+player was always the honest case that logic was protecting, not the
+abuse it was written against, and lowering the floor to 1 doesn't reopen
+anything -- a single real distinct player already legitimately clears
+`>= 1` either way. Worth noting for the record, not a defect: a lone
+winner is paid the round's derash (the pot after house cut) funded
+entirely by their own stake, which is structurally a net loss in ETB
+terms with nobody else's money in the pot -- correct and expected, the
+same house edge any real-money game carries, not something this change
+needed to work around.
+
+New tests at both layers: a round_engine-level test (a lone funded
+player joins, the round goes running with no one else, and settles with
+a real winner and a reconciling ledger -- 5/5 stable runs, not exhaustion
+-refunded) and a real-browser test (a solo player, a real generated card,
+real automatic calling, a real terminal result, no second player ever
+appearing). The engine-level test was verified against the *exact*
+pre-fix constraint via a real `alembic downgrade -1` + retry, not just a
+code revert -- a genuine `CheckViolationError` on the same row the
+earlier manual `UPDATE` hit.
+
+---
+
 ## 2026-09-03 — A late joiner now sees an already-taken card as taken
 
 Caught building an unrelated real two-player production test (verifying

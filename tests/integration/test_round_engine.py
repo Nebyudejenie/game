@@ -977,6 +977,64 @@ async def test_an_empty_room_automatically_opens_the_next_round_with_no_join_at_
         await asyncio.wait_for(task, timeout=10)
 
 
+async def test_a_single_player_is_enough_to_go_active_and_win(pool, redis, card_pool, conn):
+    """An explicit, repeated product correction: the round engine must
+    never gate on player count beyond what settlement genuinely needs. A
+    room's own min_players is still a real, per-room, configurable value
+    (rooms.min_players, CHECK >= 1 as of this same change) -- this proves
+    the floor itself now genuinely allows 1, not just that the column
+    accepts it: a lone real player takes a card, the lobby timer expires
+    with nobody else ever joining, and the round still goes active, calls
+    numbers, and pays out -- the exact case min_players=2 used to refund
+    and void instead.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), house_cut_bps=2000, min_players=1, call_interval_ms=15,
+    )
+    engine = await make_engine(pool, redis, card_pool, room_id)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        solo_player = await create_funded_user(conn)
+        assert (await engine.join(solo_player, 1)).ok
+
+        await wait_until(lambda: engine.status == "running", timeout=5)
+        assert engine.player_count() == 1
+
+        # A single 5x5 card (minus FREE) will, in real 75-number draws,
+        # essentially always complete some pattern well before all 75
+        # calls -- no need to force or wait out an exhaustion path.
+        await wait_until(lambda: engine.status == "idle", timeout=30)
+
+        round_row = await pool.fetchrow(
+            "SELECT id, status, pot, derash FROM rounds WHERE room_id = $1 ORDER BY seq ASC LIMIT 1",
+            room_id,
+        )
+        assert round_row["status"] == "done", "a real win, not an exhausted refund"
+        assert round_row["pot"] == Decimal("10.00")
+
+        winner_row = await pool.fetchrow(
+            "SELECT user_id, amount FROM round_winners WHERE round_id = $1", round_row["id"]
+        )
+        assert winner_row is not None
+        assert winner_row["user_id"] == solo_player
+        assert winner_row["amount"] == round_row["derash"]
+
+        cash = await ledger.get_or_create_account(conn, solo_player, "user_cash")
+        # create_funded_user()'s own default: 1000.00. Staked 10.00, paid
+        # back derash (80% of the 10.00 pot after a 20% house cut) --
+        # correctly a net loss in ETB terms for a lone player, exactly as
+        # intended: the house cut has to come from somewhere, and with
+        # nobody else's stake in the pot, it comes out of the only player
+        # who staked at all.
+        assert await ledger.balance(conn, cash.id) == Decimal("1000.00") - Decimal("10.00") + round_row["derash"]
+
+        mismatches = await ledger.reconcile(conn)
+        assert mismatches == []
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
 async def test_lobby_underfilled_refund_pushes_a_live_balance_update(pool, redis, card_pool, conn):
     room_id = await create_room(conn, stake=Decimal("10.00"), min_players=5, lobby_seconds=1)
     engine = await make_engine(pool, redis, card_pool, room_id)
