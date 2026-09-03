@@ -324,11 +324,7 @@ async def test_history_tab_shows_a_completed_round(gateway_server, browser, pool
         await page.click(room_selector)
         await page.wait_for_selector("#screen-lobby.active", timeout=10000)
         cells = await page.query_selector_all(".card-grid-cell")
-        await cells[9].click()  # card #10
-        await page.click("#lobby-cta")
-        await page.wait_for_function(
-            "document.getElementById('lobby-cta').textContent.includes('10')", timeout=5000
-        )
+        await cells[9].click()  # card #10 -- takes it immediately, no confirm step
 
         await page.wait_for_selector("#screen-game.active", timeout=25000)
 
@@ -706,11 +702,7 @@ async def test_full_lifecycle_registration_through_withdrawal_using_the_manual_r
         await page.click(room_selector)
         await page.wait_for_selector("#screen-lobby.active", timeout=10000)
         cells = await page.query_selector_all(".card-grid-cell")
-        await cells[9].click()  # card #10
-        await page.click("#lobby-cta")
-        await page.wait_for_function(
-            "document.getElementById('lobby-cta').textContent.includes('10')", timeout=5000
-        )
+        await cells[9].click()  # card #10 -- takes it immediately, no confirm step
         await page.wait_for_selector("#screen-game.active", timeout=25000)
 
         # --- Win / Payout (whatever the real, unrigged outcome is --

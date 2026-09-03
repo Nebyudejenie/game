@@ -474,18 +474,12 @@ async def test_miniapp_full_gameplay_flow(gateway_server, browser, pool, redis, 
         )
         await page.screenshot(path="/tmp/miniapp-lobby.png")
 
+        # Tapping a card number takes it immediately -- no separate
+        # confirm step. #screen-game.active below, reachable only once
+        # state_sync/round_start reports a real held card, is itself the
+        # proof the take_card ack actually landed, not just that the tap
+        # happened -- the balance assertion right after is the other half.
         await cells[9].click()  # card #10
-        await page.click("#lobby-cta")
-        # Proof the take_card ack actually landed, not just that the click
-        # happened: selecting an unheld card enables the CTA, and only the
-        # server-confirmed re-sync that follows a real ack (app.v6.js's
-        # ack handler) flips it back to disabled ("holding N cards" with
-        # nothing new selected) -- unlike the old single-card CTA text,
-        # which already named the card number before the ack ever landed,
-        # this can't pass on the click alone.
-        await page.wait_for_function(
-            "document.getElementById('lobby-cta').disabled === true", timeout=5000
-        )
 
         await page.wait_for_selector("#screen-game.active", timeout=25000)
         board_cells = await page.query_selector_all(".board-cell")
@@ -564,11 +558,7 @@ async def test_verify_draw_button_shows_a_verified_seed(gateway_server, browser,
         await page.click(room_selector)
         await page.wait_for_selector("#screen-lobby.active", timeout=10000)
         cells = await page.query_selector_all(".card-grid-cell")
-        await cells[9].click()  # card #10
-        await page.click("#lobby-cta")
-        await page.wait_for_function(
-            "document.getElementById('lobby-cta').disabled === true", timeout=5000
-        )
+        await cells[9].click()  # card #10 -- takes it immediately, no confirm step
 
         await page.wait_for_selector("#screen-game.active", timeout=25000)
         await page.wait_for_selector("#screen-result.active", timeout=90000)
@@ -640,11 +630,7 @@ async def test_result_screen_shows_the_winning_card_preview(gateway_server, brow
         await page.click(room_selector)
         await page.wait_for_selector("#screen-lobby.active", timeout=10000)
         cells = await page.query_selector_all(".card-grid-cell")
-        await cells[9].click()  # card #10
-        await page.click("#lobby-cta")
-        await page.wait_for_function(
-            "document.getElementById('lobby-cta').disabled === true", timeout=5000
-        )
+        await cells[9].click()  # card #10 -- takes it immediately, no confirm step
 
         await page.wait_for_selector("#screen-game.active", timeout=25000)
         await page.wait_for_selector("#screen-result.active", timeout=90000)
@@ -752,11 +738,7 @@ async def test_voice_announcement_requests_the_correct_audio_file_for_a_call(
         await page.click(room_selector)
         await page.wait_for_selector("#screen-lobby.active", timeout=10000)
         cells = await page.query_selector_all(".card-grid-cell")
-        await cells[9].click()  # card #10
-        await page.click("#lobby-cta")
-        await page.wait_for_function(
-            "document.getElementById('lobby-cta').disabled === true", timeout=5000
-        )
+        await cells[9].click()  # card #10 -- takes it immediately, no confirm step
 
         await page.wait_for_selector("#screen-game.active", timeout=25000)
         await page.wait_for_function(
@@ -844,11 +826,7 @@ async def test_disabling_voice_makes_zero_audio_requests(gateway_server, browser
         await page.click(room_selector)
         await page.wait_for_selector("#screen-lobby.active", timeout=10000)
         cells = await page.query_selector_all(".card-grid-cell")
-        await cells[9].click()  # card #10
-        await page.click("#lobby-cta")
-        await page.wait_for_function(
-            "document.getElementById('lobby-cta').disabled === true", timeout=5000
-        )
+        await cells[9].click()  # card #10 -- takes it immediately, no confirm step
 
         await page.wait_for_selector("#screen-game.active", timeout=25000)
         # Same proof-of-liveness the other gameplay tests use -- at least
@@ -915,27 +893,27 @@ async def test_a_player_can_hold_and_play_several_cards_at_once(
         await page.wait_for_selector("#screen-lobby.active", timeout=10000)
 
         cells = await page.query_selector_all(".card-grid-cell")
+        # Each tap takes the card immediately -- no separate confirm step.
+        # The balance assertion right below is the real proof both stakes
+        # actually landed, not just that the taps happened.
         await cells[9].click()  # card #10
         await cells[19].click()  # card #20
-        await page.click("#lobby-cta")
-        # Proof the batched take_card ack actually landed for BOTH cards,
-        # not just that the click happened -- app.v6.js's own
-        # pendingTakeCardAcks counter only re-syncs (and only then
-        # disables the CTA) once every card in this batch has acked.
-        await page.wait_for_function(
-            "document.getElementById('lobby-cta').disabled === true", timeout=5000
-        )
 
         # Two separate real stakes actually happened -- not just that the
-        # UI moved on to the next screen.
-        balance_after_stake = await pool.fetchval(
-            """
+        # UI moved on to the next screen. Polled, not a single immediate
+        # fetch: each tap fires its take_card and moves on with no
+        # confirm step to wait on anymore, so the async gateway ->
+        # engine round trip may still be in flight the instant this runs.
+        balance_query = """
             SELECT balance FROM account_balances b
             JOIN accounts a ON a.id = b.account_id
             WHERE a.user_id = $1 AND a.kind = 'user_cash'
-            """,
-            user_row["id"],
-        )
+        """
+        for _ in range(100):
+            balance_after_stake = await pool.fetchval(balance_query, user_row["id"])
+            if balance_after_stake == Decimal("80.00"):
+                break
+            await asyncio.sleep(0.1)
         assert balance_after_stake == Decimal("80.00"), "expected two separate 10.00 ETB stakes"
 
         await page.wait_for_selector("#screen-game.active", timeout=25000)
@@ -1034,21 +1012,23 @@ async def test_multi_card_session_loss_reports_the_full_amount_not_one_card(
         await page.wait_for_selector("#screen-lobby.active", timeout=10000)
 
         cells = await page.query_selector_all(".card-grid-cell")
+        # Each tap takes the card immediately -- no separate confirm step.
         await cells[9].click()  # card #10
         await cells[19].click()  # card #20
-        await page.click("#lobby-cta")
-        await page.wait_for_function(
-            "document.getElementById('lobby-cta').disabled === true", timeout=5000
-        )
 
-        balance_after_stake = await pool.fetchval(
-            """
+        # Polled, not a single immediate fetch: with no confirm step to
+        # wait on anymore, the async gateway -> engine round trip for
+        # either tap may still be in flight the instant this runs.
+        balance_query = """
             SELECT balance FROM account_balances b
             JOIN accounts a ON a.id = b.account_id
             WHERE a.user_id = $1 AND a.kind = 'user_cash'
-            """,
-            user_row["id"],
-        )
+        """
+        for _ in range(100):
+            balance_after_stake = await pool.fetchval(balance_query, user_row["id"])
+            if balance_after_stake == Decimal("80.00"):
+                break
+            await asyncio.sleep(0.1)
         assert balance_after_stake == Decimal("80.00"), "expected two separate 10.00 ETB stakes"
 
         await page.wait_for_selector("#screen-result.active", timeout=90000)

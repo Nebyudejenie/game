@@ -252,33 +252,61 @@ ws.on("state_sync", (msg) => {
 
 // --- lobby (card selection) --------------------------------------------
 
-// selectedCards is the full UI selection (held + newly tapped); heldCards
-// is only what the server has actually confirmed this user owns. The
-// difference between them is exactly what the CTA commits -- a player
-// can select several cards before ever sending take_card, matching the
-// reference's own "pick, then confirm" flow, rather than one command per
-// tap.
-let selectedCards = new Set();
+// heldCards is what the server has actually confirmed this user owns;
+// pendingCards is a number just tapped, with its take_card command sent
+// but not yet acked. There's no separate "select, then confirm" step --
+// a tap commits immediately (product decision: a confirm button between
+// tapping a number and actually taking it was pure friction, since the
+// server is already the real gate on balance/room-cap/races either way).
+// pendingCards exists only so a cell shows as taken right away (instant
+// feedback) and can't be double-tapped again before its own ack lands.
 let heldCards = new Set();
+let pendingCards = new Set();
 const takenCards = new Set();
 let maxCardsPerPlayer = 1;
-// Counts take_card commands sent in the CTA's current batch that haven't
-// acked yet -- see the ack handler below for why this exists.
+// Counts take_card commands sent that haven't acked yet -- see the ack
+// handler below for why this exists.
 let pendingTakeCardAcks = 0;
+// The grid's 150 cells are always just the numbers 1-150 -- room-
+// independent -- so the DOM only ever needs building once, not on every
+// enterLobby() call. That matters more now than it used to: a tap commits
+// immediately (see the ack handler below), so a resync can land while a
+// player is still mid-tap on a second card, and rebuilding via
+// grid.innerHTML = "" right then would both flicker the whole grid and
+// detach the very cell they're about to tap (an E2E test caught this for
+// real -- Playwright's own "Element is not attached to the DOM" on the
+// second of two quick taps).
+let cardGridBuilt = false;
+// takenCards *is* room-scoped (the same card number means something
+// different in a different room) -- only reset it on a genuine room
+// change, not on every resync, or a mid-lobby take_card ack would wipe
+// out every other player's already-taken cards this client had learned
+// about from live card_taken broadcasts since the last resync.
+let lobbyRoomId = null;
 
 function enterLobby(sync) {
   showScreen("lobby");
   const yourCards = sync.your_cards || [];
   heldCards = new Set(yourCards.map((c) => c.card_no));
-  selectedCards = new Set(heldCards);
+  pendingCards.clear();
   maxCardsPerPlayer = sync.max_cards_per_player || 1;
-  takenCards.clear();
   pendingTakeCardAcks = 0;
-  buildCardGrid();
+
+  const state = getState();
+  if (lobbyRoomId !== state.currentRoomId) {
+    lobbyRoomId = state.currentRoomId;
+    takenCards.clear();
+  }
+  if (!cardGridBuilt) {
+    buildCardGrid();
+    cardGridBuilt = true;
+  } else {
+    renderCardGridState();
+  }
+
   updateLobbyCta();
   startLobbyCountdown(sync);
   updateLobbyMoneyBar(sync);
-  const state = getState();
   if (state.user) el("lobby-balance-amount").textContent = `${state.user.balance} ETB`;
 }
 
@@ -298,61 +326,49 @@ function buildCardGrid() {
     const cell = document.createElement("div");
     cell.className = "card-grid-cell";
     cell.textContent = String(n);
-    makeKeyboardActivatable(cell, () => {
-      if (heldCards.has(n)) return; // already committed -- not toggleable here
-      if (takenCards.has(n)) return; // someone else's
-      haptics.lightTap();
-      if (selectedCards.has(n)) {
-        selectedCards.delete(n);
-      } else {
-        if (selectedCards.size >= maxCardsPerPlayer) return; // at this room's cap
-        selectedCards.add(n);
-      }
-      renderCardGridState();
-      updateLobbyCta();
-    });
+    makeKeyboardActivatable(cell, () => takeCardNow(n));
     grid.appendChild(cell);
   }
   renderCardGridState();
 }
 
+// A tap commits immediately -- no separate confirm step (see heldCards'
+// own comment above for why). The server is still the real gate: a
+// rejection (insufficient balance, someone else took it a moment earlier)
+// shows the existing ack toast and, once the batch's re-sync below runs,
+// the cell simply reverts to unselected -- "no change" from the player's
+// point of view, exactly as if the tap had never landed, and nothing about
+// the round or other players is affected either way.
+function takeCardNow(n) {
+  if (heldCards.has(n) || pendingCards.has(n)) return; // already committed or in flight
+  if (takenCards.has(n)) return; // someone else's
+  if (heldCards.size + pendingCards.size >= maxCardsPerPlayer) return; // at this room's cap
+  const state = getState();
+  if (!state.currentRoomId) return;
+  haptics.lightTap();
+  pendingCards.add(n);
+  pendingTakeCardAcks += 1;
+  renderCardGridState();
+  updateLobbyCta();
+  ws.takeCard(state.currentRoomId, n);
+}
+
 function renderCardGridState() {
   for (const cellEl of el("card-grid").children) {
     const n = Number(cellEl.textContent);
-    cellEl.classList.toggle("taken", takenCards.has(n) && !selectedCards.has(n));
-    cellEl.classList.toggle("selected", selectedCards.has(n));
+    const mine = heldCards.has(n) || pendingCards.has(n);
+    cellEl.classList.toggle("taken", takenCards.has(n) && !mine);
+    cellEl.classList.toggle("selected", mine);
   }
 }
 
+// Purely a status readout now (never clickable -- taking a card happens
+// on the grid tap itself, see takeCardNow() above).
 function updateLobbyCta() {
   const cta = el("lobby-cta");
-  const state = getState();
-  const stake = state.round ? state.round.stake : "";
-  const newCards = [...selectedCards].filter((n) => !heldCards.has(n));
-
-  if (newCards.length === 0) {
-    cta.disabled = true;
-    cta.textContent = heldCards.size > 0 ? t("lobby.cards_held", { count: heldCards.size }) : t("lobby.pick_card");
-    return;
-  }
-  cta.disabled = false;
-  const totalStake = stake === "" ? "" : (Number(stake) * newCards.length).toFixed(2);
-  cta.textContent =
-    newCards.length === 1
-      ? t("lobby.take_card", { card: newCards[0], stake: totalStake })
-      : t("lobby.take_cards", { count: newCards.length, stake: totalStake });
+  const total = heldCards.size + pendingCards.size;
+  cta.textContent = total > 0 ? t("lobby.cards_held", { count: total }) : t("lobby.pick_card");
 }
-
-el("lobby-cta").addEventListener("click", () => {
-  const state = getState();
-  const newCards = [...selectedCards].filter((n) => !heldCards.has(n));
-  if (newCards.length === 0 || !state.currentRoomId) return;
-  haptics.mediumTap();
-  pendingTakeCardAcks += newCards.length;
-  for (const cardNo of newCards) {
-    ws.takeCard(state.currentRoomId, cardNo);
-  }
-});
 
 ws.on("card_taken", (msg) => {
   if (msg.taken) takenCards.add(msg.card_no);
@@ -364,11 +380,11 @@ ws.on("ack", (msg) => {
   if (!msg.ok) showToast(msg.reason || "error.generic");
   if (msg.for === "take_card") {
     if (msg.ok) haptics.success();
-    // The CTA can fire several take_card commands in one batch (multi-card
-    // selection) -- re-syncing after every single ack would rebuild the
-    // whole lobby grid N times, destroying scroll/focus each time. Wait
-    // until the whole batch has acked (success or failure) before doing
-    // the one re-sync that actually matters.
+    // Several take_card commands can be in flight at once (quick taps on
+    // different cards) -- re-syncing after every single ack would rebuild
+    // the whole lobby grid that many times, destroying scroll/focus each
+    // time. Wait until every outstanding one has acked (success or
+    // failure) before doing the one re-sync that actually matters.
     pendingTakeCardAcks = Math.max(0, pendingTakeCardAcks - 1);
     if (pendingTakeCardAcks === 0) {
       // The ack only confirms success -- it doesn't carry the card's
@@ -377,13 +393,12 @@ ws.on("ack", (msg) => {
       // populates your_cards, which enterGame() needs once the round
       // starts; patching held state locally from acks alone left grids
       // null and crashed setGrid() the moment round_start fired (a real
-      // bug an E2E test caught -- see DECISIONS.md).
+      // bug an E2E test caught -- see DECISIONS.md). This same re-sync is
+      // also what clears pendingCards (enterLobby() rebuilds it from
+      // scratch), so a rejected tap cleanly reverts without any special
+      // -casing here.
       const state = getState();
       if (state.currentRoomId !== null) ws.joinRoom(state.currentRoomId);
-      // enterLobby(), triggered by the state_sync reply just requested
-      // above, is what refreshes the CTA text correctly (it has the
-      // fresh your_cards by then); no need to also do it here against
-      // stale state.
     }
   }
 });
