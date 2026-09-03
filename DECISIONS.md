@@ -5,6 +5,51 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-03 — Fixed a real gap named earlier this session but never closed: exceptions logged with no traceback
+
+Named directly in a user request for "detailed round audit logs... never
+trust the client, everything verified server-side" -- and something this
+same session had already independently found and flagged (while
+diagnosing the very first production incident) but never actually fixed:
+`services/engine/worker.py`'s own polling-loop guard, and every other
+`logger.exception(...)` call in the codebase, was producing
+`"exc_info": true` in the JSON log line -- a bare boolean, not a real
+traceback. structlog's `logger.exception()` sets `exc_info=True` by
+default, but `packages/core/logging.py`'s processor chain had nothing
+that ever consumed it before `JSONRenderer()` tried to serialize the raw
+value. Every unhandled exception this whole session -- including the
+still-not-fully-explained `run_active_rooms_failed` errors from the
+`has_main_web_app` investigation -- had its actual cause silently
+discarded at the moment it was logged.
+
+Fix: `structlog.processors.dict_tracebacks` (an `ExceptionRenderer`)
+added to the chain, rendering the traceback as a JSON-safe nested
+structure matching this pipeline's own `JSONRenderer` downstream --
+*not* the older `format_exc_info`, which renders a single preformatted
+string meant for plain-text console output, not a JSON field.
+
+Caught before shipping, not after: `dict_tracebacks`'s own default is
+`show_locals=True`, which would have dumped every stack frame's local
+variables into the log verbatim -- completely bypassing `_redact` (which
+only ever scans the top-level event dict, never traceback frame
+contents). A bot token, a phone number, or a raw initData string sitting
+in some function's own local scope at the exact moment it raised would
+have leaked in clear text, directly through the one path this same
+file's own docstring already promises closed ("no matter who adds a new
+log call later" -- this processor addition is exactly that). Fixed by
+building a real `ExceptionRenderer` around an explicit
+`ExceptionDictTransformer(show_locals=False)` instead of using the
+pre-built `dict_tracebacks` convenience object.
+
+Two new tests: one proving a real traceback (exc_type, exc_value, real
+frames) now renders instead of a bare bool, one proving a local variable
+holding a deliberately fake secret never reaches the log line -- both
+verified failing against the pre-fix code via a genuine revert-test (the
+locals test fails on a `KeyError: 'exception'` against the old code,
+since the whole traceback structure didn't exist yet to check).
+
+---
+
 ## 2026-09-03 — A zero-player round now goes active and calls real numbers
 
 A further, sharper correction on top of the min_players change above: the

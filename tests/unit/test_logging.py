@@ -103,3 +103,65 @@ def test_output_is_real_json_with_level_and_event() -> None:
     assert parsed["event"] == "test_event"
     assert parsed["level"] == "info"
     assert "timestamp" in parsed
+
+
+def _log_one_exception(local_secret: str | None = None) -> dict[str, object]:
+    # A real function call, not logger.exception() at module scope --
+    # module-level "locals" are just globals, which wouldn't exercise the
+    # actual bug (a real function's own local variables never reaching
+    # the log) at all.
+    secret_line = f"    bot_token = {local_secret!r}\n" if local_secret is not None else ""
+    script = (
+        "from packages.core.logging import configure_logging, get_logger\n"
+        "configure_logging('INFO')\n"
+        "logger = get_logger('test_logging')\n"
+        "def do_the_thing():\n"
+        f"{secret_line}"
+        "    1 / 0\n"
+        "try:\n"
+        "    do_the_thing()\n"
+        "except ZeroDivisionError:\n"
+        "    logger.exception('engine_worker_run_active_rooms_failed')\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=10
+    )
+    assert proc.returncode == 0, proc.stderr
+    line = proc.stdout.strip()
+    result: dict[str, object] = json.loads(line)
+    return result
+
+
+def test_logger_exception_renders_a_real_traceback_not_a_bare_bool() -> None:
+    """A real production gap: exc_info=True (structlog's own default for
+    logger.exception()) was never consumed by anything in the processor
+    chain, so JSONRenderer just serialized the raw bool -- every
+    logger.exception() call in the codebase produced `"exc_info": true`
+    with the actual exception and traceback lost. This is the fix.
+    """
+    parsed = _log_one_exception()
+    assert parsed.get("exc_info") is not True, "the old bug: a bare bool, no real traceback"
+    exception = parsed["exception"]
+    assert isinstance(exception, list) and exception
+    assert exception[0]["exc_type"] == "ZeroDivisionError"
+    assert exception[0]["exc_value"] == "division by zero"
+    assert exception[0]["frames"], "must include real frame/line info, not just the exception name"
+
+
+def test_logger_exception_never_captures_local_variables() -> None:
+    """The security-critical half of the fix above: structlog's
+    dict_tracebacks default (show_locals=True) would otherwise dump every
+    frame's local variables into the log verbatim -- completely bypassing
+    _redact, which only ever scans the top-level event dict, never
+    traceback frame contents. A bot token, a phone number, or a raw
+    initData string sitting in some function's own local scope at the
+    moment it raised would leak in clear text through exactly this path
+    if this regressed.
+    """
+    parsed = _log_one_exception(local_secret="super-secret-token-value-not-to-leak")
+    raw = json.dumps(parsed)
+    assert "super-secret-token-value-not-to-leak" not in raw
+    exception = parsed["exception"]
+    assert isinstance(exception, list) and exception
+    frame = exception[0]["frames"][0]
+    assert "locals" not in frame

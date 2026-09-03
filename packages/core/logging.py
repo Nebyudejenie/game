@@ -43,6 +43,30 @@ def _redact(_logger: WrappedLogger, _method_name: str, event_dict: EventDict) ->
     return event_dict
 
 
+# A real production gap: every logger.exception(...) call in this codebase
+# (services/engine/worker.py's own polling-loop guard among them) relied
+# on structlog's default exc_info=True actually being rendered into the
+# log line -- without a processor that consumes it, JSONRenderer() below
+# just tried to JSON-serialize the raw value, producing a bare
+# `"exc_info": true` with the real exception and traceback never written
+# anywhere. dict_tracebacks (not the older format_exc_info, which renders
+# a single preformatted string meant for plain-text output) renders the
+# traceback as a JSON-safe nested structure, matching this pipeline's own
+# JSONRenderer downstream -- but its own default (show_locals=True) would
+# dump every frame's local variables into the log verbatim, completely
+# bypassing _redact above (which only ever scans the top-level event
+# dict, never traceback frame contents): a bot token, a phone number, a
+# raw initData string sitting in some function's own local scope at the
+# moment it raised would leak in clear text through a path this file's
+# own docstring already promises closed. show_locals=False is not the
+# default -- it has to be requested explicitly, which is what building a
+# real ExceptionRenderer here (instead of using the pre-built
+# dict_tracebacks convenience object) is for.
+_render_exceptions = structlog.processors.ExceptionRenderer(
+    structlog.tracebacks.ExceptionDictTransformer(show_locals=False)
+)
+
+
 def configure_logging(level: str = "INFO") -> None:
     logging.basicConfig(
         format="%(message)s",
@@ -55,6 +79,7 @@ def configure_logging(level: str = "INFO") -> None:
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
             _redact,
+            _render_exceptions,
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(
