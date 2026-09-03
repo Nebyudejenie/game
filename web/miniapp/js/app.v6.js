@@ -22,6 +22,16 @@ function showScreen(name) {
     if (name === "rooms") tg.BackButton.hide();
     else tg.BackButton.show();
   }
+  // The lobby's own card preview (renderLobbyCards() below) only ever gets
+  // rebuilt on the next enterLobby() call -- leaving this screen doesn't
+  // clear it, just hides its container via CSS. A real test caught that
+  // stale DOM: an unscoped ".your-card-item" query on #screen-game picked
+  // up the lobby's own leftover items too (4 instead of 2), since they're
+  // still genuinely in the document, just invisible.
+  if (name !== "lobby") {
+    const lobbyCardsList = document.getElementById("lobby-your-cards-list");
+    if (lobbyCardsList) lobbyCardsList.innerHTML = "";
+  }
 }
 
 function el(id) {
@@ -291,6 +301,7 @@ function enterLobby(sync) {
   pendingCards.clear();
   maxCardsPerPlayer = sync.max_cards_per_player || 1;
   pendingTakeCardAcks = 0;
+  renderLobbyCards(yourCards);
 
   const state = getState();
   if (lobbyRoomId !== state.currentRoomId) {
@@ -308,6 +319,38 @@ function enterLobby(sync) {
   startLobbyCountdown(sync);
   updateLobbyMoneyBar(sync);
   if (state.user) el("lobby-balance-amount").textContent = `${state.user.balance} ETB`;
+}
+
+// A real production gap, flagged directly from a user recording: taking a
+// card during selection produced no visible confirmation beyond the grid
+// cell itself turning purple -- the actual generated 5x5 grid a player is
+// about to play only ever rendered once the round transitioned to
+// #screen-game. This is the lobby's own equivalent of buildGameCards()
+// below, deliberately simpler: nothing has been called yet and the round
+// hasn't started, so there's no marking to do and no claim to make --
+// just the plain static preview renderStaticCard() already provides for
+// exactly this "no live state to track" case (also used by the result
+// screen's winning-card preview).
+function renderLobbyCards(yourCards) {
+  const section = el("lobby-your-cards-section");
+  const list = el("lobby-your-cards-list");
+  list.innerHTML = "";
+  section.classList.toggle("hidden", yourCards.length === 0);
+  for (const c of yourCards) {
+    const item = document.createElement("div");
+    item.className = "your-card-item";
+
+    const title = document.createElement("div");
+    title.className = "your-card-title";
+    title.textContent = t("game.your_card_no", { card: c.card_no });
+    item.appendChild(title);
+
+    const cardEl = document.createElement("div");
+    item.appendChild(cardEl);
+    card.renderStaticCard(cardEl, c.grid, [], null);
+
+    list.appendChild(item);
+  }
 }
 
 // Shared by enterLobby() (initial values) and the lobby_tick handler

@@ -315,6 +315,74 @@ async def test_a_player_who_took_a_card_in_an_underfilled_round_is_not_left_froz
         await asyncio.wait_for(task, timeout=15)
 
 
+async def test_taking_a_card_shows_the_generated_bingo_card_immediately_in_the_lobby(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    """A real gap, flagged directly against a user's own screen recording:
+    tapping a card number only ever turned that grid cell purple -- the
+    actual 5x5 Bingo grid a player is about to play never appeared until
+    the round transitioned to #screen-game, minutes later once selection
+    closed. A player watching only the number grid change color, with no
+    confirmation of what card they actually hold, has no way to tell a
+    real assignment from a UI glitch. This proves the generated card
+    renders in the lobby itself, immediately after the take_card ack --
+    no round start, no screen change, no extra action needed.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=30, is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    try:
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        assert user_row is not None
+        await fund_user(conn, user_row["id"], Decimal("100.00"))
+        await conn.execute("UPDATE users SET language = 'en' WHERE id = $1", user_row["id"])
+        await page.reload()
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('100.00')", timeout=10000
+        )
+
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page.wait_for_selector(room_selector, timeout=10000)
+        await page.click(room_selector)
+        await page.wait_for_selector("#screen-lobby.active", timeout=10000)
+
+        # Not shown before any card is taken.
+        assert await page.is_hidden("#lobby-your-cards-section")
+
+        cells = await page.query_selector_all(".card-grid-cell")
+        await cells[74].click()  # card #75, matching the real incident
+
+        # Still on the lobby screen throughout -- this is the whole point.
+        await page.wait_for_selector("#lobby-your-cards-section:not(.hidden)", timeout=10000)
+        assert await page.get_attribute("#screen-lobby", "class") and "active" in (
+            await page.get_attribute("#screen-lobby", "class") or ""
+        )
+
+        title_text = await page.text_content("#lobby-your-cards-list .your-card-title")
+        assert title_text and "75" in title_text, f"expected the card's own number, got {title_text!r}"
+
+        card_cells = await page.query_selector_all("#lobby-your-cards-list .card-cell")
+        assert len(card_cells) == 25, "a real 5x5 grid, not a placeholder"
+
+        assert console_errors == [], f"JS errors showing the lobby card preview: {console_errors}"
+        await page.close()
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
 async def test_miniapp_shows_a_retry_banner_instead_of_a_permanent_blank_screen_when_ws_never_connects(
     gateway_server, browser
 ):

@@ -5,6 +5,49 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-03 — Taking a card now shows the generated Bingo card immediately, in the lobby
+
+A concrete gap named against a user's own screen recording: tapping a card
+number only ever turned that one grid cell purple. The actual 5x5 grid a
+player was about to play never rendered anywhere until the round
+transitioned to `#screen-game`, which -- combined with this room's real
+`min_players = 2` and the user testing alone with no second player -- could
+be minutes away or never happen at all in a single-tester session. A
+player watching only a color change, with zero confirmation of which
+numbers they actually hold, has no way to distinguish a real assignment
+from a UI glitch.
+
+Fix: a new `#lobby-your-cards-section` inside the lobby screen itself,
+populated the moment `enterLobby()` receives `your_cards` from any
+`state_sync` (initial join or the post-take_card resync) -- reusing
+`render/card.js`'s existing `renderStaticCard()` (already built for the
+result screen's winning-card preview), since nothing has been called yet
+and the round hasn't started: no marking, no claim button, no live state
+to track, just the plain grid. Deliberately not merged into the existing
+`#your-cards-list` (the game screen's own, interactive version) -- they're
+different screens with different lifecycles, and conflating them would
+have meant carrying dead interactive machinery into a phase where none of
+it applies.
+
+Fallout caught by the existing suite, not production: an unscoped
+`.your-card-item` query in an already-passing multi-card test started
+returning 4 elements instead of 2, because leaving the lobby screen only
+ever hid `#lobby-your-cards-section` via CSS -- the DOM itself, and
+whatever it was still holding from the last `enterLobby()` call, stayed
+put. Fixed at the one place every screen transition already passes
+through (`showScreen()`), not by hunting down every individual place that
+leaves the lobby -- clears the lobby's own card list whenever the
+destination isn't "lobby," which is also the more broadly correct fix:
+any future code touching that list unscoped would have hit the exact same
+stale-DOM trap.
+
+New e2e test (`test_taking_a_card_shows_the_generated_bingo_card_
+immediately_in_the_lobby`) proves the card renders inline, still on the
+lobby screen, right after the take_card ack -- no round start required.
+Verified failing against the pre-fix code via a genuine revert-test.
+
+---
+
 ## 2026-09-03 — The real "frozen at 0 seconds" bug: the underfilled-lobby path never told anyone
 
 Caught on a real screen recording from a real Android device, of our own
