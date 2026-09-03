@@ -5,6 +5,55 @@ Where an implementer (human or AI) deviates from `idea.md`, or makes a call
 
 ---
 
+## 2026-09-03 — Every room went permanently dead after its first round ended
+
+The real blocker behind "the game shows the room list, then does nothing"
+-- reported right after the `has_main_web_app` fix below finally let a real
+Telegram client authenticate and reach the room list for the first time.
+Tapping the one visible room silently bounced back to the exact same
+screen, forever, no matter how many times it was tapped.
+
+Root cause: `RoundEngine._reset_to_idle()` (`round_engine.py`) flips the
+*in-memory* engine back to `"idle"` the instant a round voids or finishes
+settling. But `services/gateway/queries.py::build_state_sync()` -- the
+handler for every "join this room" WS message -- reads Postgres directly,
+where that same round's row keeps its terminal status (`voided`/`done`)
+forever until a brand-new round row exists. The only thing that ever
+inserts a new round row is `RoundEngine.join()` (via `take_card`), which
+only ever runs once a player is already looking at the lobby/card-grid
+screen. `app.v6.js`'s own `state_sync` handler routes `"voided"`/`"done"`
+straight back to the room list, never to the lobby. Put together: nobody
+could ever reach the lobby again to take the one card that would start the
+next round -- a room simply died, permanently, the moment its first round
+ever finished.
+
+This is strictly worse than the earlier "idle" routing bug (which only
+covered a room with *zero* round history) and had been live since that fix
+shipped -- it just had nothing to trigger it, because no round had ever
+actually completed against a real Telegram client until today's
+`has_main_web_app` fix let one finish for the first time. The very next
+tap on that same room reproduced it immediately.
+
+Fix: `build_state_sync()` now treats a terminal round (`voided`/`done`)
+exactly like no round at all, matching what the in-memory engine already
+believes. Verified with a real Playwright session against the live
+production domain (not local): reproduced the frozen room-tap first
+(`state_sync` came back `status: "voided"` forever), then confirmed the fix
+live the same way (`status: "idle"`, client lands on `#screen-lobby`). A
+new e2e test (`test_a_room_whose_last_round_ended_can_still_be_reentered`)
+guards this going forward, verified against the pre-fix code via a real
+revert-test (genuinely times out waiting for the lobby screen).
+
+Separately noticed but not yet fixed: `services/engine/worker.py`'s
+`logger.exception("engine_worker_run_active_rooms_failed")` calls log
+`exc_info: true` as a bare JSON boolean with no actual traceback text --
+`packages/core/logging.py`'s processor chain isn't rendering it. Real
+exceptions in the engine worker's polling loop are currently invisible in
+production logs beyond "something failed." Worth fixing before it hides
+the next incident.
+
+---
+
 ## 2026-09-03 — The real "Play button does nothing" bug: a stale persistent ReplyKeyboard
 
 The last entry in this same live-diagnosis session -- and the one that
