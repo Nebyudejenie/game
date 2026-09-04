@@ -735,7 +735,8 @@ async def update_room_admin(
 async def list_manual_payment_destinations(pool: asyncpg.Pool) -> list[dict[str, Any]]:
     rows = await pool.fetch(
         "SELECT id, method_kind, account_ref, account_name, instructions, is_active, "
-        "created_at, updated_at FROM manual_payment_destinations ORDER BY method_kind, id"
+        "effective_from, effective_until, created_at, updated_at "
+        "FROM manual_payment_destinations ORDER BY method_kind, id"
     )
     return [dict(r) for r in rows]
 
@@ -749,14 +750,17 @@ async def create_manual_payment_destination_admin(
     account_name: str,
     instructions: str | None,
     ip_address: str | None,
+    effective_from: datetime | None = None,
+    effective_until: datetime | None = None,
 ) -> int:
     async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
                 """
                 INSERT INTO manual_payment_destinations
-                    (method_kind, account_ref, account_name, instructions, created_by_admin_id)
-                VALUES ($1, $2, $3, $4, $5)
+                    (method_kind, account_ref, account_name, instructions, created_by_admin_id,
+                     effective_from, effective_until)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 RETURNING id
                 """,
                 method_kind,
@@ -764,6 +768,8 @@ async def create_manual_payment_destination_admin(
                 account_name,
                 instructions,
                 admin_id,
+                effective_from,
+                effective_until,
             )
             assert row is not None
             await audit.record(
@@ -778,7 +784,17 @@ async def create_manual_payment_destination_admin(
     return int(row["id"])
 
 
-_UPDATABLE_DESTINATION_FIELDS = {"method_kind", "account_ref", "account_name", "instructions", "is_active"}
+# effective_from/effective_until (CTO directive section 92: an old
+# recipient must stay valid for historical records, not "accidentally
+# become invalid") -- added here alongside method_kind/account_ref/
+# account_name/instructions/is_active, which were already dynamically
+# editable through this exact same generic mechanism (the PATCH route and
+# update_manual_payment_destination_admin() below needed zero other
+# changes for this).
+_UPDATABLE_DESTINATION_FIELDS = {
+    "method_kind", "account_ref", "account_name", "instructions", "is_active",
+    "effective_from", "effective_until",
+}
 
 
 async def update_manual_payment_destination_admin(
@@ -880,6 +896,209 @@ async def set_payment_provider_availability_admin(
                 before={"enabled": before["enabled"]},
                 after={"enabled": enabled},
                 reason=reason,
+                ip_address=ip_address,
+            )
+    return True
+
+
+# --- Telebirr SMS-evidence admin review (CTO directive sections 91/97/99) --
+
+# Explicit state-transition policy (section 99) -- an admin resolution can
+# only move a row along one of these edges; anything else raises. redeemed
+# and expired are terminal here on purpose: "REDEEMED -> AVAILABLE must
+# NOT be allowed as a normal release operation" (section 98's own
+# example) -- if a redeemed evidence row is ever genuinely wrong, that is
+# a ledger correction handled through the existing controlled remediation
+# path (section 136), never a plain status flip back to available.
+_EVIDENCE_TRANSITIONS: dict[str, frozenset[str]] = {
+    "available": frozenset({"blocked", "disputed"}),
+    "blocked": frozenset({"disputed", "available"}),
+    "disputed": frozenset({"available"}),
+    # A row ships 'rejected' whenever ingestion ran before a recipient was
+    # configured (the common case at launch, per the product's own
+    # decision to ship the recipient list empty) -- once a real recipient
+    # is added, an admin who has independently verified the evidence is
+    # legitimate resolves it forward the same way a disputed row is
+    # resolved.
+    "rejected": frozenset({"available"}),
+}
+
+
+async def list_payment_evidence(
+    pool: asyncpg.Pool, *, status: str | None, limit: int, cursor: int | None
+) -> tuple[list[dict[str, Any]], int | None]:
+    """Paginated, and deliberately never includes raw_sms (section 129:
+    "raw evidence must be loaded deliberately, not automatically") --
+    get_payment_evidence_raw_sms() below is the one, separately-permissioned,
+    separately-audited way to see it. cursor is the smallest id already
+    seen; returns (rows, next_cursor) where next_cursor is None once
+    there's nothing more to page through.
+    """
+    limit = max(1, min(limit, 200))
+    conditions = []
+    params: list[Any] = []
+    if status is not None:
+        params.append(status)
+        conditions.append(f"status = ${len(params)}")
+    if cursor is not None:
+        params.append(cursor)
+        conditions.append(f"id < ${len(params)}")
+    where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    params.append(limit + 1)
+
+    rows = await pool.fetch(
+        f"""
+        SELECT id, source, external_reference, amount, payer_name, recipient_name,
+               transaction_at, received_at, status, reject_reason, redeemed_by_user_id,
+               redeemed_at, payment_id, created_at
+        FROM payment_evidence
+        {where_sql}
+        ORDER BY id DESC
+        LIMIT ${len(params)}
+        """,
+        *params,
+    )
+    has_more = len(rows) > limit
+    page = rows[:limit]
+    next_cursor = page[-1]["id"] if has_more else None
+    return [dict(r) for r in page], next_cursor
+
+
+async def get_payment_evidence_raw_sms(
+    pool: asyncpg.Pool, *, admin_id: int, evidence_id: int, ip_address: str | None
+) -> str | None:
+    """The one, deliberate way to see raw SMS text (section 97: "every
+    raw-SMS view should be auditable") -- unlike list_payment_evidence
+    above, this always writes an audit row, whether or not the evidence
+    row actually exists (a probing admin trying ids that don't exist is
+    exactly the kind of thing this audit trail exists to catch).
+    """
+    row = await pool.fetchrow("SELECT raw_sms FROM payment_evidence WHERE id = $1", evidence_id)
+    await audit.record(
+        pool,
+        admin_id=admin_id,
+        action="payment_evidence.view_raw_sms",
+        target_type="payment_evidence",
+        target_id=str(evidence_id),
+        ip_address=ip_address,
+    )
+    return row["raw_sms"] if row is not None else None
+
+
+class InvalidEvidenceTransition(Exception):
+    pass
+
+
+async def resolve_payment_evidence_admin(
+    pool: asyncpg.Pool,
+    *,
+    admin_id: int,
+    evidence_id: int,
+    to_status: str,
+    reason: str,
+    ip_address: str | None,
+) -> bool:
+    """Returns False if the evidence row doesn't exist. Raises
+    InvalidEvidenceTransition for any transition not explicitly listed in
+    _EVIDENCE_TRANSITIONS above (section 99: "invalid transitions must be
+    rejected") -- callers must always pass a non-empty reason, the same
+    discipline _require_reason() already enforces at the route layer for
+    every other admin approve/reject action.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT status FROM payment_evidence WHERE id = $1 FOR UPDATE", evidence_id
+            )
+            if row is None:
+                return False
+            current_status = row["status"]
+            allowed = _EVIDENCE_TRANSITIONS.get(current_status, frozenset())
+            if to_status not in allowed:
+                raise InvalidEvidenceTransition(
+                    f"payment_evidence {evidence_id} cannot move from {current_status!r} to {to_status!r}"
+                )
+
+            await conn.execute(
+                "UPDATE payment_evidence SET status = $2, reject_reason = $3, updated_at = now() "
+                "WHERE id = $1",
+                evidence_id,
+                to_status,
+                reason if to_status != "available" else None,
+            )
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="payment_evidence.resolve",
+                target_type="payment_evidence",
+                target_id=str(evidence_id),
+                before={"status": current_status},
+                after={"status": to_status},
+                reason=reason,
+                ip_address=ip_address,
+            )
+    return True
+
+
+# --- Telegram payment-agent allowlist (services/bot/handlers.py's
+# on_agent_sms filter reads this table directly; these are the admin-side
+# CRUD functions for it) --------------------------------------------------
+
+
+async def list_payment_agents(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+    rows = await pool.fetch(
+        "SELECT id, telegram_user_id, display_name, is_active, created_at "
+        "FROM payment_agents ORDER BY id"
+    )
+    return [dict(r) for r in rows]
+
+
+async def create_payment_agent_admin(
+    pool: asyncpg.Pool, *, admin_id: int, telegram_user_id: int, display_name: str | None, ip_address: str | None
+) -> int:
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "INSERT INTO payment_agents (telegram_user_id, display_name, created_by_admin_id) "
+                "VALUES ($1, $2, $3) RETURNING id",
+                telegram_user_id,
+                display_name,
+                admin_id,
+            )
+            assert row is not None
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="payment_agents.create",
+                target_type="payment_agent",
+                target_id=str(row["id"]),
+                after={"telegram_user_id": telegram_user_id, "display_name": display_name},
+                ip_address=ip_address,
+            )
+    return int(row["id"])
+
+
+async def set_payment_agent_active_admin(
+    pool: asyncpg.Pool, *, admin_id: int, agent_id: int, is_active: bool, ip_address: str | None
+) -> bool:
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            before = await conn.fetchrow(
+                "SELECT is_active FROM payment_agents WHERE id = $1 FOR UPDATE", agent_id
+            )
+            if before is None:
+                return False
+            await conn.execute(
+                "UPDATE payment_agents SET is_active = $2 WHERE id = $1", agent_id, is_active
+            )
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="payment_agents.set_active",
+                target_type="payment_agent",
+                target_id=str(agent_id),
+                before={"is_active": before["is_active"]},
+                after={"is_active": is_active},
                 ip_address=ip_address,
             )
     return True

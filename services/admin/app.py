@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated, Any
@@ -687,6 +687,8 @@ class CreateManualPaymentDestinationRequest(BaseModel):
     account_ref: str
     account_name: str
     instructions: str | None = None
+    effective_from: datetime | None = None
+    effective_until: datetime | None = None
 
 
 @app.post("/manual-payment-destinations")
@@ -703,6 +705,8 @@ async def create_manual_payment_destination(
         account_name=body.account_name,
         instructions=body.instructions,
         ip_address=_client_ip(request),
+        effective_from=body.effective_from,
+        effective_until=body.effective_until,
     )
     return {"id": destination_id}
 
@@ -767,6 +771,119 @@ async def set_payment_provider_availability(
     )
     if not updated:
         raise HTTPException(status_code=404, detail="unknown provider/direction")
+    return {"updated": updated}
+
+
+# --- Telebirr SMS-evidence review -----------------------------------------
+
+
+@app.get("/telebirr-evidence")
+async def list_telebirr_evidence(
+    admin: Annotated[AdminSession, Depends(require("payments:view"))],
+    status: str | None = None,
+    cursor: int | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    rows, next_cursor = await queries.list_payment_evidence(
+        app.state.pool, status=status, limit=limit, cursor=cursor
+    )
+    return {"items": rows, "next_cursor": next_cursor}
+
+
+@app.get("/telebirr-evidence/{evidence_id}/raw-sms")
+async def get_telebirr_evidence_raw_sms(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("payments:view_raw_evidence"))],
+    evidence_id: int,
+) -> dict[str, str]:
+    raw_sms = await queries.get_payment_evidence_raw_sms(
+        app.state.pool, admin_id=admin.admin_id, evidence_id=evidence_id, ip_address=_client_ip(request)
+    )
+    if raw_sms is None:
+        raise HTTPException(status_code=404, detail="evidence not found")
+    return {"raw_sms": raw_sms}
+
+
+class ResolveTelebirrEvidenceRequest(BaseModel):
+    to_status: str
+    reason: str
+
+
+@app.post("/telebirr-evidence/{evidence_id}/resolve")
+async def resolve_telebirr_evidence(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("payments:approve"))],
+    evidence_id: int,
+    body: ResolveTelebirrEvidenceRequest,
+) -> dict[str, bool]:
+    _require_reason(body.reason)
+    try:
+        resolved = await queries.resolve_payment_evidence_admin(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            evidence_id=evidence_id,
+            to_status=body.to_status,
+            reason=body.reason,
+            ip_address=_client_ip(request),
+        )
+    except queries.InvalidEvidenceTransition as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not resolved:
+        raise HTTPException(status_code=404, detail="evidence not found")
+    return {"resolved": resolved}
+
+
+# --- Telegram payment-agent allowlist --------------------------------------
+
+
+@app.get("/payment-agents")
+async def list_payment_agents(
+    admin: Annotated[AdminSession, Depends(require("payments:view"))],
+) -> list[dict[str, Any]]:
+    return await queries.list_payment_agents(app.state.pool)
+
+
+class CreatePaymentAgentRequest(BaseModel):
+    telegram_user_id: int
+    display_name: str | None = None
+
+
+@app.post("/payment-agents")
+async def create_payment_agent(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("payments:configure"))],
+    body: CreatePaymentAgentRequest,
+) -> dict[str, int]:
+    agent_id = await queries.create_payment_agent_admin(
+        app.state.pool,
+        admin_id=admin.admin_id,
+        telegram_user_id=body.telegram_user_id,
+        display_name=body.display_name,
+        ip_address=_client_ip(request),
+    )
+    return {"id": agent_id}
+
+
+class SetPaymentAgentActiveRequest(BaseModel):
+    is_active: bool
+
+
+@app.patch("/payment-agents/{agent_id}")
+async def set_payment_agent_active(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("payments:configure"))],
+    agent_id: int,
+    body: SetPaymentAgentActiveRequest,
+) -> dict[str, bool]:
+    updated = await queries.set_payment_agent_active_admin(
+        app.state.pool,
+        admin_id=admin.admin_id,
+        agent_id=agent_id,
+        is_active=body.is_active,
+        ip_address=_client_ip(request),
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="agent not found")
     return {"updated": updated}
 
 

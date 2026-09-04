@@ -15,6 +15,7 @@ permanent coverage.
 
 from __future__ import annotations
 
+import random
 from decimal import Decimal
 
 import pyotp
@@ -286,4 +287,103 @@ async def test_admin_console_logout_returns_to_the_login_screen(admin_server, po
     await page.wait_for_selector("#login-screen form", timeout=10000)
     assert await page.is_hidden("#app-shell")
 
+    await page.close()
+
+
+async def test_admin_console_telebirr_evidence_view_raw_sms_and_resolve(admin_server, pool, browser):
+    from services.payments.telebirr_ingest import ingest_sms_evidence
+
+    reference = f"DI{random.randint(8 * 10**7, 9 * 10**7):08d}"
+    recipient = f"ConsoleTest{reference}"
+    raw_sms = (
+        f"Dear {recipient} \n"
+        "You have received ETB 20.00 from DAWIT WERKALEMAHU(2519****6294)  on 04/09/2026 10:27:23. "
+        f"Your transaction number is {reference}. Your current E-Money Account balance is ETB 252.12.\n"
+        "Thank you for using telebirr\n"
+        "Ethio telecom"
+    )
+    outcome = await ingest_sms_evidence(pool, raw_sms=raw_sms, source="macrodroid", source_ref="console-e2e")
+    assert outcome.status == "ingested_rejected"
+
+    admin_id, username, password, totp_secret = await create_test_admin(pool, role="finance")
+    page = await browser.new_page(viewport={"width": 1280, "height": 900})
+    page_errors: list[str] = []
+    page.on("pageerror", lambda exc: page_errors.append(str(exc)))
+
+    await _login(page, admin_server, username, password, totp_secret)
+    await page.wait_for_selector(".stat-grid", timeout=10000)
+    await page.click('.nav-btn[data-screen="telebirr_evidence"]')
+
+    row_selector = f'tr[data-evidence-id="{outcome.evidence_id}"]'
+    await page.wait_for_selector(row_selector, timeout=10000)
+    assert reference in await page.text_content(row_selector)
+
+    await page.click(f'{row_selector} .view-raw-btn')
+    await page.wait_for_selector("pre.code-block", timeout=10000)
+    assert reference in await page.text_content("pre.code-block")
+
+    page.once("dialog", lambda dialog: dialog.accept("verified manually via e2e test"))
+    await page.click(f'{row_selector} .resolve-btn[data-to="available"]')
+    # Optional chaining: the list is torn down and rebuilt from a fresh
+    # fetch after a successful resolve (loadFirstPage()), so the row
+    # briefly doesn't exist at all during that reload -- Playwright's
+    # wait_for_function treats a thrown exception as fatal rather than
+    # "not yet true, keep polling", so a bare .textContent here would
+    # intermittently fail the whole test on that transient null.
+    await page.wait_for_function(
+        f"document.querySelector('{row_selector} .badge')?.textContent.trim().toLowerCase() === 'available'",
+        timeout=10000,
+    )
+
+    row = await pool.fetchrow("SELECT status FROM payment_evidence WHERE id = $1", outcome.evidence_id)
+    assert row["status"] == "available"
+
+    assert page_errors == [], f"JS errors: {page_errors}"
+    await page.close()
+
+
+async def test_admin_console_payment_agent_create_and_deactivate_over_a_real_browser(admin_server, pool, browser):
+    admin_id, username, password, totp_secret = await create_test_admin(pool, role="superadmin")
+    telegram_user_id = 700_000_000 + admin_id
+
+    page = await browser.new_page(viewport={"width": 1280, "height": 900})
+    page_errors: list[str] = []
+    page.on("pageerror", lambda exc: page_errors.append(str(exc)))
+
+    await _login(page, admin_server, username, password, totp_secret)
+    await page.wait_for_selector(".stat-grid", timeout=10000)
+    await page.click('.nav-btn[data-screen="payment_agents"]')
+    await page.wait_for_selector("#create-agent-form", timeout=10000)
+
+    await page.fill('input[name="telegram_user_id"]', str(telegram_user_id))
+    await page.fill('input[name="display_name"]', "E2E Field Agent")
+    await page.click('#create-agent-form button[type="submit"]')
+
+    # :has-text() is Playwright's own selector engine, valid for
+    # page.wait_for_selector() (unlike the plain-JS string a
+    # wait_for_function() predicate evaluates natively) -- waits for the
+    # real async POST + reload to actually land before the DB is checked.
+    await page.wait_for_selector(f'tr:has-text("{telegram_user_id}")', timeout=10000)
+
+    agent_row = await pool.fetchrow(
+        "SELECT id, is_active, display_name FROM payment_agents WHERE telegram_user_id = $1", telegram_user_id
+    )
+    assert agent_row is not None
+    assert agent_row["is_active"] is True
+    assert agent_row["display_name"] == "E2E Field Agent"
+
+    row_selector = f'tr[data-agent-id="{agent_row["id"]}"]'
+
+    await page.click(f'{row_selector} .toggle-active-btn')
+    # Optional chaining: same transient-null-during-reload reasoning as
+    # the telebirr evidence test above.
+    await page.wait_for_function(
+        f"document.querySelector('{row_selector} .toggle-active-btn')?.textContent.trim() === 'Activate'",
+        timeout=10000,
+    )
+
+    deactivated = await pool.fetchval("SELECT is_active FROM payment_agents WHERE id = $1", agent_row["id"])
+    assert deactivated is False
+
+    assert page_errors == [], f"JS errors: {page_errors}"
     await page.close()

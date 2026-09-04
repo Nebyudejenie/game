@@ -354,26 +354,32 @@ textarea {
   text-transform: uppercase;
 }
 
-.badge-active {
+.badge-active,
+.badge-available {
   background: #dcfce7;
   color: var(--success);
 }
 
 .badge-review,
-.badge-limited {
+.badge-limited,
+.badge-disputed,
+.badge-expired {
   background: #fef3c7;
   color: var(--warn);
 }
 
 .badge-banned,
-.badge-self_excluded {
+.badge-self_excluded,
+.badge-blocked,
+.badge-rejected {
   background: #fde8e6;
   color: var(--danger);
 }
 
 .badge-approved,
 .badge-succeeded,
-.badge-done {
+.badge-done,
+.badge-redeemed {
   background: #dbeafe;
   color: var(--primary);
 }

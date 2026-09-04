@@ -1,7 +1,23 @@
-import { api, escapeHtml } from "../api.js";
+import { api, escapeHtml, fmtDate } from "../api.js";
 import { renderError, toast } from "../ui.js";
 
 export const label = "Payment Destinations";
+
+// datetime-local inputs work in the browser's own local time and have no
+// timezone of their own -- these two just cross that boundary in each
+// direction; the server always stores/returns a real timestamptz.
+function toDatetimeLocalValue(isoString) {
+  if (!isoString) return "";
+  const d = new Date(isoString);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function fromDatetimeLocalValue(value) {
+  if (!value) return null;
+  return new Date(value).toISOString();
+}
 
 // Same vocabulary as payment_methods.kind and manual_payment_destinations
 // .method_kind's own DB CHECK constraint (migrations/versions/
@@ -28,7 +44,14 @@ export async function render(container) {
         <label>Account / number <input type="text" name="account_ref" required /></label>
         <label>Account name <input type="text" name="account_name" required /></label>
         <label>Instructions <input type="text" name="instructions" placeholder="Optional, shown to the player" /></label>
+        <label>Valid from <input type="datetime-local" name="effective_from" /></label>
+        <label>Valid until <input type="datetime-local" name="effective_until" /></label>
       </div>
+      <p class="wallet-note">
+        Leave "Valid from"/"Valid until" blank for always-valid. For a Telebirr destination used by the
+        automated SMS-evidence deposit rail, the account name must match exactly what Telebirr's own
+        "Dear {name}" SMS greeting says -- not the account holder's full legal name.
+      </p>
       <div class="action-row">
         <button type="submit" class="btn">Add destination</button>
       </div>
@@ -59,7 +82,7 @@ export async function render(container) {
     listEl.innerHTML = `
       <table class="data-table">
         <thead>
-          <tr><th>Method</th><th>Account</th><th>Name</th><th>Instructions</th><th>Active</th><th></th></tr>
+          <tr><th>Method</th><th>Account</th><th>Name</th><th>Instructions</th><th>Valid</th><th>Active</th><th></th></tr>
         </thead>
         <tbody>
           ${destinations.map((d) => `
@@ -68,6 +91,7 @@ export async function render(container) {
               <td>${escapeHtml(d.account_ref)}</td>
               <td>${escapeHtml(d.account_name)}</td>
               <td>${escapeHtml(d.instructions || "—")}</td>
+              <td>${fmtDate(d.effective_from)} – ${fmtDate(d.effective_until)}</td>
               <td>${d.is_active ? "yes" : "no"}</td>
               <td>
                 <button class="btn btn-secondary btn-sm edit-destination-btn">Edit</button>
@@ -97,6 +121,8 @@ export async function render(container) {
           <label>Account / number <input type="text" name="account_ref" value="${escapeHtml(destination.account_ref)}" required /></label>
           <label>Account name <input type="text" name="account_name" value="${escapeHtml(destination.account_name)}" required /></label>
           <label>Instructions <input type="text" name="instructions" value="${escapeHtml(destination.instructions || "")}" /></label>
+          <label>Valid from <input type="datetime-local" name="effective_from" value="${toDatetimeLocalValue(destination.effective_from)}" /></label>
+          <label>Valid until <input type="datetime-local" name="effective_until" value="${toDatetimeLocalValue(destination.effective_until)}" /></label>
         </div>
         <div class="action-row">
           <button type="submit" class="btn">Save changes</button>
@@ -115,14 +141,30 @@ export async function render(container) {
 
   async function saveEdit(destinationId, destination, form) {
     const data = new FormData(form);
+    // effective_from/until are compared at datetime-local (minute)
+    // granularity against the *displayed* value -- diffing the raw ISO
+    // strings would spuriously flag them changed on every save purely
+    // from format differences (stored UTC vs. the browser's local
+    // rendering), even when the admin touched nothing.
     const candidate = {
       account_ref: data.get("account_ref"),
       account_name: data.get("account_name"),
       instructions: data.get("instructions") || null,
+      effective_from: data.get("effective_from"),
+      effective_until: data.get("effective_until"),
+    };
+    const displayed = {
+      account_ref: destination.account_ref,
+      account_name: destination.account_name,
+      instructions: destination.instructions,
+      effective_from: toDatetimeLocalValue(destination.effective_from),
+      effective_until: toDatetimeLocalValue(destination.effective_until),
     };
     const changes = {};
     for (const [field, value] of Object.entries(candidate)) {
-      if (String(destination[field] ?? "") !== String(value ?? "")) changes[field] = value;
+      if (String(displayed[field] ?? "") !== String(value ?? "")) {
+        changes[field] = field.startsWith("effective_") ? fromDatetimeLocalValue(value) : value;
+      }
     }
     if (Object.keys(changes).length === 0) {
       toast("Nothing changed.");
@@ -168,6 +210,8 @@ export async function render(container) {
           account_ref: data.get("account_ref"),
           account_name: data.get("account_name"),
           instructions: data.get("instructions") || null,
+          effective_from: fromDatetimeLocalValue(data.get("effective_from")),
+          effective_until: fromDatetimeLocalValue(data.get("effective_until")),
         },
       });
       toast("Destination added.");

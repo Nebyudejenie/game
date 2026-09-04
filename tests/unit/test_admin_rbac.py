@@ -32,6 +32,13 @@ def test_only_superadmin_can_view_audit_log():
     assert has_permission("superadmin", "audit:view")
 
 
+def test_only_finance_and_superadmin_can_view_raw_telebirr_evidence():
+    for role in ("support", "ops"):
+        assert not has_permission(role, "payments:view_raw_evidence")
+    assert has_permission("finance", "payments:view_raw_evidence")
+    assert has_permission("superadmin", "payments:view_raw_evidence")
+
+
 def test_unknown_permission_raises():
     with pytest.raises(ValueError):
         has_permission("superadmin", "not_a_real_permission")

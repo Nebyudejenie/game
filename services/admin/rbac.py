@@ -26,6 +26,12 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     "audit:view": frozenset({"superadmin"}),
     "payments:view": frozenset({"support", "finance", "ops", "superadmin"}),
     "payments:approve": frozenset({"finance", "superadmin"}),
+    # Narrower than payments:view on purpose (spec section 97: least-
+    # privilege raw-SMS access) -- support/ops can see a Telebirr evidence
+    # row's status and amount like any other payment, but the raw SMS text
+    # itself (payer's phone number fragment, exact wording) is finance/
+    # superadmin only.
+    "payments:view_raw_evidence": frozenset({"finance", "superadmin"}),
     # Narrower than payments:approve on purpose: approving one payment
     # bounds the blast radius of a bad call to that one request, but
     # toggling which rail is live or editing where manual deposits get
