@@ -105,6 +105,14 @@ class Settings(BaseSettings):
     # tracer), just discarded rather than exported anywhere.
     otel_exporter_endpoint: str = ""
 
+    # Telebirr SMS-evidence deposits -- bearer token the MacroDroid device
+    # (services/payments/app.py's POST /internal/telebirr/ingest) must
+    # present. Empty means the route always rejects (no safe default that
+    # would let an unauthenticated caller inject fabricated payment
+    # evidence). Generate one with:
+    # python -c "import secrets; print(secrets.token_hex(32))"
+    macrodroid_ingest_token: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

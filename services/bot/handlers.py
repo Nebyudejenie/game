@@ -38,6 +38,15 @@ from services.payments import availability, deposits, manual, withdrawals
 from services.payments.chapa import ChapaProvider
 from services.payments.manual_provider import ManualProvider
 from services.payments.provider import PaymentProvider
+from services.payments.telebirr_ingest import (
+    SOURCE_TELEGRAM_AGENT,
+    STATUS_CONFLICTING_DUPLICATE,
+    STATUS_DUPLICATE,
+    STATUS_INGESTED_AVAILABLE,
+    STATUS_INGESTED_REJECTED,
+    STATUS_UNPARSEABLE,
+    ingest_sms_evidence,
+)
 
 router = Router(name="jobingo-bot")
 
@@ -632,6 +641,54 @@ async def on_photo(message: Message, pool: asyncpg.Pool, notifier: Notifier) -> 
         return
     await notifier.send(message.chat.id, t("manual_deposit.receipt_received", language))
 
+
+async def _is_active_payment_agent(message: Message, pool: asyncpg.Pool) -> bool:
+    if message.from_user is None:
+        return False
+    row = await pool.fetchval(
+        "SELECT 1 FROM payment_agents WHERE telegram_user_id = $1 AND is_active", message.from_user.id
+    )
+    return row is not None
+
+
+@router.message(F.text, _is_active_payment_agent)
+async def on_agent_sms(message: Message, pool: asyncpg.Pool, notifier: Notifier) -> None:
+    """Telegram payment-agent SMS-forwarding channel (CTO directive
+    section 115) -- a thin adapter: the filter above authenticates the
+    sender against payment_agents (empty today -- ships with zero
+    authorized agents), then this just hands the raw text to the one real
+    ingestion pipeline (telebirr_ingest.ingest_sms_evidence) and reports
+    back the parse outcome only. No financial/parsing logic lives here --
+    MacroDroid's HTTP route (services/payments/app.py) enforces the exact
+    same rules through the exact same function, never a second copy.
+
+    Registered as a (F.text, filter) pair rather than a bare F.text so
+    aiogram's own routing falls through to on_menu_text below for every
+    non-agent sender, instead of this handler swallowing ordinary
+    players' menu-button presses.
+    """
+    assert message.from_user is not None
+    language = await _language_for(pool, message.from_user.id)
+    raw_sms = (message.text or "").strip()
+
+    outcome = await ingest_sms_evidence(
+        pool, raw_sms=raw_sms, source=SOURCE_TELEGRAM_AGENT, source_ref=str(message.from_user.id)
+    )
+    reference = outcome.external_reference or ""
+    reason = outcome.reason or ""
+
+    if outcome.status == STATUS_UNPARSEABLE:
+        await notifier.send(message.chat.id, t("agent.ingest_unparseable", language, reason=reason))
+    elif outcome.status == STATUS_INGESTED_AVAILABLE:
+        await notifier.send(message.chat.id, t("agent.ingest_available", language, reference=reference))
+    elif outcome.status == STATUS_INGESTED_REJECTED:
+        await notifier.send(
+            message.chat.id, t("agent.ingest_rejected", language, reference=reference, reason=reason)
+        )
+    elif outcome.status == STATUS_DUPLICATE:
+        await notifier.send(message.chat.id, t("agent.ingest_duplicate", language, reference=reference))
+    elif outcome.status == STATUS_CONFLICTING_DUPLICATE:
+        await notifier.send(message.chat.id, t("agent.ingest_conflicting", language, reference=reference))
 
 
 @router.message(F.text)

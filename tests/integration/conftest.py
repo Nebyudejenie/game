@@ -38,6 +38,11 @@ os.environ.setdefault("PAYMENTS_PUBLIC_BASE_URL", "https://payments.test")
 os.environ.setdefault(
     "PHONE_ENCRYPTION_KEY", "e3ac1d8cf1864fbd35540bf4a462be1bf0a7beec9c59cf28c50e4166f760c197"
 )
+# The payments app under test builds its /internal/telebirr/ingest bearer
+# check from settings.macrodroid_ingest_token at request time -- a fixed,
+# obviously-not-production value so a test can sign requests with the
+# exact secret the running payments_server instance was configured with.
+os.environ.setdefault("MACRODROID_INGEST_TOKEN", "test-macrodroid-token-for-suite")
 
 from packages.core import ledger
 from packages.core.config import get_settings

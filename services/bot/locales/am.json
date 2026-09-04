@@ -89,5 +89,11 @@
   "wallet.insufficient": "በቂ ቀሪ ሂሳብ የለዎትም። እባክዎ ያስገቡ።",
 
   "manual_deposit.receipt_received": "ደረሰኝ ደርሷል እና ከቆየው ገቢዎ ጋር ተያይዟል።",
-  "manual_deposit.no_pending_request": "ደረሰኝ የሚያያዝበት ቀሪ በእጅ ገቢ የለዎትም።"
+  "manual_deposit.no_pending_request": "ደረሰኝ የሚያያዝበት ቀሪ በእጅ ገቢ የለዎትም።",
+
+  "agent.ingest_available": "ተመዝግቧል። ማጣቀሻ {reference} ለመመንዘር ዝግጁ ነው።",
+  "agent.ingest_rejected": "ማጣቀሻ {reference} ተመዝግቧል ነገር ግን ውድቅ ሆኗል ({reason})።",
+  "agent.ingest_duplicate": "ማጣቀሻ {reference} አስቀድሞ ተመዝግቧል — ምንም ለውጥ የለም።",
+  "agent.ingest_conflicting": "ማጣቀሻ {reference} በተለያዩ ዝርዝሮች አስቀድሞ ተመዝግቧል — ለግምገማ ተልኳል።",
+  "agent.ingest_unparseable": "ከዚያ መልእክት የክፍያ ማጣቀሻ ማንበብ አልተቻለም ({reason})።"
 }

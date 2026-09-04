@@ -8,11 +8,14 @@ a real route.
 
 from __future__ import annotations
 
+import hmac
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Annotated
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from pydantic import BaseModel
 
 from packages.core import metrics
 from packages.core.config import get_settings
@@ -22,6 +25,7 @@ from packages.core.tracing import configure_tracing
 from services.payments import deposits
 from services.payments.chapa import ChapaProvider
 from services.payments.provider import InvalidSignature
+from services.payments.telebirr_ingest import SOURCE_MACRODROID, ingest_sms_evidence
 from services.payments.withdrawals import PAYOUT_STREAM
 
 
@@ -56,6 +60,47 @@ async def chapa_webhook(request: Request) -> Response:
         # doesn't get to learn which part of their forgery was wrong.
         return Response(status_code=401)
     return Response(status_code=200, content=outcome)
+
+
+class TelebirrIngestRequest(BaseModel):
+    raw_sms: str
+    device_id: str
+
+
+def _check_macrodroid_token(authorization: str) -> None:
+    """A thin, single-purpose bearer check -- MacroDroid is a thin adapter
+    (section 114) with no financial logic of its own, so its only job here
+    is proving it's really our configured device before the real pipeline
+    (ingest_sms_evidence) ever sees the payload. hmac.compare_digest avoids
+    a timing side-channel on the comparison, same discipline packages/core/
+    telegram_auth.py already uses for the Telegram HMAC check.
+    """
+    settings = get_settings()
+    if not settings.macrodroid_ingest_token:
+        raise HTTPException(status_code=503, detail="telebirr ingestion is not configured")
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    token = authorization[len("Bearer ") :]
+    if not hmac.compare_digest(token, settings.macrodroid_ingest_token):
+        raise HTTPException(status_code=401, detail="invalid bearer token")
+
+
+@app.post("/internal/telebirr/ingest")
+async def telebirr_ingest(
+    body: TelebirrIngestRequest, authorization: Annotated[str, Header()] = ""
+) -> dict[str, str | int | None]:
+    _check_macrodroid_token(authorization)
+    if not body.raw_sms.strip():
+        raise HTTPException(status_code=422, detail="raw_sms_required")
+    outcome = await ingest_sms_evidence(
+        app.state.pool, raw_sms=body.raw_sms, source=SOURCE_MACRODROID, source_ref=body.device_id
+    )
+    return {
+        "status": outcome.status,
+        "evidence_id": outcome.evidence_id,
+        "external_reference": outcome.external_reference,
+        "reason": outcome.reason,
+    }
 
 
 @app.get("/healthz")

@@ -1378,3 +1378,66 @@ async def test_withdraw_uses_the_manual_rail_when_chapa_is_unavailable(pool, con
         assert payment["amount"] == Decimal("100.00")
     finally:
         await _set_chapa_availability(pool, direction="out", enabled=True)
+
+
+# --- Telegram payment-agent SMS-forwarding channel (services/bot/
+# handlers.py's on_agent_sms) ------------------------------------------
+
+
+def _agent_sms(reference: str) -> str:
+    # The real Telebirr "money received" template (see services/payments/
+    # telebirr_parser.py) -- a dedicated, per-test recipient name so this
+    # never accidentally matches a manual_payment_destinations row another
+    # test happened to configure.
+    return (
+        f"Dear NoOneConfigured{reference} \n"
+        f"You have received ETB 10.00 from DAWIT WERKALEMAHU(2519****6294)  on 04/09/2026 10:27:23. "
+        f"Your transaction number is {reference}. Your current E-Money Account balance is ETB 252.12.\n"
+        "Thank you for using telebirr\n"
+        "Ethio telecom"
+    )
+
+
+async def test_authorized_agent_sms_is_ingested_and_replied_to(pool, bot_ctx):
+    dp, bot, session = bot_ctx
+    agent_telegram_id = next_telegram_id()
+    await pool.execute(
+        "INSERT INTO payment_agents (telegram_user_id, display_name, is_active) VALUES ($1, $2, true)",
+        agent_telegram_id,
+        "Test Agent",
+    )
+    reference = f"DI{agent_telegram_id % 10**8:08d}"
+
+    await dp.feed_update(bot, make_text_update(agent_telegram_id, _agent_sms(reference)))
+    await _settle()
+
+    assert len(session.sent) == 1
+    assert reference in session.sent[0].text
+
+    row = await pool.fetchrow(
+        "SELECT status FROM payment_evidence WHERE external_reference = $1", reference
+    )
+    assert row is not None
+    assert row["status"] == "rejected"  # no matching recipient configured -- still ingested and replied to
+
+
+async def test_unauthorized_sender_sms_text_is_never_ingested(pool, bot_ctx):
+    # Not in payment_agents at all -- the filter must fall through to
+    # on_menu_text instead of treating this as a payment submission. An
+    # unregistered sender's non-menu text triggers on_menu_text's own
+    # "please register" reply, proving propagation genuinely reached it
+    # rather than silently vanishing.
+    dp, bot, session = bot_ctx
+    stranger_telegram_id = next_telegram_id()
+    reference = f"DI{stranger_telegram_id % 10**8:08d}"
+
+    await dp.feed_update(bot, make_text_update(stranger_telegram_id, _agent_sms(reference)))
+    await _settle()
+
+    assert len(session.sent) == 1
+    assert "Share Phone Number" in session.sent[0].text or "ስልክ ቁጥር አጋራ" in session.sent[0].text
+
+    row = await pool.fetchrow(
+        "SELECT id FROM payment_evidence WHERE external_reference = $1", reference
+    )
+    assert row is None

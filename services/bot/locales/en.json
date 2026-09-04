@@ -89,5 +89,11 @@
   "wallet.insufficient": "Insufficient balance. Please deposit.",
 
   "manual_deposit.receipt_received": "Receipt received and attached to your pending deposit.",
-  "manual_deposit.no_pending_request": "You don't have a pending manual deposit to attach a receipt to."
+  "manual_deposit.no_pending_request": "You don't have a pending manual deposit to attach a receipt to.",
+
+  "agent.ingest_available": "Recorded. Reference {reference} is ready to be redeemed.",
+  "agent.ingest_rejected": "Reference {reference} was recorded but rejected ({reason}).",
+  "agent.ingest_duplicate": "Reference {reference} was already recorded -- no change.",
+  "agent.ingest_conflicting": "Reference {reference} already exists with different details -- flagged for review.",
+  "agent.ingest_unparseable": "Could not read a payment reference from that message ({reason})."
 }
