@@ -508,6 +508,41 @@ subscribe((state) => {
 // conversion). { cardNo, instance, btn, claimed }.
 let gameCards = [];
 
+// Mirrors packages/core/bingo.py's own letter_for() range split -- kept
+// this simple rather than importing/duplicating a shared table, since
+// it's a fixed, permanent rule (spec: B 1-15, I 16-30, N 31-45, G 46-60,
+// O 61-75) with nowhere else in this file that already needs it.
+function letterForNumber(n) {
+  return ["B", "I", "N", "G", "O"][Math.floor((n - 1) / 15)];
+}
+
+// A real gap: the big current-ball circle and its trailing recent-calls
+// only ever got set by a live "call" WS event, never restored from
+// state_sync -- so a player who reconnects, or joins a room mid-round as
+// a spectator, saw a permanently blank circle until the *next* number
+// happened to be called, even though the board and call count both
+// already correctly showed the round was well underway. sync.called is
+// already in call order, so its own tail is exactly "the current ball,
+// then the trail behind it" -- the same information a live call event
+// carries, just read from the reconnect snapshot instead of the wire.
+// Shared by enterGame() and enterSpectate(), the two screens that can
+// each be reached either by watching a live transition (called === [],
+// correctly leaves the badge blank until the first real call) or by
+// joining/reconnecting mid-round (called already has entries).
+function restoreCallBadge(called) {
+  if (called.length > 0) {
+    const current = called[called.length - 1];
+    const badge = el("call-badge");
+    badge.textContent = `${letterForNumber(current)}${current}`;
+    badge.dataset.letter = letterForNumber(current);
+    badge.classList.add("show");
+  }
+  el("recent-calls").innerHTML = "";
+  for (const n of called.slice(-4, -1)) {
+    pushRecentCall({ letter: letterForNumber(n), number: n });
+  }
+}
+
 function enterGame(sync) {
   showScreen("game");
   board.buildBoard(el("board"));
@@ -527,6 +562,7 @@ function enterGame(sync) {
   for (const gc of gameCards) gc.instance.markCalled(calledSet);
   updateStatStrip(sync);
   updateBingoButtons(calledSet);
+  restoreCallBadge(sync.called || []);
 
   const autoOn = sync.auto_mark !== false;
   setState({ autoMark: autoOn });
@@ -618,6 +654,15 @@ ws.on("call", (msg) => {
   for (const gc of gameCards) gc.instance.markCalled(calledSoFar);
 
   const badge = el("call-badge");
+  // The ball that was current until just now becomes the newest entry in
+  // the recent-calls trail -- matches the reference layout, where the
+  // small trailing balls are strictly *behind* the current one, never a
+  // duplicate of it (a real mismatch this used to have: pushRecentCall()
+  // was called with this same new call, showing it in both places at
+  // once).
+  if (badge.textContent) {
+    pushRecentCall({ letter: badge.dataset.letter, number: badge.textContent.slice(1) });
+  }
   badge.textContent = `${msg.letter}${msg.number}`;
   badge.dataset.letter = msg.letter;
   badge.classList.remove("show");
@@ -626,7 +671,6 @@ ws.on("call", (msg) => {
   haptics.mediumTap();
   voiceCaller.announce(msg.letter, msg.number, msg.index);
 
-  pushRecentCall(msg);
   el("stat-call").textContent = `${msg.index}/75`;
   updateBingoButtons(calledSoFar);
 });
@@ -772,6 +816,7 @@ function enterSpectate(sync) {
   board.buildBoard(el("board"));
   board.markAllCalled(sync.called || []);
   updateStatStrip(sync);
+  restoreCallBadge(sync.called || []);
 }
 
 el("reserve-card-btn").addEventListener("click", () => {
@@ -832,32 +877,45 @@ ws.on("round_end", (msg) => {
   }
 
   showScreen("result");
+  el("result-confetti").innerHTML = "";
+  const pill = el("result-winner-pill");
+  pill.classList.add("hidden");
   const shown = myWins[0] || (msg.winners || [])[0] || null;
   if (myWins.length > 0) {
     const totalAmount = myWins.reduce((sum, w) => sum + parseFloat(w.amount), 0);
     el("result-title").textContent = t("result.win_title");
     el("result-title").classList.add("win");
+    pill.textContent = (state.user && state.user.name) || t("result.you");
+    pill.classList.remove("hidden");
     el("result-amount").textContent = `+ ${totalAmount.toFixed(2)} ETB`;
+    el("result-amount").classList.add("win");
     el("result-meta").textContent = myWins
       .map((w) => t("result.card_row", { card: w.card_no, pattern: w.pattern }))
       .join(" · ");
+    spawnConfetti();
     haptics.success();
   } else if (shown) {
     // A winner identifier, not just a bare amount -- every other player
     // in the room previously only ever saw "someone won this much,"
     // with no sense of who. display_name is the same public identity
     // this codebase already shows a player to everyone else (admin
-    // console, bot messages), not new exposure.
-    el("result-title").textContent = shown.display_name
-      ? t("result.other_winner", { name: shown.display_name })
-      : "";
+    // console, bot messages), not new exposure. Pulled out of the title
+    // into its own pill so both "you won" and "they won" share the same
+    // celebratory heading + identity-badge layout.
+    el("result-title").textContent = t("result.round_winner_title");
     el("result-title").classList.remove("win");
+    if (shown.display_name) {
+      pill.textContent = t("result.other_winner", { name: shown.display_name });
+      pill.classList.remove("hidden");
+    }
     el("result-amount").textContent = `${shown.amount} ETB`;
+    el("result-amount").classList.remove("win");
     el("result-meta").textContent = t("result.card_row", { card: shown.card_no, pattern: shown.pattern });
   } else {
     el("result-title").textContent = "";
     el("result-title").classList.remove("win");
     el("result-amount").textContent = t("result.no_winner");
+    el("result-amount").classList.remove("win");
     el("result-meta").textContent = "";
   }
 
@@ -873,6 +931,7 @@ ws.on("round_end", (msg) => {
     el("result-card-panel").classList.add("hidden");
   }
   renderSessionTotal();
+  startAutoContinue();
 });
 
 // Reality check (spec section 12): "net position this session, shown
@@ -888,10 +947,80 @@ function renderSessionTotal() {
   else if (total < 0) node.classList.add("negative");
 }
 
-el("play-next-btn").addEventListener("click", () => {
+// Purely decorative -- a handful of falling rectangles in the B/I/N/G/O
+// column colors, cleared and rebuilt fresh at the top of every round_end
+// (see above) so a loss right after a win never inherits stale pieces.
+function spawnConfetti() {
+  const container = el("result-confetti");
+  const colors = ["var(--col-b)", "var(--col-i)", "var(--col-n)", "var(--col-g)", "var(--col-o)"];
+  for (let i = 0; i < 28; i++) {
+    const piece = document.createElement("i");
+    piece.style.left = `${Math.random() * 100}%`;
+    piece.style.background = colors[i % colors.length];
+    piece.style.animationDuration = `${1.4 + Math.random() * 1.1}s`;
+    piece.style.animationDelay = `${Math.random() * 0.35}s`;
+    container.appendChild(piece);
+  }
+}
+
+// Auto-return to the lobby a fixed number of seconds after any round
+// result (win, someone-else-won, or no-winner) -- today nothing ever
+// moves a player off this screen except their own tap, which is exactly
+// the kind of "player can get stuck" gap the round-lifecycle hardening
+// pass was about. This is purely a local UI timer with no claim about
+// real server timing: it just performs the same real re-sync a manual
+// tap does (goToNextRound() -> enterRoom() -> ws.joinRoom()), landing
+// wherever the server's round genuinely is by the time it fires.
+const AUTO_CONTINUE_SECONDS = 10;
+let autoContinueInterval = null;
+
+function stopAutoContinue() {
+  if (autoContinueInterval) {
+    clearInterval(autoContinueInterval);
+    autoContinueInterval = null;
+  }
+  el("result-autocontinue").classList.add("hidden");
+}
+
+function startAutoContinue() {
+  stopAutoContinue();
+  const bar = el("result-autocontinue");
+  const fill = el("result-autocontinue-fill");
+  const label = el("result-autocontinue-label");
+  bar.classList.remove("hidden");
+  // Restart the CSS animation from a clean state each time this screen
+  // shows -- reusing the same element without this reset would just keep
+  // whatever scale the previous round's animation ended on.
+  fill.style.animation = "none";
+  void fill.offsetWidth;
+  fill.style.animation = `result-autocontinue-shrink ${AUTO_CONTINUE_SECONDS}s linear forwards`;
+
+  let secondsLeft = AUTO_CONTINUE_SECONDS;
+  label.textContent = t("result.autocontinue", { seconds: secondsLeft });
+  autoContinueInterval = setInterval(() => {
+    if (getState().screen !== "result") {
+      stopAutoContinue();
+      return;
+    }
+    secondsLeft -= 1;
+    if (secondsLeft <= 0) {
+      stopAutoContinue();
+      goToNextRound();
+      return;
+    }
+    label.textContent = t("result.autocontinue", { seconds: secondsLeft });
+  }, 1000);
+}
+
+function goToNextRound() {
   const state = getState();
   if (state.currentRoomId !== null) enterRoom(state.currentRoomId);
   else showScreen("rooms");
+}
+
+el("play-next-btn").addEventListener("click", () => {
+  stopAutoContinue();
+  goToNextRound();
 });
 
 // --- provably-fair verification ------------------------------------------
@@ -906,6 +1035,10 @@ el("verify-draw-btn").addEventListener("click", async () => {
   const panel = el("fairness-panel");
   if (!result || result.round_id == null) return;
 
+  // A player actively reading the fairness reveal shouldn't get yanked
+  // back to the lobby out from under them by the same countdown that
+  // otherwise auto-advances an idle result screen.
+  stopAutoContinue();
   el("fairness-verified").textContent = "";
   el("fairness-hash").textContent = "";
   el("fairness-seed").textContent = "";

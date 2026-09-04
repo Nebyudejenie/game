@@ -414,8 +414,26 @@
   margin-bottom: 10px;
 }
 
-.board {
+/* A real bug, not a design choice: render/board.js's buildBoard() puts
+   the .board grid *inside* the plain #board div that index.html actually
+   makes the flex child of .game-body -- flex properties only ever affect
+   a direct child of a flex container, so .board's own flex: 1 below was
+   a complete no-op on the *grandchild* it was set on, and #board (the
+   real flex item, with no sizing rule of its own at all) just shrank to
+   its content's minimum size. The whole call board rendering at a
+   fraction of the width it should have -- exactly the "numbers are
+   shrunk" this was named against -- traces to this one missing rule.
+   min-width: 0 overrides a flex item's default min-width: auto, the
+   other half of the same bug family: without it, a grid child this wide
+   can refuse to shrink below its own content's natural size even with
+   flex: 1 correctly applied, fighting the sibling .call-panel for space
+   on a narrow phone screen. */
+#board {
   flex: 1;
+  min-width: 0;
+}
+
+.board {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
   gap: 3px;
@@ -589,8 +607,30 @@
   text-align: center;
 }
 
+/* The in-game card was rendering at the same large size as the winner
+   screen's celebratory card preview, leaving the call board/ball area
+   (the thing a player actually watches turn by turn) squeezed into the
+   top half of the screen. Shrunk to roughly half width here, scoped to
+   the live game screen only -- the lobby's own card preview and the
+   result screen's #result-card-panel both intentionally keep the full
+   .mini-card size (result-card-panel actually deserves to stay the big,
+   dominant element in its own screen). */
+#your-card-section .mini-card-header,
+#your-card-section .mini-card {
+  max-width: 54%;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+#your-card-section .card-cell {
+  font-size: var(--fs-xs);
+  border-radius: 4px;
+}
+
 .bingo-btn {
-  margin-top: 10px;
+  margin: 10px auto 0;
+  max-width: 54%;
+  display: block;
   background: var(--gold);
   color: #1a1200;
   font-family: var(--font-display);
@@ -627,6 +667,8 @@
 /* --- 2.5 Result --- */
 
 .result-screen {
+  position: relative;
+  overflow: hidden;
   text-align: center;
   padding-top: 40px;
 }
@@ -634,6 +676,35 @@
 .result-title {
   font-size: var(--fs-xl);
   margin-bottom: 4px;
+}
+
+/* The win title previously toggled this class with no rule ever
+   defined for it -- a genuine winner looked identical to "no winner."
+   Now it actually earns the bigger, gold, animated treatment the spec's
+   reference gives a real win. */
+.result-title.win {
+  font-family: var(--font-display);
+  font-size: var(--fs-display);
+  color: var(--gold);
+  text-shadow: 0 0 18px rgba(255, 196, 54, 0.5);
+  animation: result-pop 520ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Winner identity, pulled out of the title's own text into its own
+   pill -- matches the reference's rounded name badge instead of a plain
+   sentence, and gives "you won" the same visual identity treatment as
+   "someone else won" (renderResultScreen() in app.v6.js sets its text
+   and toggles .hidden). */
+.winner-pill {
+  display: inline-block;
+  margin: 4px 0 2px;
+  padding: 5px 16px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--gold);
+  color: var(--gold);
+  font-size: var(--fs-sm);
+  font-weight: 700;
 }
 
 .result-amount {
@@ -646,6 +717,53 @@
   margin: 16px 0;
 }
 
+.result-amount.win {
+  background: linear-gradient(160deg, rgba(255, 196, 54, 0.16), var(--surface) 65%);
+  box-shadow: 0 0 0 1px rgba(255, 196, 54, 0.4), 0 0 26px rgba(255, 196, 54, 0.22);
+  animation: result-glow 1.8s ease-in-out infinite;
+}
+
+@keyframes result-pop {
+  0% { transform: scale(0.6); opacity: 0; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes result-glow {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(255, 196, 54, 0.4), 0 0 18px rgba(255, 196, 54, 0.16); }
+  50% { box-shadow: 0 0 0 1px rgba(255, 196, 54, 0.65), 0 0 36px rgba(255, 196, 54, 0.36); }
+}
+
+/* One falling rectangle per .result-confetti > i (built in app.v6.js's
+   spawnConfetti(), win-only) -- absolutely positioned over the result
+   screen (.result-screen's own position: relative above contains it),
+   never intercepts taps since the panel itself is pointer-events: none. */
+.result-confetti {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.result-confetti i {
+  position: absolute;
+  top: -12px;
+  width: 7px;
+  height: 13px;
+  border-radius: 1px;
+  opacity: 0.9;
+  animation: confetti-fall linear forwards;
+}
+
+@keyframes confetti-fall {
+  to { transform: translateY(420px) rotate(600deg); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .result-title.win,
+  .result-amount.win { animation: none; }
+  .result-confetti { display: none; }
+}
+
 .result-meta {
   color: var(--muted);
   font-size: var(--fs-sm);
@@ -655,10 +773,13 @@
 /* The winning card itself, "displayed prominently inside a decorative
    result container" -- a gold gradient border frames the actual 5x5
    grid (render/card.js's renderStaticCard()), the winning-pattern cells
-   glowing via .card-cell.winning above. */
+   glowing via .card-cell.winning above. border-radius belongs on this
+   outer gradient layer too, not just the inner > div -- without it the
+   gold border rendered as sharp corners around a rounded inner card. */
 .result-card-panel {
   margin: -8px 0 16px;
   padding: 12px;
+  border-radius: var(--radius-lg);
   background: linear-gradient(160deg, var(--gold), var(--accent));
 }
 
@@ -697,6 +818,50 @@
 
 .result-session.negative {
   color: var(--danger);
+}
+
+/* Auto-continue affordance -- app.v6.js's startAutoContinue() runs a
+   fixed-duration local timer and, when it elapses, triggers the exact
+   same handler as tapping "Play next round" (a real ws.joinRoom(), which
+   lands wherever the server's round genuinely is). The bar is purely a
+   countdown to that tap, never a claim about real round/lobby timing --
+   nothing here is sent to or trusted from the server. */
+.result-autocontinue {
+  position: relative;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--surface);
+  overflow: hidden;
+  margin-top: 10px;
+}
+
+.result-autocontinue-fill {
+  position: absolute;
+  inset: 0;
+  transform-origin: left;
+  background: linear-gradient(90deg, var(--accent), var(--gold));
+  /* Duration is a fallback -- app.v6.js's startAutoContinue() always sets
+     this inline to match its own AUTO_CONTINUE_SECONDS, which wins as an
+     inline style regardless. */
+  animation: result-autocontinue-shrink 10s linear forwards;
+}
+
+@keyframes result-autocontinue-shrink {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
+}
+
+#result-autocontinue-label {
+  position: relative;
+  z-index: 1;
+  line-height: 26px;
+  font-size: var(--fs-xs);
+  color: var(--text);
+  font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .result-autocontinue-fill { animation: none; }
 }
 
 .fairness-panel {

@@ -948,7 +948,7 @@ async def test_result_screen_shows_the_winning_card_preview(gateway_server, brow
 
         free_cell = await page.query_selector("#result-card .card-cell.free")
         assert free_cell is not None
-        assert (await free_cell.text_content()) == "★"
+        assert (await free_cell.text_content()) == "F"
 
         # The room's default win_patterns (tests/integration/conftest.py's
         # create_room()) includes "corners" alongside row/col/diag -- a

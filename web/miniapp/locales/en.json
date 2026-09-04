@@ -38,7 +38,9 @@
   "spectate.reserve": "Reserve a card",
 
   "result.win_title": "You won!",
+  "result.round_winner_title": "We have a winner!",
   "result.other_winner": "{name} won!",
+  "result.you": "You",
   "result.card_row": "Card {card} — {pattern}",
   "result.won_on_call": "Won on call {index} of {total}",
   "result.session_line": "This session: {sign}{amount} ETB",
@@ -46,6 +48,7 @@
   "result.verify_draw": "Verify draw",
   "result.no_winner": "No winner — your stake was refunded",
   "result.session_total": "Net this session: {sign}{amount} ETB",
+  "result.autocontinue": "Next round in {seconds}s",
 
   "wallet.title": "Wallet",
   "wallet.tab_balance": "Balance",

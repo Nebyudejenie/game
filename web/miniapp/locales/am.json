@@ -38,7 +38,9 @@
   "spectate.reserve": "ካርድ ያዝ",
 
   "result.win_title": "ገበያ ደረሰ!",
+  "result.round_winner_title": "አሸናፊ ተገኝቷል!",
   "result.other_winner": "{name} አሸንፈዋል!",
+  "result.you": "እርስዎ",
   "result.card_row": "ካርድ {card} — {pattern}",
   "result.won_on_call": "በጥሪ {index} ከ{total} ላይ አሸነፉ",
   "result.session_line": "የዚህ ክፍለ ጊዜ: {sign}{amount} ብር",
@@ -46,6 +48,7 @@
   "result.verify_draw": "ጥሪውን ያረጋግጡ",
   "result.no_winner": "አሸናፊ የለም — ገንዘብዎ ተመልሷል",
   "result.session_total": "የዚህ ክፍለ ጊዜ ውጤት: {sign}{amount} ብር",
+  "result.autocontinue": "ቀጣይ ዙር በ{seconds}ሰ ይጀምራል",
 
   "wallet.title": "የገንዘብ ቦርሳ",
   "wallet.tab_balance": "ቀሪ ሂሳብ",

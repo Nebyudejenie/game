@@ -64,7 +64,7 @@ export function renderStaticCard(container, grid, calledNumbers, winningPattern)
       ]
         .filter(Boolean)
         .join(" ");
-      cell.textContent = isFree ? "★" : String(value);
+      cell.textContent = isFree ? "F" : String(value);
       body.appendChild(cell);
     }
   }
@@ -114,7 +114,7 @@ export function createCard(container) {
         const value = grid[r][c];
         const cell = cells[r][c];
         if (value === 0) {
-          cell.textContent = "★";
+          cell.textContent = "F";
           cell.className = "card-cell free marked";
         } else {
           cell.textContent = String(value);

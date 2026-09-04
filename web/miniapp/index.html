@@ -132,7 +132,9 @@
 
   <!-- 2.5 Result (SETTLING) -->
   <main id="screen-result" class="screen result-screen" data-screen="result">
+    <div id="result-confetti" class="result-confetti" aria-hidden="true"></div>
     <div id="result-title" class="result-title"></div>
+    <div id="result-winner-pill" class="winner-pill hidden"></div>
     <div id="result-amount" class="result-amount"></div>
     <div id="result-meta" class="result-meta"></div>
     <div id="result-card-panel" class="card-preview result-card-panel hidden">
@@ -142,6 +144,10 @@
     <div class="result-actions">
       <button id="play-next-btn" class="btn-primary btn-gold" data-i18n="result.play_next"></button>
       <button id="verify-draw-btn" class="btn-secondary" data-i18n="result.verify_draw"></button>
+    </div>
+    <div id="result-autocontinue" class="result-autocontinue hidden">
+      <div id="result-autocontinue-fill" class="result-autocontinue-fill"></div>
+      <span id="result-autocontinue-label"></span>
     </div>
     <div id="fairness-panel" class="fairness-panel hidden">
       <div class="fairness-row">
