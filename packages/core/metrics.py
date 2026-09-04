@@ -85,6 +85,12 @@ payment_reconciliation_mismatch_count = Gauge(
     "Deposits whose provider status/amount disagreed with our own payments row on the last reconciliation pass",
 )
 
+telebirr_redemption_outcomes_total = Counter(
+    "telebirr_redemption_outcomes_total",
+    "Telebirr SMS-evidence redemption attempts by outcome",
+    ["outcome"],
+)
+
 # --- reconcile_job -----------------------------------------------------
 
 # A one-shot batch job (packages/core/reconcile_job.py), not a scraped

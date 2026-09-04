@@ -112,6 +112,17 @@ def _normalize_whitespace(raw: str) -> str:
     return "\n".join(re.sub(r"\s+", " ", line, flags=re.UNICODE).strip() for line in lines)
 
 
+def normalize_reference(raw: str) -> str:
+    """Uppercase + strip only (section 121) -- safe, reversible formatting
+    normalization, never a transformation that could turn one legitimate
+    reference into another. Shared by the parser (raw_reference ->
+    external_reference) and telebirr_redemption.py (a player-typed
+    reference must be normalized identically or a real match would be
+    missed on casing/whitespace alone).
+    """
+    return raw.strip().upper()
+
+
 def parse_telebirr_sms(raw: str) -> ParsedEvidence | ParseFailure:
     text = _normalize_whitespace(raw)
 
@@ -137,7 +148,7 @@ def parse_telebirr_sms(raw: str) -> ParsedEvidence | ParseFailure:
     if reference_match is None:
         return ParseFailure("reference_not_found")
     raw_reference = reference_match.group(1)
-    external_reference = raw_reference.strip().upper()
+    external_reference = normalize_reference(raw_reference)
 
     greeting_match = _GREETING_RE.search(text)
     if greeting_match is None:

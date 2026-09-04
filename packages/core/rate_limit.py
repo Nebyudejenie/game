@@ -111,6 +111,13 @@ WS_MESSAGES = {"capacity": 30, "refill_per_second": 30.0}
 TAKE_CARD = {"capacity": 10, "refill_per_second": 10.0 / 60.0}
 CLAIM = {"capacity": 5, "refill_per_second": 5.0 / 60.0}
 DEPOSIT = {"capacity": 5, "refill_per_second": 5.0 / 3600.0}
+# CTO directive section 120: "at minimum protect ... reference
+# redemption." A 10-char alphanumeric reference isn't practically
+# brute-forceable regardless, but this still bounds how fast a script can
+# hammer the endpoint guessing/probing references. More generous than
+# DEPOSIT itself since a player legitimately retrying a mistyped
+# reference a few times is normal, not abuse.
+TELEBIRR_REDEEM = {"capacity": 10, "refill_per_second": 10.0 / 3600.0}
 # Not one of spec 9.2's own numbers (only "IP allowlist" and "TOTP
 # required" are specified for admin login) -- an engineering judgment
 # call closing a real gap a code review pass caught: services/admin
