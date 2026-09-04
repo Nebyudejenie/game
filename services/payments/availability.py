@@ -5,16 +5,17 @@ in payment_provider_availability, and (2) the provider is actually
 wired up with real, working code -- an enabled toggle alone can't make
 a nonexistent adapter callable.
 
-"chapa" and "manual" are the only two rails with a real implementation
-in this codebase today (services/payments/chapa.py,
-services/payments/manual.py/manual_provider.py) -- santimpay/arifpay
-have a legal, migrated provider value and an admin-facing toggle
-(payment_provider_availability seeds both as disabled) but no adapter
-class exists for either, so they're hardcoded unavailable here
-regardless of what the toggle says, until a real adapter is built. This
-is the P1 directive's own launch principle in code: "the product must
-be able to launch with ONE AUTOMATIC PROVIDER + MANUAL FALLBACK... do
-not block on SantimPay and ArifPay."
+"chapa", "manual", and "telebirr_sms" are the only rails with a real
+implementation in this codebase today (services/payments/chapa.py,
+services/payments/manual.py/manual_provider.py, services/payments/
+telebirr_redemption.py) -- santimpay/arifpay have a legal, migrated
+provider value and an admin-facing toggle (payment_provider_availability
+seeds both as disabled) but no adapter class exists for either, so
+they're hardcoded unavailable here regardless of what the toggle says,
+until a real adapter is built. This is the P1 directive's own launch
+principle in code: "the product must be able to launch with ONE
+AUTOMATIC PROVIDER + MANUAL FALLBACK... do not block on SantimPay and
+ArifPay."
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ import asyncpg
 
 from packages.core.config import Settings
 
-_IMPLEMENTED_PROVIDERS = frozenset({"chapa", "manual"})
+_IMPLEMENTED_PROVIDERS = frozenset({"chapa", "manual", "telebirr_sms"})
 
 
 async def get_payment_availability(pool: asyncpg.Pool, settings: Settings) -> dict[str, list[str]]:
@@ -57,7 +58,7 @@ async def get_payment_availability(pool: asyncpg.Pool, settings: Settings) -> di
         if provider == "chapa":
             reachable = chapa_deposit_configured if direction == "in" else chapa_configured
         else:
-            reachable = True  # manual
+            reachable = True  # manual, telebirr_sms -- neither needs external credentials
 
         if reachable:
             key = "deposit" if direction == "in" else "withdraw"

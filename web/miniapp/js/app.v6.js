@@ -1136,6 +1136,14 @@ async function applyPaymentAvailability() {
       el("deposit-manual-toggle-btn").classList.add("hidden");
     }
 
+    // Telebirr SMS-evidence deposits: a fully independent third option,
+    // additive to whatever the automatic/manual toggle above already
+    // decided -- ships disabled by default (payment_provider_availability
+    // seeds it off), so this is a no-op for every player until an admin
+    // turns it on.
+    const depositHasTelebirr = methods.deposit.includes("telebirr_sms");
+    el("deposit-telebirr-toggle-btn").classList.toggle("hidden", !depositHasTelebirr);
+
     const withdrawHasAutomatic = methods.withdraw.includes("chapa");
     const withdrawHasManual = methods.withdraw.includes("manual");
     const manualToggleRow = el("withdraw-manual-toggle-row");
@@ -1268,6 +1276,67 @@ el("deposit-automatic-toggle-btn").addEventListener("click", () => {
   el("deposit-automatic-toggle-btn").classList.add("hidden");
   el("deposit-automatic-section").classList.remove("hidden");
   el("deposit-manual-toggle-btn").classList.remove("hidden");
+});
+
+// Telebirr SMS-evidence deposits -- a third, independent option. Whichever
+// of the automatic/manual sections was actually showing when the player
+// tapped into Telebirr is exactly what "back" should return them to, so
+// this remembers it rather than assuming automatic is always the default.
+let depositSectionBeforeTelebirr = "deposit-automatic-section";
+
+el("deposit-telebirr-toggle-btn").addEventListener("click", () => {
+  depositSectionBeforeTelebirr = el("deposit-automatic-section").classList.contains("hidden")
+    ? "deposit-manual-section"
+    : "deposit-automatic-section";
+  el(depositSectionBeforeTelebirr).classList.add("hidden");
+  el("deposit-manual-toggle-btn").classList.add("hidden");
+  el("deposit-telebirr-toggle-btn").classList.add("hidden");
+  el("deposit-telebirr-section").classList.remove("hidden");
+});
+
+el("deposit-telebirr-back-btn").addEventListener("click", () => {
+  el("deposit-telebirr-section").classList.add("hidden");
+  el(depositSectionBeforeTelebirr).classList.remove("hidden");
+  el("deposit-manual-toggle-btn").classList.remove("hidden");
+  el("deposit-telebirr-toggle-btn").classList.remove("hidden");
+});
+
+el("deposit-telebirr-submit-btn").addEventListener("click", async () => {
+  const reference = el("deposit-telebirr-reference-input").value.trim();
+  if (!reference) {
+    setWalletStatus("deposit-telebirr-status", "wallet.error.external_reference_required", "error");
+    return;
+  }
+  el("deposit-telebirr-submit-btn").disabled = true;
+  setWalletStatus("deposit-telebirr-status", "wallet.deposit_confirming", null);
+  try {
+    const response = await fetch("/api/wallet/deposits/telebirr/redeem", {
+      method: "POST",
+      headers: { ...authHeader(), "Content-Type": "application/json" },
+      body: JSON.stringify({ reference }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      setWalletStatus("deposit-telebirr-status", `wallet.error.${data.detail || "generic"}`, "error");
+      return;
+    }
+    // Section 130: never locally compute a new balance -- refresh the
+    // authoritative wallet state from the server's own response (the
+    // /api/me re-fetch just below), never data.amount added client-side.
+    setWalletStatus("deposit-telebirr-status", "wallet.deposit_confirmed", "success");
+    el("deposit-telebirr-reference-input").value = "";
+    const meResponse = await fetch("/api/me", { headers: authHeader() });
+    if (meResponse.ok) {
+      const me = await meResponse.json();
+      el("wallet-cash").textContent = `${me.cash} ETB`;
+      el("wallet-bonus").textContent = `${me.bonus} ETB`;
+      el("wallet-locked").textContent = `${me.locked} ETB`;
+    }
+  } catch {
+    setWalletStatus("deposit-telebirr-status", "wallet.error.generic", "error");
+  } finally {
+    el("deposit-telebirr-submit-btn").disabled = false;
+  }
 });
 
 // method_kind values a real admin can enter (services/admin/queries.py's

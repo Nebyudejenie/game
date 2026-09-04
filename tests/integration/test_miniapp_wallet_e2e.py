@@ -774,3 +774,74 @@ async def test_full_lifecycle_registration_through_withdrawal_using_the_manual_r
     finally:
         await engine.stop()
         await asyncio.wait_for(task, timeout=15)
+
+
+async def test_telebirr_reference_redemption_flow_credits_the_wallet(gateway_server, browser, pool, conn):
+    # Real end-to-end: an admin enables the rail and configures a
+    # recognized recipient, a real Telebirr SMS is ingested, and the
+    # player redeems it in the actual Mini App UI by typing only the
+    # reference -- no amount field exists in this pane at all.
+    from services.payments.telebirr_ingest import ingest_sms_evidence
+
+    admin_id, *_ = await create_test_admin(pool)
+    await admin_queries.set_payment_provider_availability_admin(
+        pool, admin_id=admin_id, provider="telebirr_sms", direction="in", enabled=True,
+        reason="e2e test", ip_address=None,
+    )
+    try:
+        unique_suffix = next_telegram_id()
+        recipient = f"E2eNebyu{unique_suffix}"
+        await conn.execute(
+            "INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name, is_active) "
+            "VALUES ('telebirr', '0911000000', $1, true)",
+            recipient,
+        )
+        reference = f"DI{unique_suffix % 10**8:08d}"
+        raw_sms = (
+            f"Dear {recipient} \n"
+            "You have received ETB 75.00 from DAWIT WERKALEMAHU(2519****6294)  on 04/09/2026 10:27:23. "
+            f"Your transaction number is {reference}. Your current E-Money Account balance is ETB 252.12.\n"
+            "Thank you for using telebirr\n"
+            "Ethio telecom"
+        )
+        outcome = await ingest_sms_evidence(pool, raw_sms=raw_sms, source="macrodroid", source_ref="e2e-device")
+        assert outcome.status == "ingested_available"
+
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+
+        await _open_wallet_tab(page, "deposit")
+        await page.wait_for_selector("#deposit-telebirr-toggle-btn:not(.hidden)", timeout=10000)
+        await page.click("#deposit-telebirr-toggle-btn")
+        await page.wait_for_selector("#deposit-telebirr-section:not(.hidden)", timeout=5000)
+
+        # No amount input exists in this pane at all -- confirm that
+        # structurally, not just by not filling one in.
+        assert await page.query_selector("#deposit-telebirr-section input[type='number']") is None
+
+        await page.fill("#deposit-telebirr-reference-input", reference)
+        await page.click("#deposit-telebirr-submit-btn")
+        await page.wait_for_selector("#deposit-telebirr-status.success", timeout=10000)
+
+        await page.wait_for_function(
+            "document.getElementById('wallet-cash').textContent.includes('75.00')", timeout=10000
+        )
+
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        row = await conn.fetchrow(
+            "SELECT status, redeemed_by_user_id FROM payment_evidence WHERE external_reference = $1", reference
+        )
+        assert row["status"] == "redeemed"
+        assert row["redeemed_by_user_id"] == user_row["id"]
+
+        assert console_errors == [], f"JS errors during the telebirr redemption flow: {console_errors}"
+        await page.screenshot(path="/tmp/miniapp-telebirr-redemption.png")
+        await page.close()
+    finally:
+        await admin_queries.set_payment_provider_availability_admin(
+            pool, admin_id=admin_id, provider="telebirr_sms", direction="in", enabled=False,
+            reason="test cleanup", ip_address=None,
+        )

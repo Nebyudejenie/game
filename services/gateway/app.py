@@ -34,6 +34,7 @@ from services.gateway.fanout import FanoutHub
 from services.payments import availability, deposits, manual, withdrawals
 from services.payments.chapa import ChapaProvider
 from services.payments.manual_provider import ManualProvider
+from services.payments.telebirr_redemption import redeem_evidence
 
 # Anchored to this file's location, not the process's cwd -- the gateway
 # must serve the Mini App correctly regardless of the directory it's
@@ -287,6 +288,60 @@ async def api_create_manual_deposit(
         raise HTTPException(status_code=422, detail=code) from exc
 
     return {"status": "review", "our_ref": intent.our_ref}
+
+
+class TelebirrRedeemRequest(BaseModel):
+    reference: str
+
+
+# Every non-success RedemptionOutcome.code (services/payments/
+# telebirr_redemption.py) maps to a lowercase detail string, same
+# uniform-422 convention _DEPOSIT_ERROR_CODES above already uses --
+# PAYMENT_REDEEMED is the only code handled outside this dict (a 200,
+# not an error).
+_TELEBIRR_REDEEM_ERROR_CODES: dict[str, str] = {
+    "INVALID_REFERENCE": "invalid_reference",
+    "PAYMENT_NOT_FOUND": "payment_not_found",
+    "PAYMENT_ALREADY_REDEEMED": "payment_already_redeemed",
+    "PAYMENT_BLOCKED": "payment_blocked",
+    "PAYMENT_DISPUTED": "payment_disputed",
+    "PAYMENT_EXPIRED": "payment_expired",
+    "RATE_LIMITED": "rate_limited",
+    "DAILY_CAP_EXCEEDED": "daily_cap_exceeded",
+    "SELF_EXCLUDED": "self_excluded",
+    "ACCOUNT_BANNED": "account_banned",
+    "COOLING_OFF_ACTIVE": "cooling_off",
+    "UNKNOWN_USER": "unknown_user",
+}
+
+
+@app.post("/api/wallet/deposits/telebirr/redeem")
+async def api_redeem_telebirr_reference(
+    body: TelebirrRedeemRequest, authorization: str = Header(default="")
+) -> dict[str, str]:
+    # No amount field on this request at all (CTO directive section 140):
+    # the player proves only that they know the reference, the amount
+    # always comes from the SMS evidence already on file.
+    user_id = await _authenticated_user_id(authorization)
+    settings = get_settings()
+
+    methods = await availability.get_payment_availability(app.state.pool, settings)
+    if "telebirr_sms" not in methods["deposit"]:
+        raise HTTPException(status_code=503, detail="deposits are not available yet")
+
+    outcome = await redeem_evidence(
+        app.state.pool,
+        app.state.redis,
+        user_id=user_id,
+        reference=body.reference,
+        daily_cap=settings.daily_deposit_cap_etb,
+    )
+    if outcome.code != "PAYMENT_REDEEMED":
+        detail = _TELEBIRR_REDEEM_ERROR_CODES.get(outcome.code, "provider_error")
+        raise HTTPException(status_code=422, detail=detail)
+
+    assert outcome.amount is not None and outcome.our_ref is not None
+    return {"status": "succeeded", "amount": str(outcome.amount), "our_ref": outcome.our_ref}
 
 
 class WithdrawRequest(BaseModel):

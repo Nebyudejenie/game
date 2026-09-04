@@ -212,6 +212,7 @@
         <p id="deposit-status" class="wallet-note"></p>
       </div>
       <button type="button" id="deposit-manual-toggle-btn" class="btn-secondary" data-i18n="wallet.manual_deposit_toggle"></button>
+      <button type="button" id="deposit-telebirr-toggle-btn" class="btn-secondary hidden" data-i18n="wallet.telebirr_deposit_toggle"></button>
 
       <div id="deposit-manual-section" class="hidden">
         <p class="wallet-note" data-i18n="wallet.manual_deposit_intro"></p>
@@ -221,6 +222,19 @@
         <button id="deposit-manual-submit-btn" class="btn-primary" data-i18n="wallet.manual_deposit_submit"></button>
         <p id="deposit-manual-status" class="wallet-note"></p>
         <button type="button" id="deposit-automatic-toggle-btn" class="btn-secondary hidden" data-i18n="wallet.deposit_automatic_toggle"></button>
+      </div>
+
+      <!-- Telebirr SMS-evidence deposit: the player enters ONLY the
+           transaction reference -- no amount field exists in this pane at
+           all, so a client-chosen amount can never even be submitted (CTO
+           directive section 140). The server determines the exact amount
+           from the SMS evidence already on file. -->
+      <div id="deposit-telebirr-section" class="hidden">
+        <p class="wallet-note" data-i18n="wallet.telebirr_deposit_intro"></p>
+        <input id="deposit-telebirr-reference-input" class="wallet-input" type="text" data-i18n-placeholder="wallet.manual_reference_placeholder" />
+        <button id="deposit-telebirr-submit-btn" class="btn-primary" data-i18n="wallet.telebirr_deposit_submit"></button>
+        <p id="deposit-telebirr-status" class="wallet-note"></p>
+        <button type="button" id="deposit-telebirr-back-btn" class="btn-secondary" data-i18n="wallet.telebirr_deposit_back"></button>
       </div>
     </div>
     <div id="wallet-pane-withdraw" class="wallet-pane hidden">
