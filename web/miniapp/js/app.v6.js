@@ -1661,6 +1661,27 @@ if (tg) {
 
 // --- boot -----------------------------------------------------------------
 
+// The splash's own entrance animation (index.html's inlined <style>) takes
+// ~900ms; on a fast connection boot() can otherwise reach a terminal state
+// well before that finishes, cutting the animation off mid-pop -- holding
+// the splash for this minimum feels deliberate instead of flashed-then
+// -yanked. Enforced as elapsed-time-since-start, not a flat extra delay, so
+// a slow connection (where boot() already took longer than this) never
+// waits any additional time it didn't already spend.
+const SPLASH_MIN_VISIBLE_MS = 1100;
+const splashShownAt = Date.now();
+
+function hideSplash() {
+  const splash = document.getElementById("splash-screen");
+  if (!splash || splash.dataset.hidden) return;
+  splash.dataset.hidden = "1";
+  const wait = Math.max(0, SPLASH_MIN_VISIBLE_MS - (Date.now() - splashShownAt));
+  setTimeout(() => {
+    splash.classList.add("splash-hidden");
+    setTimeout(() => splash.remove(), 550);
+  }, wait);
+}
+
 async function boot() {
   if (tg) {
     tg.ready();
@@ -1693,6 +1714,7 @@ async function boot() {
     `;
     document.body.appendChild(shell);
     makeKeyboardActivatable(shell, () => window.location.reload());
+    hideSplash();
     return;
   }
 
@@ -1706,6 +1728,7 @@ async function boot() {
     // connection-state subscriber above, independent of this promise --
     // nothing left to do here except stop, rather than hang forever
     // awaiting a user that ws.js now knows will never arrive.
+    hideSplash();
     return;
   }
   setState({ user });
@@ -1716,6 +1739,7 @@ async function boot() {
   document.getElementById("balance-amount").textContent = `${user.balance} ETB`;
   showScreen("rooms");
   refreshRoomList();
+  hideSplash();
 }
 
 subscribe((state) => {

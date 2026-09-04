@@ -10,8 +10,135 @@
   <link rel="stylesheet" href="css/base.css" />
   <link rel="stylesheet" href="css/screens.css" />
   <link rel="stylesheet" href="css/wallet.css" />
+  <!-- Inlined, not a linked stylesheet: this must paint on the very first
+       frame, with zero chance of a flash of an unstyled logo while
+       css/*.css is still in flight over a slow mobile connection --
+       the whole point of a splash screen is that it's what appears
+       BEFORE anything else can possibly be ready. -->
+  <style>
+    #splash-screen {
+      position: fixed;
+      inset: 0;
+      z-index: 5000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 28px;
+      background: radial-gradient(circle at 50% 42%, #4a1f7a 0%, #2a0f52 38%, #150726 72%, #0b0414 100%);
+      overflow: hidden;
+      transition: opacity 500ms ease, visibility 500ms ease;
+    }
+    #splash-screen.splash-hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+    /* Slow rotating light rays behind the logo, echoing the sunburst
+       already painted into the logo artwork itself. */
+    #splash-screen::before {
+      content: "";
+      position: absolute;
+      inset: -50%;
+      background: repeating-conic-gradient(from 0deg, rgba(255, 201, 74, 0.07) 0deg 8deg, transparent 8deg 20deg);
+      animation: splash-rotate 18s linear infinite;
+    }
+    @keyframes splash-rotate {
+      to { transform: rotate(360deg); }
+    }
+    .splash-logo-wrap {
+      position: relative;
+      width: clamp(160px, 46vw, 220px);
+      aspect-ratio: 1;
+      z-index: 1;
+      animation: splash-pop 900ms cubic-bezier(0.22, 0.9, 0.32, 1.3) both,
+                 splash-breathe 2600ms ease-in-out 900ms infinite;
+    }
+    .splash-logo-wrap img {
+      width: 100%;
+      height: 100%;
+      display: block;
+      /* The source artwork is a fully opaque square (no alpha channel) --
+         without this, its own flat background square shows as a visible
+         hard-edged seam against the splash's own animated gradient
+         behind it. Clipping to a circle also makes the drop-shadow glow
+         below hug a circular halo instead of a square one. */
+      clip-path: circle(50% at 50% 50%);
+      filter: drop-shadow(0 8px 28px rgba(0, 0, 0, 0.55));
+    }
+    @keyframes splash-pop {
+      0% { opacity: 0; transform: scale(0.55) rotate(-8deg); }
+      60% { opacity: 1; transform: scale(1.08) rotate(2deg); }
+      100% { opacity: 1; transform: scale(1) rotate(0deg); }
+    }
+    @keyframes splash-breathe {
+      0%, 100% { filter: drop-shadow(0 8px 28px rgba(0, 0, 0, 0.55)) drop-shadow(0 0 0 rgba(255, 201, 74, 0)); }
+      50% { filter: drop-shadow(0 8px 28px rgba(0, 0, 0, 0.55)) drop-shadow(0 0 34px rgba(255, 201, 74, 0.55)); }
+    }
+    .splash-sparkle {
+      position: absolute;
+      width: 6px;
+      height: 6px;
+      background: #ffe27a;
+      border-radius: 50%;
+      box-shadow: 0 0 8px 2px rgba(255, 226, 122, 0.9);
+      opacity: 0;
+      animation: splash-twinkle 2200ms ease-in-out infinite;
+    }
+    .splash-sparkle:nth-child(2) { top: 10%; left: 14%; animation-delay: 300ms; }
+    .splash-sparkle:nth-child(3) { top: 16%; right: 10%; animation-delay: 900ms; }
+    .splash-sparkle:nth-child(4) { bottom: 16%; left: 10%; animation-delay: 1400ms; }
+    .splash-sparkle:nth-child(5) { bottom: 24%; right: 12%; animation-delay: 600ms; }
+    @keyframes splash-twinkle {
+      0%, 100% { opacity: 0; transform: scale(0.4); }
+      50% { opacity: 1; transform: scale(1); }
+    }
+    .splash-loader {
+      display: flex;
+      gap: 10px;
+      z-index: 1;
+      opacity: 0;
+      animation: splash-fade-in 500ms ease 700ms forwards;
+    }
+    .splash-loader span {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: #ffc94a;
+      animation: splash-dot 1100ms ease-in-out infinite;
+    }
+    .splash-loader span:nth-child(2) { animation-delay: 150ms; }
+    .splash-loader span:nth-child(3) { animation-delay: 300ms; }
+    @keyframes splash-dot {
+      0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
+      40% { opacity: 1; transform: translateY(-6px); }
+    }
+    @keyframes splash-fade-in {
+      to { opacity: 1; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      #splash-screen::before,
+      .splash-logo-wrap,
+      .splash-sparkle,
+      .splash-loader span {
+        animation: none !important;
+      }
+      .splash-logo-wrap { opacity: 1; transform: none; }
+      .splash-loader { opacity: 1; }
+    }
+  </style>
 </head>
 <body>
+  <div id="splash-screen">
+    <div class="splash-logo-wrap">
+      <img src="assets/logo.png" alt="Arada Bingo" />
+      <span class="splash-sparkle"></span>
+      <span class="splash-sparkle"></span>
+      <span class="splash-sparkle"></span>
+      <span class="splash-sparkle"></span>
+    </div>
+    <div class="splash-loader"><span></span><span></span><span></span></div>
+  </div>
   <div id="connection-banner"></div>
   <div id="toast" class="toast"></div>
 
