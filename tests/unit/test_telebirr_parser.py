@@ -44,10 +44,15 @@ def test_real_sample_1_parses_every_field_correctly():
         external_reference="DI41FHSD4J",
         raw_reference="DI41FHSD4J",
         amount=Decimal("10.00"),
+        fee=None,
+        vat=None,
         payer_name="DAWIT WERKALEMAHU",
         payer_phone="2519****6294",
         recipient_name="Nebyu",
+        recipient_phone=None,
+        receipt_url=None,
         transaction_at=datetime(2026, 9, 4, 10, 27, 23, tzinfo=ADDIS),
+        direction="received",
     )
 
 
@@ -59,10 +64,15 @@ def test_real_sample_2_parses_a_differently_cased_payer_name():
         external_reference="DI40FIN2FW",
         raw_reference="DI40FIN2FW",
         amount=Decimal("100.00"),
+        fee=None,
+        vat=None,
         payer_name="Kertina Gizachew",
         payer_phone="2519****4271",
         recipient_name="Nebyu",
+        recipient_phone=None,
+        receipt_url=None,
         transaction_at=datetime(2026, 9, 4, 10, 51, 16, tzinfo=ADDIS),
+        direction="received",
     )
 
 
@@ -138,6 +148,146 @@ def test_different_recipient_greeting_name():
     result = parse_telebirr_sms(other_recipient)
     assert isinstance(result, ParsedEvidence)
     assert result.recipient_name == "Almaz"
+
+
+# --- the "transferred" template: real sample from the CTO directive -------
+# (2026-09-04) -- lands on the PAYER's own phone, not the recipient's, so
+# the greeting names the payer and the "to X (phone)" clause names the
+# recipient. This is the reverse of the "received" template above, and
+# getting the mapping right is safety-critical (section 13's "SMS
+# direction check"): if the greeting were ever mistakenly read as the
+# recipient here, a player forwarding their own outgoing payment to some
+# unrelated third party could slip past recipient validation.
+
+REAL_SAMPLE_TRANSFERRED = (
+    "Dear Nebyu You have transferred ETB 20.00 to SURAFEL DESALEGNE (2519****0917) "
+    "on 02/09/2026 07:32:00. Your transaction number is DI26D9N4AW. "
+    "The service fee is ETB 0.87 and 15% VAT on the service fee is ETB 0.13. "
+    "Your current E-Money Account balance is ETB 385.12. "
+    "To download your payment information please click this link: "
+    "https://transactioninfo.ethiotelecom.et/receipt/DI26D9N4AW. "
+    "Thank you for using telebirr Ethio telecom"
+)
+
+
+def test_real_transferred_sample_parses_every_field_correctly():
+    result = parse_telebirr_sms(REAL_SAMPLE_TRANSFERRED)
+    assert result == ParsedEvidence(
+        external_reference="DI26D9N4AW",
+        raw_reference="DI26D9N4AW",
+        amount=Decimal("20.00"),
+        fee=Decimal("0.87"),
+        vat=Decimal("0.13"),
+        payer_name="Nebyu",
+        payer_phone=None,
+        recipient_name="SURAFEL DESALEGNE",
+        recipient_phone="2519****0917",
+        receipt_url="https://transactioninfo.ethiotelecom.et/receipt/DI26D9N4AW",
+        transaction_at=datetime(2026, 9, 2, 7, 32, 0, tzinfo=ADDIS),
+        direction="transferred",
+    )
+
+
+def test_transferred_greeting_is_the_payer_never_the_recipient():
+    # The exact safety property section 13 asks for: the greeting names
+    # whoever's phone the SMS landed on (the payer, for this template),
+    # never the recipient -- recipient identity always comes from the
+    # "to X (phone)" clause instead.
+    result = parse_telebirr_sms(REAL_SAMPLE_TRANSFERRED)
+    assert isinstance(result, ParsedEvidence)
+    assert result.payer_name == "Nebyu"
+    assert result.recipient_name == "SURAFEL DESALEGNE"
+    assert result.recipient_name != result.payer_name
+
+
+def test_transferred_to_an_unrelated_third_party_still_parses_but_names_them():
+    # A player forwarding their own "transferred to someone else entirely"
+    # SMS must still parse cleanly (the parser's job is only extraction),
+    # but the extracted recipient is that unrelated person -- rejection is
+    # telebirr_ingest.py's _find_matching_recipient()'s job, proven in
+    # tests/integration/test_telebirr_ingest.py, not this module's.
+    unrelated = REAL_SAMPLE_TRANSFERRED.replace(
+        "SURAFEL DESALEGNE (2519****0917)", "RANDOM UNRELATED PERSON (2519****9999)"
+    )
+    result = parse_telebirr_sms(unrelated)
+    assert isinstance(result, ParsedEvidence)
+    assert result.recipient_name == "RANDOM UNRELATED PERSON"
+    assert result.recipient_phone == "2519****9999"
+
+
+def test_transferred_amount_is_not_confused_with_fee_vat_or_balance():
+    # Four separate ETB amounts appear in this one real message (20.00
+    # transferred, 0.87 fee, 0.13 VAT, 385.12 balance) -- each anchored
+    # regex must find its own, never accidentally cross-match another.
+    result = parse_telebirr_sms(REAL_SAMPLE_TRANSFERRED)
+    assert isinstance(result, ParsedEvidence)
+    assert result.amount == Decimal("20.00")
+    assert result.fee == Decimal("0.87")
+    assert result.vat == Decimal("0.13")
+
+
+def test_transferred_without_fee_or_vat_mentioned_leaves_them_none():
+    no_fee = REAL_SAMPLE_TRANSFERRED.replace(
+        "The service fee is ETB 0.87 and 15% VAT on the service fee is ETB 0.13. ", ""
+    )
+    result = parse_telebirr_sms(no_fee)
+    assert isinstance(result, ParsedEvidence)
+    assert result.fee is None
+    assert result.vat is None
+
+
+def test_transferred_without_a_receipt_url_leaves_it_none_not_a_failure():
+    no_url = REAL_SAMPLE_TRANSFERRED.replace(
+        "To download your payment information please click this link: "
+        "https://transactioninfo.ethiotelecom.et/receipt/DI26D9N4AW. ",
+        "",
+    )
+    result = parse_telebirr_sms(no_url)
+    assert isinstance(result, ParsedEvidence)
+    assert result.receipt_url is None
+
+
+def test_transferred_receipt_url_with_untrusted_domain_is_rejected():
+    # A receipt URL that IS present but points somewhere other than Ethio
+    # Telecom's own domain is a tamper signal, not something to silently
+    # accept or silently drop -- the whole message fails closed.
+    spoofed = REAL_SAMPLE_TRANSFERRED.replace("transactioninfo.ethiotelecom.et", "evil-phish.example")
+    result = parse_telebirr_sms(spoofed)
+    assert isinstance(result, ParseFailure)
+    assert result.reason == "receipt_url_untrusted_domain"
+
+
+def test_transferred_rejects_missing_recipient():
+    broken = REAL_SAMPLE_TRANSFERRED.replace("to SURAFEL DESALEGNE (2519****0917) ", "")
+    result = parse_telebirr_sms(broken)
+    assert isinstance(result, ParseFailure)
+    assert result.reason == "recipient_not_found"
+
+
+def test_transferred_rejects_missing_reference():
+    broken = REAL_SAMPLE_TRANSFERRED.replace(
+        "Your transaction number is DI26D9N4AW.", "Your transaction is complete."
+    )
+    result = parse_telebirr_sms(broken)
+    assert isinstance(result, ParseFailure)
+    assert result.reason == "reference_not_found"
+
+
+def test_a_message_with_neither_received_nor_transferred_is_rejected():
+    result = parse_telebirr_sms(
+        "Dear Nebyu your balance is ETB 100.00. Your transaction number is DI26D9N4AW."
+    )
+    assert isinstance(result, ParseFailure)
+    assert result.reason == "unrecognized_template"
+
+
+def test_a_message_claiming_both_received_and_transferred_is_rejected():
+    # Deliberately ambiguous/malformed input -- never guess which
+    # template applies when the anchor phrases for both are present.
+    both = REAL_SAMPLE_TRANSFERRED + " You have received ETB 5.00 from Someone(2519****0000) on 01/01/2026 00:00:00."
+    result = parse_telebirr_sms(both)
+    assert isinstance(result, ParseFailure)
+    assert result.reason == "unrecognized_template"
 
 
 # --- fail-closed: every required field, independently ----------------------

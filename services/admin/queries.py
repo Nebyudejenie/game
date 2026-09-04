@@ -948,7 +948,8 @@ async def list_payment_evidence(
 
     rows = await pool.fetch(
         f"""
-        SELECT id, source, external_reference, amount, payer_name, recipient_name,
+        SELECT id, source, external_reference, amount, fee, vat, direction,
+               payer_name, recipient_name, recipient_phone,
                transaction_at, received_at, status, reject_reason, redeemed_by_user_id,
                redeemed_at, payment_id, created_at
         FROM payment_evidence

@@ -19,6 +19,7 @@ applies here to evidence identity itself, not just to who redeems it.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -70,33 +71,64 @@ def _sha256_hex(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-async def _find_matching_recipient(
-    conn: AsyncpgConnection, *, recipient_name: str, at: datetime
-) -> bool:
-    """Fail-closed recipient check (section 92/94): matches the SMS
-    greeting name (e.g. "Nebyu" from "Dear Nebyu") case-insensitively and
-    exactly against manual_payment_destinations.account_name for any
-    active telebirr destination whose effective window covers the
-    transaction time. Exact match only, deliberately -- a fuzzy/contains
-    match would let an unrelated similarly-named greeting slip through,
-    which is exactly the false-acceptance risk section 94 forbids. An
-    admin configuring a telebirr destination for this feature should set
-    account_name to precisely what Telebirr's own "Dear {name}" greeting
-    says, not the account holder's full legal name.
+def _mask_ethiopian_phone(raw: str) -> str | None:
+    """Reduces an admin-entered phone (any of "0911000000",
+    "+251911000000", "251911000000", "911000000") to the exact masked
+    shape Telebirr's own SMS uses ("2519****0000"), so a configured
+    destination's plain account_ref can be compared against a "transferred"
+    template's recipient_phone (telebirr_parser.py) without asking an
+    admin to enter the masked form directly. Returns None for anything
+    that doesn't reduce to a plausible 9-digit Ethiopian mobile number --
+    fail-closed, never a guess at what the real number might be.
     """
-    row = await conn.fetchval(
+    digits = re.sub(r"\D", "", raw)
+    if digits.startswith("251") and len(digits) == 12:
+        local = digits[3:]
+    elif digits.startswith("0") and len(digits) == 10:
+        local = digits[1:]
+    elif len(digits) == 9:
+        local = digits
+    else:
+        return None
+    return f"251{local[0]}****{local[-4:]}"
+
+
+async def _find_matching_recipient(
+    conn: AsyncpgConnection, *, recipient_name: str, recipient_phone: str | None, at: datetime
+) -> bool:
+    """Fail-closed recipient check (sections 92/94/13). Name match is
+    always required, case-insensitively and exactly against manual_
+    payment_destinations.account_name -- a fuzzy/contains match would let
+    an unrelated similarly-named recipient slip through, which is exactly
+    the false-acceptance risk section 94 forbids. An admin configuring a
+    telebirr destination should set account_name to precisely what
+    Telebirr's own SMS calls the account holder (the "Dear {name}"
+    greeting for a "received" template, the "to {name}" recipient for a
+    "transferred" one -- both resolve to this same field).
+
+    When the parsed evidence also carries a recipient_phone (only the
+    "transferred" template ever does -- "received" never restates the
+    recipient's own number), that phone must ALSO match the configured
+    destination's account_ref (masked via _mask_ethiopian_phone above) --
+    a strictly stronger check than name alone, closing the gap where two
+    different real accounts might coincidentally share a display name.
+    """
+    rows = await conn.fetch(
         """
-        SELECT 1 FROM manual_payment_destinations
+        SELECT account_ref FROM manual_payment_destinations
         WHERE method_kind = 'telebirr' AND is_active
           AND lower(trim(account_name)) = lower(trim($1))
           AND (effective_from IS NULL OR effective_from <= $2)
           AND (effective_until IS NULL OR effective_until >= $2)
-        LIMIT 1
         """,
         recipient_name,
         at,
     )
-    return row is not None
+    if not rows:
+        return False
+    if recipient_phone is None:
+        return True
+    return any(_mask_ethiopian_phone(row["account_ref"]) == recipient_phone for row in rows)
 
 
 async def ingest_sms_evidence(
@@ -149,7 +181,10 @@ async def _ingest_sms_evidence_impl(
     async with pool.acquire() as conn:
         async with conn.transaction():
             recipient_ok = await _find_matching_recipient(
-                conn, recipient_name=parsed.recipient_name, at=parsed.transaction_at
+                conn,
+                recipient_name=parsed.recipient_name,
+                recipient_phone=parsed.recipient_phone,
+                at=parsed.transaction_at,
             )
             initial_status = "available" if recipient_ok else "rejected"
             reject_reason = None if recipient_ok else "recipient_not_recognized"
@@ -158,9 +193,9 @@ async def _ingest_sms_evidence_impl(
                 """
                 INSERT INTO payment_evidence
                     (source, source_ref, raw_sms, evidence_hash, external_reference, raw_reference,
-                     amount, payer_name, payer_phone, recipient_name, transaction_at, status,
-                     reject_reason, parser_version)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                     amount, fee, vat, payer_name, payer_phone, recipient_name, recipient_phone,
+                     receipt_url, direction, transaction_at, status, reject_reason, parser_version)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
                 ON CONFLICT (external_reference) DO NOTHING
                 RETURNING id
                 """,
@@ -171,9 +206,14 @@ async def _ingest_sms_evidence_impl(
                 parsed.external_reference,
                 parsed.raw_reference,
                 parsed.amount,
+                parsed.fee,
+                parsed.vat,
                 parsed.payer_name,
                 parsed.payer_phone,
                 parsed.recipient_name,
+                parsed.recipient_phone,
+                parsed.receipt_url,
+                parsed.direction,
                 parsed.transaction_at,
                 initial_status,
                 reject_reason,

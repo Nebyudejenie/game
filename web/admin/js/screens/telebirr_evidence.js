@@ -84,7 +84,7 @@ export async function render(container) {
       <table class="data-table">
         <thead>
           <tr>
-            <th>ID</th><th>Source</th><th>Reference</th><th>Amount</th><th>Payer</th>
+            <th>ID</th><th>Source</th><th>Dir.</th><th>Reference</th><th>Amount</th><th>Fee/VAT</th><th>Payer</th>
             <th>Recipient</th><th>Status</th><th>Received</th><th></th>
           </tr>
         </thead>
@@ -93,10 +93,12 @@ export async function render(container) {
             <tr data-evidence-id="${r.id}">
               <td>${r.id}</td>
               <td>${escapeHtml(r.source)}</td>
+              <td>${escapeHtml(r.direction || "—")}</td>
               <td>${escapeHtml(r.external_reference)}</td>
               <td>${r.amount === null ? "—" : `${r.amount} ETB`}</td>
+              <td>${r.fee === null ? "—" : `${r.fee} / ${r.vat ?? "—"}`}</td>
               <td>${escapeHtml(r.payer_name || "—")}</td>
-              <td>${escapeHtml(r.recipient_name || "—")}</td>
+              <td>${escapeHtml(r.recipient_name || "—")}${r.recipient_phone ? ` <span class="wallet-note">(${escapeHtml(r.recipient_phone)})</span>` : ""}</td>
               <td><span class="badge badge-${r.status}">${escapeHtml(r.status)}</span>${r.reject_reason ? ` <span class="wallet-note">(${escapeHtml(r.reject_reason)})</span>` : ""}</td>
               <td>${fmtDate(r.received_at)}</td>
               <td>

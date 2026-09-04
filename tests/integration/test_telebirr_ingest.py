@@ -30,6 +30,15 @@ def _next_reference() -> str:
     return f"DI{next(_ref_counter):08d}"
 
 
+def _unique_name_suffix() -> str:
+    # Letters only -- a real Ethiopian name never contains digits, and
+    # the "to X (phone)"/"from X (phone)" parser regex correctly doesn't
+    # allow them either. A per-test-unique *reference* differs; this is
+    # just enough entropy to keep test-local recipient names from
+    # colliding with each other.
+    return "".join(random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ") for _ in range(8))
+
+
 def _build_sms(
     reference: str,
     *,
@@ -51,12 +60,38 @@ def _build_sms(
 
 
 async def _add_recognized_recipient(conn, *, account_name: str = "Nebyu") -> None:
+    # '0911000000' masks (telebirr_ingest._mask_ethiopian_phone) to
+    # exactly '2519****0000' -- the fixed value the phone-matching tests
+    # below build their "transferred" SMS samples against.
     await conn.execute(
         """
         INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name, is_active)
         VALUES ('telebirr', '0911000000', $1, true)
         """,
         account_name,
+    )
+
+
+def _build_transferred_sms(
+    reference: str,
+    *,
+    amount: str = "20.00",
+    payer: str = "Nebyu",
+    recipient: str = "SURAFEL DESALEGNE",
+    recipient_phone: str = "2519****0000",
+) -> str:
+    # The real "transferred to" template (CTO directive 2026-09-04) --
+    # only the fields under test vary here. recipient_phone defaults to
+    # what '0911000000' (the fixed account_ref _add_recognized_recipient
+    # inserts) masks to, so the happy-path phone-matching tests need no
+    # extra setup.
+    return (
+        f"Dear {payer} You have transferred ETB {amount} to {recipient} ({recipient_phone}) "
+        "on 02/09/2026 07:32:00. "
+        f"Your transaction number is {reference}. "
+        "The service fee is ETB 0.87 and 15% VAT on the service fee is ETB 0.13. "
+        "Your current E-Money Account balance is ETB 385.12. "
+        "Thank you for using telebirr Ethio telecom"
     )
 
 
@@ -152,6 +187,81 @@ async def test_unparseable_message_persists_no_row(pool, conn):
 
     after = await conn.fetchval("SELECT count(*) FROM payment_evidence")
     assert after == before
+
+
+# --- the "transferred" template: recipient + phone cross-validation -------
+# (CTO directive sections 4/13/27 -- "SMS direction check" / "wrong
+# recipient test": a valid reference and amount are never sufficient on
+# their own, the money must also have gone TO the configured Arada Bingo
+# destination.)
+
+
+async def test_transferred_to_the_recognized_recipient_with_matching_phone_becomes_available(pool, conn):
+    recipient = f"Surafel {_unique_name_suffix()}"
+    await _add_recognized_recipient(conn, account_name=recipient)
+    reference = _next_reference()
+    sms = _build_transferred_sms(reference, recipient=recipient, recipient_phone="2519****0000")
+
+    outcome = await ingest_sms_evidence(pool, raw_sms=sms, source="macrodroid", source_ref="test-device")
+    assert outcome.status == STATUS_INGESTED_AVAILABLE
+
+    row = await conn.fetchrow(
+        "SELECT status, direction, fee, vat, recipient_phone FROM payment_evidence WHERE external_reference = $1",
+        reference,
+    )
+    assert row["status"] == "available"
+    assert row["direction"] == "transferred"
+    assert str(row["fee"]) == "0.87"
+    assert str(row["vat"]) == "0.13"
+    assert row["recipient_phone"] == "2519****0000"
+
+
+async def test_transferred_to_a_wrong_recipient_name_is_rejected_despite_valid_reference_and_amount(pool, conn):
+    # The exact CTO-directive test: reference exists, amount exists, but
+    # the money went to someone else entirely -- must never become
+    # AVAILABLE on reference+amount alone.
+    configured_recipient = f"RealRecipient {_unique_name_suffix()}"
+    await _add_recognized_recipient(conn, account_name=configured_recipient)
+    reference = _next_reference()
+    sms = _build_transferred_sms(
+        reference, recipient="SOME COMPLETELY UNRELATED PERSON", recipient_phone="2519****1234"
+    )
+
+    outcome = await ingest_sms_evidence(pool, raw_sms=sms, source="macrodroid", source_ref="test-device")
+    assert outcome.status == STATUS_INGESTED_REJECTED
+    assert outcome.reason == "recipient_not_recognized"
+
+    row = await conn.fetchrow(
+        "SELECT status FROM payment_evidence WHERE external_reference = $1", reference
+    )
+    assert row["status"] == "rejected"
+
+
+async def test_transferred_with_matching_name_but_wrong_phone_is_rejected(pool, conn):
+    # Name alone is not enough once the template also carries a phone --
+    # proves the phone cross-check in _find_matching_recipient() actually
+    # enforces, not just logs.
+    recipient = f"NameOnly {_unique_name_suffix()}"
+    await _add_recognized_recipient(conn, account_name=recipient)  # masks to 2519****0000
+    reference = _next_reference()
+    sms = _build_transferred_sms(reference, recipient=recipient, recipient_phone="2519****9999")
+
+    outcome = await ingest_sms_evidence(pool, raw_sms=sms, source="macrodroid", source_ref="test-device")
+    assert outcome.status == STATUS_INGESTED_REJECTED
+    assert outcome.reason == "recipient_not_recognized"
+
+
+async def test_received_template_recipient_check_is_unaffected_by_phone_matching(pool, conn):
+    # The "received" template never carries a recipient_phone at all --
+    # confirms the new phone cross-check doesn't regress the original,
+    # name-only-signal template.
+    recipient = f"ReceivedStillWorks{_next_reference()}"
+    await _add_recognized_recipient(conn, account_name=recipient)
+    reference = _next_reference()
+    sms = _build_sms(reference, recipient=recipient)
+
+    outcome = await ingest_sms_evidence(pool, raw_sms=sms, source="macrodroid", source_ref="test-device")
+    assert outcome.status == STATUS_INGESTED_AVAILABLE
 
 
 # --- real HTTP: the MacroDroid ingestion route -----------------------------
