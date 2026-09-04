@@ -577,13 +577,15 @@ function buildGameCards(yourCards) {
     const item = document.createElement("div");
     item.className = "your-card-item";
 
+    const cardEl = document.createElement("div");
+    item.appendChild(cardEl);
+
+    // Card number reads BELOW its own grid, not above -- matches the
+    // reference layout's own "Card #N" placement.
     const title = document.createElement("div");
     title.className = "your-card-title";
     title.textContent = t("game.your_card_no", { card: c.card_no });
     item.appendChild(title);
-
-    const cardEl = document.createElement("div");
-    item.appendChild(cardEl);
 
     const btn = document.createElement("button");
     btn.className = "btn-primary bingo-btn";

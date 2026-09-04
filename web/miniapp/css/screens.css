@@ -410,10 +410,22 @@
   flex: 0 0 auto;
 }
 
-.recent-calls {
+/* The recent-call trail and the current-call badge sit in ONE row,
+   ascending in visual weight left-to-right toward the current call --
+   matching the reference composition exactly, replacing an earlier
+   two-row stack (trail above, badge below) that read as two disconnected
+   groups instead of one "history leading to now" sequence. */
+.ball-row {
   flex: 0 0 auto;
   display: flex;
+  align-items: center;
   justify-content: center;
+  gap: clamp(5px, 1.8vw, 9px);
+}
+
+.recent-calls {
+  display: flex;
+  align-items: center;
   gap: clamp(4px, 1.5vw, 7px);
 }
 
@@ -724,18 +736,53 @@
 
 #your-card-section .mini-card {
   flex: 0 0 auto;
-  gap: clamp(2px, 1vw, 4px);
+  gap: clamp(3px, 1.2vw, 5px);
 }
 
 #your-card-section .mini-card-header {
   flex: 0 0 auto;
+  gap: clamp(3px, 1.2vw, 5px);
   font-size: clamp(10px, 2.8vw, 13px);
 }
 
+/* The reference's own card is a light, high-contrast panel distinct from
+   the dark call-board: filled color badges on the header instead of
+   plain colored letters, white cells with bold black digits at rest, and
+   one uniform green fill once marked (not the per-column fill the master
+   board/lobby preview use) -- an #id-scoped override so the shared
+   .mini-card/.card-cell rules above stay untouched for the lobby preview
+   and result screen. */
+#your-card-section .mini-card-header > div {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(3px, 1.2vw, 5px) 0;
+  border-radius: 5px;
+  color: #fff;
+}
+#your-card-section .mini-card-header > :nth-child(5n+1) { background: var(--col-b); }
+#your-card-section .mini-card-header > :nth-child(5n+2) { background: var(--col-i); }
+#your-card-section .mini-card-header > :nth-child(5n+3) { background: var(--col-n); color: #1a1200; }
+#your-card-section .mini-card-header > :nth-child(5n+4) { background: var(--col-g); color: #06210f; }
+#your-card-section .mini-card-header > :nth-child(5n)   { background: var(--col-o); }
+
 #your-card-section .card-cell {
+  background: #F3F5F9;
+  color: #10131A;
   font-size: clamp(14px, 4.6vw, 21px);
   font-weight: 800;
   border-radius: 6px;
+}
+
+#your-card-section .card-cell.marked {
+  background: var(--call);
+  color: #06210f;
+}
+
+#your-card-section .card-cell.marked.free,
+#your-card-section .card-cell.free {
+  background: var(--gold);
+  color: #1a1200;
 }
 
 .bingo-btn {
@@ -763,6 +810,13 @@
   background: var(--surface-2);
   color: var(--muted);
   box-shadow: none;
+}
+
+/* Decorative only -- the button's real accessible label stays the plain
+   i18n string (game.bingo); the emoji is added visually, not in markup
+   or translation data, so screen readers/aria-label are unaffected. */
+.bingo-btn:not(:disabled)::before {
+  content: "\1F389 ";
 }
 
 .bingo-btn.shake {
