@@ -34,6 +34,7 @@ from services.gateway.fanout import FanoutHub
 from services.payments import availability, deposits, manual, withdrawals
 from services.payments.chapa import ChapaProvider
 from services.payments.manual_provider import ManualProvider
+from services.payments.telebirr_parser import normalize_reference
 from services.payments.telebirr_redemption import redeem_evidence
 
 # Anchored to this file's location, not the process's cwd -- the gateway
@@ -318,10 +319,13 @@ _TELEBIRR_REDEEM_ERROR_CODES: dict[str, str] = {
 @app.post("/api/wallet/deposits/telebirr/redeem")
 async def api_redeem_telebirr_reference(
     body: TelebirrRedeemRequest, authorization: str = Header(default="")
-) -> dict[str, str]:
-    # No amount field on this request at all (CTO directive section 140):
-    # the player proves only that they know the reference, the amount
-    # always comes from the SMS evidence already on file.
+) -> dict[str, str | bool]:
+    # No amount field on this request model at all: the player proves
+    # only that they know the reference, the amount always comes from
+    # the SMS evidence already on file (redeem_evidence() itself never
+    # even takes an amount parameter -- there is no code path here that
+    # could honor a client-supplied one even if the request model had a
+    # field for it).
     user_id = await _authenticated_user_id(authorization)
     settings = get_settings()
 
@@ -341,7 +345,17 @@ async def api_redeem_telebirr_reference(
         raise HTTPException(status_code=422, detail=detail)
 
     assert outcome.amount is not None and outcome.our_ref is not None
-    return {"status": "succeeded", "amount": str(outcome.amount), "our_ref": outcome.our_ref}
+    # reference/amount/currency here are purely informational -- the
+    # normalized reference and the amount are both read back from the
+    # already-committed payment_evidence/payments rows, never from
+    # anything the client sent.
+    return {
+        "success": True,
+        "reference": normalize_reference(body.reference),
+        "amount": str(outcome.amount),
+        "currency": "ETB",
+        "our_ref": outcome.our_ref,
+    }
 
 
 class WithdrawRequest(BaseModel):

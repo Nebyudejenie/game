@@ -93,8 +93,10 @@ async def test_redeem_endpoint_credits_a_real_reference_over_real_http(pool, con
             )
         assert response.status_code == 200
         body = response.json()
-        assert body["status"] == "succeeded"
+        assert body["success"] is True
+        assert body["reference"] == reference
         assert body["amount"] == "35.00"
+        assert body["currency"] == "ETB"
 
         user_id = await pool.fetchval("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
         row = await pool.fetchrow(
