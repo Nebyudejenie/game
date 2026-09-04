@@ -55,6 +55,7 @@ from packages.core.notifications import notify_user
 from packages.core.redis_conn import get_redis
 from services.payments.chapa import ChapaProvider
 from services.payments.deposits import poll_pending_deposits, run_provider_reconciliation
+from services.payments.telebirr_reconcile import run_telebirr_reconciliation
 from services.payments.provider import PaymentProvider
 from services.payments.withdrawals import PAYOUT_STREAM, sweep_stuck_approved_payouts
 
@@ -431,18 +432,19 @@ async def _run_periodic_sweep(
 
 async def main_async() -> None:
     """Real production entrypoint: the payout stream consumer (this
-    module's own run_forever(), the primary job) alongside three other
+    module's own run_forever(), the primary job) alongside four other
     "safe to run on a timer" payments sweeps that need a periodic invoker
     somewhere -- deposits.py's poll_pending_deposits() (a webhook that
     never arrives), withdrawals.py's sweep_stuck_approved_payouts() (an
     enqueue that never landed, since that XADD runs after the DB commit,
-    not inside it), and deposits.py's run_provider_reconciliation() (spec's
+    not inside it), deposits.py's run_provider_reconciliation() (spec's
     own hourly Chapa-vs-our-records check, previously built and tested but
     never actually invoked from anywhere -- an architecture audit caught
-    this). All four share one process/provider rather than separate ones
-    since none of them individually justifies its own container, and all
-    are already designed to be safe under concurrent, independent
-    invocation.
+    this), and telebirr_reconcile.py's run_telebirr_reconciliation()
+    (the same hourly cadence, CTO directive sections 124-127). All five
+    share one process/provider rather than separate ones since none of
+    them individually justifies its own container, and all are already
+    designed to be safe under concurrent, independent invocation.
     """
     settings = get_settings()
     configure_logging(settings.log_level)
@@ -479,6 +481,13 @@ async def main_async() -> None:
                 "run_provider_reconciliation",
                 PROVIDER_RECONCILE_INTERVAL_SECONDS,
                 lambda: run_provider_reconciliation(pool, provider),
+            )
+        ),
+        asyncio.create_task(
+            _run_periodic_sweep(
+                "run_telebirr_reconciliation",
+                PROVIDER_RECONCILE_INTERVAL_SECONDS,
+                lambda: run_telebirr_reconciliation(pool),
             )
         ),
     ]

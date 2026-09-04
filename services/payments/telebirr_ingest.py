@@ -27,6 +27,7 @@ from typing import Literal
 import asyncpg
 import structlog
 
+from packages.core import metrics
 from packages.core.ledger import AsyncpgConnection
 from services.payments.telebirr_parser import PARSER_VERSION, ParseFailure, parse_telebirr_sms
 
@@ -105,6 +106,24 @@ async def ingest_sms_evidence(
     source: IngestSource,
     source_ref: str,
 ) -> IngestOutcome:
+    # A thin wrapper so the outcome metric is incremented exactly once
+    # regardless of which of _ingest_sms_evidence_impl's several return
+    # points fired, rather than needing a matching increment call kept in
+    # sync at each one individually.
+    outcome = await _ingest_sms_evidence_impl(
+        pool, raw_sms=raw_sms, source=source, source_ref=source_ref
+    )
+    metrics.telebirr_ingestion_total.labels(outcome=outcome.status).inc()
+    return outcome
+
+
+async def _ingest_sms_evidence_impl(
+    pool: asyncpg.Pool,
+    *,
+    raw_sms: str,
+    source: IngestSource,
+    source_ref: str,
+) -> IngestOutcome:
     parsed = parse_telebirr_sms(raw_sms)
     evidence_hash = _sha256_hex(raw_sms)
 
@@ -122,6 +141,7 @@ async def ingest_sms_evidence(
             reason=parsed.reason,
             evidence_hash=evidence_hash,
         )
+        metrics.telebirr_parser_failures_total.labels(reason=parsed.reason).inc()
         return IngestOutcome(
             status=STATUS_UNPARSEABLE, evidence_id=None, external_reference=None, reason=parsed.reason
         )

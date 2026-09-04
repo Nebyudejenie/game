@@ -91,6 +91,31 @@ telebirr_redemption_outcomes_total = Counter(
     ["outcome"],
 )
 
+telebirr_ingestion_total = Counter(
+    "telebirr_ingestion_total",
+    "Telebirr SMS ingestion attempts by outcome (ingested_available, ingested_rejected, "
+    "duplicate, conflicting_duplicate, unparseable)",
+    ["outcome"],
+)
+
+telebirr_parser_failures_total = Counter(
+    "telebirr_parser_failures_total",
+    "Telebirr SMS messages that failed to parse, by reason",
+    ["reason"],
+)
+
+telebirr_evidence_reconciliation_mismatch_count = Gauge(
+    "telebirr_evidence_reconciliation_mismatch_count",
+    "Telebirr payments rows whose linked payment_evidence count is not exactly 1 "
+    "on the last reconciliation pass",
+)
+
+telebirr_evidence_by_status = Gauge(
+    "telebirr_evidence_by_status",
+    "Current payment_evidence row count by status",
+    ["status"],
+)
+
 # --- reconcile_job -----------------------------------------------------
 
 # A one-shot batch job (packages/core/reconcile_job.py), not a scraped

@@ -75,3 +75,30 @@ groups:
           severity: warning
         annotations:
           summary: "A round was voided and refunded in the last 5 minutes"
+
+      # CTO directive section 107: "payment ingestion stopped, parser
+      # failure spike, ... reconciliation mismatch" for the Telebirr
+      # SMS-evidence rail. Deliberately NOT implementing "ingestion
+      # stopped" as a naive rate()==0 alert: that would page constantly
+      # in the feature's own shipped-disabled-by-default state, which is
+      # not an anomaly -- the same "don't fabricate an alert that doesn't
+      # evaluate meaningfully yet" restraint this file's own header
+      # already applies to unwired notification receivers. A real
+      # "stopped" alert needs a signal for "the feature is enabled and
+      # has established real volume" first; add it once that exists.
+      - alert: TelebirrEvidenceReconciliationMismatch
+        # services/payments/payout_worker.py runs telebirr_reconcile.py's
+        # run_telebirr_reconciliation() hourly, the same real periodic
+        # sweep run_provider_reconciliation() already runs on.
+        expr: telebirr_evidence_reconciliation_mismatch_count > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "A Telebirr payments row's linked evidence count is not exactly 1 -- possible no-source or double-credit"
+
+      - alert: TelebirrParserFailureSpike
+        expr: increase(telebirr_parser_failures_total[15m]) > 5
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 5 Telebirr SMS messages failed to parse in the last 15 minutes -- possible format change or spam"
