@@ -3,7 +3,7 @@ import { renderError, toast } from "../ui.js";
 
 export const label = "Rooms";
 
-const WIN_PATTERNS = ["row", "col", "diag", "corners"];
+const WIN_PATTERNS = ["row", "col", "diag"];
 
 export async function render(container) {
   container.innerHTML = `

@@ -117,9 +117,9 @@ async def test_two_simultaneous_claims_split_derash_evenly(pool, redis, card_poo
             # the exact same instant without needing to control the
             # (intentionally provably-fair-random) draw order itself.
             called = engine._called  # noqa: SLF001
-            return bool(
-                bingo.winning_patterns(grid_a, called, room.win_patterns)
-            ) and bool(bingo.winning_patterns(grid_b, called, room.win_patterns))
+            return bingo.has_won(grid_a, called, room.win_patterns) and bingo.has_won(
+                grid_b, called, room.win_patterns
+            )
 
         await wait_until(both_ready, timeout=10)
 
@@ -179,7 +179,7 @@ async def test_a_valid_claim_stops_the_round_immediately_no_further_calls(pool, 
         grid_a = card_pool[card_a]
 
         def ready() -> bool:
-            return bool(bingo.winning_patterns(grid_a, engine._called, room.win_patterns))  # noqa: SLF001
+            return bingo.has_won(grid_a, engine._called, room.win_patterns)  # noqa: SLF001
 
         await wait_until(ready, timeout=10)
 
@@ -247,11 +247,16 @@ async def test_two_simultaneous_auto_mark_winners_both_split_derash(pool, redis,
         card_a, card_b = 1, 2
         grid_a = card_pool[card_a]
         grid_b = card_pool[card_b]
-        winning_pattern = bingo.Pattern(name="row_0", kind="row", cells=((0, 0), (0, 1), (0, 2), (0, 3), (0, 4)))
+        # Two patterns, not one -- a real win now needs
+        # bingo.MIN_WINNING_LINES complete lines.
+        winning_patterns = [
+            bingo.Pattern(name="row_0", kind="row", cells=((0, 0), (0, 1), (0, 2), (0, 3), (0, 4))),
+            bingo.Pattern(name="col_0", kind="col", cells=((0, 0), (1, 0), (2, 0), (3, 0), (4, 0))),
+        ]
 
         def fake_winning_patterns(grid, called, enabled):
             if grid is grid_a or grid is grid_b:
-                return [winning_pattern]
+                return winning_patterns
             return []
 
         assert (await engine.join(user_a, card_a, auto_mark=True)).ok
@@ -314,11 +319,16 @@ async def test_settlement_publishes_winner_balance_updates_concurrently(
         card_a, card_b = 1, 2
         grid_a = card_pool[card_a]
         grid_b = card_pool[card_b]
-        winning_pattern = bingo.Pattern(name="row_0", kind="row", cells=((0, 0), (0, 1), (0, 2), (0, 3), (0, 4)))
+        # Two patterns, not one -- a real win now needs
+        # bingo.MIN_WINNING_LINES complete lines.
+        winning_patterns = [
+            bingo.Pattern(name="row_0", kind="row", cells=((0, 0), (0, 1), (0, 2), (0, 3), (0, 4))),
+            bingo.Pattern(name="col_0", kind="col", cells=((0, 0), (1, 0), (2, 0), (3, 0), (4, 0))),
+        ]
 
         def fake_winning_patterns(grid, called, enabled):
             if grid is grid_a or grid is grid_b:
-                return [winning_pattern]
+                return winning_patterns
             return []
 
         assert (await engine.join(user_a, card_a, auto_mark=True)).ok
@@ -391,10 +401,15 @@ async def test_an_unexpected_exception_during_auto_claim_does_not_crash_the_room
         user_b = await create_funded_user(conn)
         card_a, card_b = 1, 2
         grid_a = card_pool[card_a]
-        winning_pattern = bingo.Pattern(name="row_0", kind="row", cells=((0, 0), (0, 1), (0, 2), (0, 3), (0, 4)))
+        # Two patterns, not one -- a real win now needs
+        # bingo.MIN_WINNING_LINES complete lines.
+        winning_patterns = [
+            bingo.Pattern(name="row_0", kind="row", cells=((0, 0), (0, 1), (0, 2), (0, 3), (0, 4))),
+            bingo.Pattern(name="col_0", kind="col", cells=((0, 0), (1, 0), (2, 0), (3, 0), (4, 0))),
+        ]
 
         def fake_winning_patterns(grid, called, enabled):
-            return [winning_pattern] if grid is grid_a else []
+            return winning_patterns if grid is grid_a else []
 
         assert (await engine.join(user_a, card_a, auto_mark=True)).ok
         assert (await engine.join(user_b, card_b, auto_mark=True)).ok
@@ -468,7 +483,7 @@ async def test_same_user_double_claim_race_settles_exactly_once(pool, redis, car
         grid_a = card_pool[card_a]
 
         def a_ready() -> bool:
-            return bool(bingo.winning_patterns(grid_a, engine._called, room.win_patterns))  # noqa: SLF001
+            return bingo.has_won(grid_a, engine._called, room.win_patterns)  # noqa: SLF001
 
         await wait_until(a_ready, timeout=10)
 
@@ -533,9 +548,9 @@ async def test_same_user_two_different_winning_cards_both_paid(pool, redis, card
 
         def both_ready() -> bool:
             called = engine._called  # noqa: SLF001
-            return bool(
-                bingo.winning_patterns(grid_1, called, room.win_patterns)
-            ) and bool(bingo.winning_patterns(grid_2, called, room.win_patterns))
+            return bingo.has_won(grid_1, called, room.win_patterns) and bingo.has_won(
+                grid_2, called, room.win_patterns
+            )
 
         await wait_until(both_ready, timeout=10)
 
@@ -582,6 +597,78 @@ async def test_same_user_two_different_winning_cards_both_paid(pool, redis, card
         await asyncio.wait_for(task, timeout=10)
 
 
+async def test_claim_rejected_on_one_line_then_accepted_once_a_second_line_completes(
+    pool, redis, card_pool, conn
+):
+    """The actual product rule, proved end to end against a real engine and
+    a real draw (not a monkeypatched pattern check, unlike the tie/exception
+    -isolation tests above that need a *deterministic* simultaneous win):
+    a card with exactly one complete line must be rejected outright
+    ("no_pattern", not merely "not yet" -- and specifically must not get
+    silently locked out the way a genuinely-false claim does, since the
+    player may go on to complete a second line on this same card), and the
+    same card must then be accepted once a second line completes, however
+    that second line got there (row/col/diagonal, any combination).
+    """
+    room_id = await create_room(conn, stake=Decimal("20.00"), min_players=2, call_interval_ms=15)
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        user_a = await create_funded_user(conn)
+        user_b = await create_funded_user(conn)
+        card_a = 1
+
+        assert (await engine.join(user_a, card_a, auto_mark=False)).ok
+        assert (await engine.join(user_b, 2, auto_mark=False)).ok
+
+        await wait_until(lambda: engine.status == "running", timeout=5)
+
+        grid_a = card_pool[card_a]
+
+        def exactly_one_line() -> bool:
+            called = engine._called  # noqa: SLF001
+            return len(bingo.winning_patterns(grid_a, called, room.win_patterns)) == 1
+
+        await wait_until(exactly_one_line, timeout=15)
+
+        # One line is not a win: rejected, and specifically not locked out
+        # -- a player who genuinely goes on to complete a second line on
+        # this exact card must still be able to claim it for real.
+        first = await engine.claim(user_a, card_a)
+        assert first == ClaimResult(False, "no_pattern")
+
+        second_attempt_too_early = await engine.claim(user_a, card_a)
+        assert second_attempt_too_early == ClaimResult(False, "no_pattern")
+
+        def has_real_win() -> bool:
+            return bingo.has_won(grid_a, engine._called, room.win_patterns)  # noqa: SLF001
+
+        await wait_until(has_real_win, timeout=15)
+
+        final = await engine.claim(user_a, card_a)
+        assert final.ok, final
+
+        await wait_until(lambda: engine.status == "idle", timeout=5)
+        round_row = await pool.fetchrow(
+            "SELECT id FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1", room_id
+        )
+        winners = await pool.fetch(
+            "SELECT user_id, pattern FROM round_winners WHERE round_id = $1", round_row["id"]
+        )
+        assert len(winners) == 1
+        assert winners[0]["user_id"] == user_a
+        # The recorded pattern reflects every line the winning claim
+        # completed, not just one.
+        assert len(winners[0]["pattern"].split(",")) >= 2
+
+        mismatches = await ledger.reconcile(conn)
+        assert mismatches == []
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
 async def test_false_claim_lockout_is_per_card_not_per_player(pool, redis, card_pool, conn):
     """claim()'s own lockout is scoped to (user_id, card_no), not just
     user_id -- a false claim on one of a player's cards says nothing
@@ -608,9 +695,9 @@ async def test_false_claim_lockout_is_per_card_not_per_player(pool, redis, card_
 
         await wait_until(lambda: engine.status == "running", timeout=5)
 
-        # At call_index 0, nothing on any card can possibly have a real
-        # pattern yet (the free cell alone never satisfies row/col/diag/
-        # corners) -- a deterministic "no_pattern" claim, not a race.
+        # At call_index 0, nothing on any card can possibly have two real
+        # complete lines yet (the free cell alone never satisfies even one
+        # row/col/diag) -- a deterministic "no_pattern" claim, not a race.
         first = await engine.claim(user_a, card_1)
         assert first == ClaimResult(False, "no_pattern")
 
@@ -625,7 +712,7 @@ async def test_false_claim_lockout_is_per_card_not_per_player(pool, redis, card_
 
         def card_2_ready() -> bool:
             called = engine._called  # noqa: SLF001
-            return bool(bingo.winning_patterns(grid_2, called, room.win_patterns))
+            return bingo.has_won(grid_2, called, room.win_patterns)
 
         await wait_until(card_2_ready, timeout=10)
         third = await engine.claim(user_a, card_2)
@@ -661,7 +748,7 @@ async def test_claim_settlement_pushes_a_live_balance_update_to_the_winner(pool,
         grid_a = card_pool[card_a]
 
         def a_ready() -> bool:
-            return bool(bingo.winning_patterns(grid_a, engine._called, room.win_patterns))  # noqa: SLF001
+            return bingo.has_won(grid_a, engine._called, room.win_patterns)  # noqa: SLF001
 
         await wait_until(a_ready, timeout=10)
 
@@ -703,7 +790,7 @@ async def test_round_end_broadcast_includes_the_winners_display_name(pool, redis
         grid_a = card_pool[card_a]
 
         def a_ready() -> bool:
-            return bool(bingo.winning_patterns(grid_a, engine._called, room.win_patterns))  # noqa: SLF001
+            return bingo.has_won(grid_a, engine._called, room.win_patterns)  # noqa: SLF001
 
         await wait_until(a_ready, timeout=10)
 

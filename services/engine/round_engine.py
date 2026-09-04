@@ -69,7 +69,7 @@ class RoundEntryState:
 class PendingWinner:
     user_id: int
     card_no: int
-    pattern: str
+    pattern: str  # every completed line's name, comma-joined (>= MIN_WINNING_LINES of them)
     call_index: int
 
 
@@ -528,9 +528,16 @@ class RoundEngine:
 
                 grid = self._card_pool[entry.card_no]
                 won = bingo.winning_patterns(grid, self._called, self._room.win_patterns)
-                valid = bool(won)
+                valid = len(won) >= bingo.MIN_WINNING_LINES
                 if not valid:
-                    if source == "manual" and self._status == "running":
+                    # Lock out only a claim with zero real progress (a
+                    # clearly bogus/spam attempt) -- a claim with at least
+                    # one genuine complete line just hasn't reached
+                    # MIN_WINNING_LINES yet, and locking the card out here
+                    # would strand a player who is honestly one line away
+                    # from a real win for the rest of the round, over one
+                    # early tap.
+                    if source == "manual" and self._status == "running" and not won:
                         self._locked_out.add((user_id, card_no))
                     return ClaimResult(False, "no_pattern")
         finally:
@@ -563,7 +570,9 @@ class RoundEngine:
                 deadline = now + WINNER_TIE_WINDOW_SECONDS
                 self._winner_window_deadline = deadline
                 self._pending_winners.append(
-                    PendingWinner(user_id, entry.card_no, won[0].name, self._call_index)
+                    PendingWinner(
+                        user_id, entry.card_no, ", ".join(p.name for p in won), self._call_index
+                    )
                 )
                 self._settlement_task = asyncio.create_task(self._finalize_after_window(deadline))
                 return ClaimResult(True, None)
@@ -573,7 +582,9 @@ class RoundEngine:
                 and now <= self._winner_window_deadline
             ):
                 self._pending_winners.append(
-                    PendingWinner(user_id, entry.card_no, won[0].name, self._call_index)
+                    PendingWinner(
+                        user_id, entry.card_no, ", ".join(p.name for p in won), self._call_index
+                    )
                 )
                 return ClaimResult(True, None)
         return ClaimResult(False, "round_already_settled")
@@ -836,7 +847,7 @@ class RoundEngine:
             if (user_id, card_no) in self._auto_claimed or (user_id, card_no) in self._locked_out:
                 continue
             grid = self._card_pool[entry.card_no]
-            if bingo.winning_patterns(grid, self._called, self._room.win_patterns):
+            if bingo.has_won(grid, self._called, self._room.win_patterns):
                 self._auto_claimed.add((user_id, card_no))
                 try:
                     await self.claim(user_id, card_no, source="auto")

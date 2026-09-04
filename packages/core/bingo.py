@@ -110,7 +110,7 @@ def mark_grid(grid: Grid, called: set[int]) -> list[list[bool]]:
 @dataclass(frozen=True)
 class Pattern:
     name: str
-    kind: str  # "row" | "col" | "diag" | "corners"
+    kind: str  # "row" | "col" | "diag"
     cells: tuple[tuple[int, int], ...]
 
 
@@ -124,18 +124,27 @@ def _all_patterns() -> list[Pattern]:
     patterns.append(
         Pattern("diag_anti", "diag", tuple((i, 4 - i) for i in range(5)))
     )
-    patterns.append(
-        Pattern("corners", "corners", ((0, 0), (0, 4), (4, 0), (4, 4)))
-    )
     return patterns
 
 
 _ALL_PATTERNS = _all_patterns()
 
+# Product rule: a single completed line is never enough -- a card only wins
+# once it holds this many simultaneously-complete lines (any mix of rows,
+# columns, and diagonals). The one and only threshold check lives in
+# has_won() below; every caller (round_engine.py's manual claim() and its
+# auto-mark scan) must go through it rather than re-testing len(...) itself,
+# so the real-money win rule can never drift out of sync between the two.
+MIN_WINNING_LINES = 2
+
 
 def winning_patterns(
     grid: Grid, called: set[int], enabled: list[str]
 ) -> list[Pattern]:
+    """Every enabled pattern this grid has fully completed -- not itself a
+    win/no-win verdict (see has_won()), just the raw set of complete lines,
+    which callers also need in full to record/display exactly which lines
+    a winning claim completed."""
     marks = mark_grid(grid, called)
     enabled_set = set(enabled)
     won: list[Pattern] = []
@@ -145,6 +154,12 @@ def winning_patterns(
         if all(marks[r][c] for r, c in pattern.cells):
             won.append(pattern)
     return won
+
+
+def has_won(grid: Grid, called: set[int], enabled: list[str]) -> bool:
+    """The real win verdict: at least MIN_WINNING_LINES complete lines, in
+    any combination (e.g. two rows, or one row and one diagonal)."""
+    return len(winning_patterns(grid, called, enabled)) >= MIN_WINNING_LINES
 
 
 def _hmac_stream(server_seed: bytes, client_seed: str) -> "_ByteStream":

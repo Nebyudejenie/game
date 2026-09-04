@@ -10,10 +10,10 @@ const HEADER = ["B", "I", "N", "G", "O"];
 
 // Pattern-name -> exact [row, col] cells, mirroring packages/core/
 // bingo.py's own _all_patterns() naming exactly (row_{r}, col_{c},
-// diag_main, diag_anti, corners) -- safe to duplicate here since it's a
-// stable, purely presentational derivation (which cells to draw a ring
-// around), never a source of truth for whether a claim is actually
-// valid, which stays entirely server-side.
+// diag_main, diag_anti) -- safe to duplicate here since it's a stable,
+// purely presentational derivation (which cells to draw a ring around),
+// never a source of truth for whether a claim is actually valid, which
+// stays entirely server-side.
 function cellsForPattern(name) {
   if (name.startsWith("row_")) {
     const r = Number(name.slice(4));
@@ -25,7 +25,6 @@ function cellsForPattern(name) {
   }
   if (name === "diag_main") return [0, 1, 2, 3, 4].map((i) => [i, i]);
   if (name === "diag_anti") return [0, 1, 2, 3, 4].map((i) => [i, 4 - i]);
-  if (name === "corners") return [[0, 0], [0, 4], [4, 0], [4, 4]];
   return [];
 }
 
@@ -34,10 +33,22 @@ function cellsForPattern(name) {
 // state below, which belongs to a live, interactively-updated game card
 // and must never be silently repurposed by a screen that only ever needs
 // one static snapshot.
+//
+// winningPattern is round_engine.py's own PendingWinner.pattern: every
+// line a winning claim completed, comma-joined (a win needs >= 2, see
+// bingo.MIN_WINNING_LINES) -- split and union their cells so the preview
+// highlights every winning line at once, not just the first.
 export function renderStaticCard(container, grid, calledNumbers, winningPattern) {
   container.innerHTML = "";
   const calledSet = new Set(calledNumbers || []);
-  const winningCells = new Set(cellsForPattern(winningPattern || "").map(([r, c]) => `${r},${c}`));
+  const winningCells = new Set(
+    (winningPattern || "")
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean)
+      .flatMap((name) => cellsForPattern(name))
+      .map(([r, c]) => `${r},${c}`)
+  );
 
   const header = document.createElement("div");
   header.className = "mini-card-header";
@@ -135,28 +146,35 @@ export function createCard(container) {
     }
   }
 
+  // A single completed line is never enough -- must match packages/core/
+  // bingo.py's MIN_WINNING_LINES exactly (currently 2), or this button
+  // would enable itself a line early/late relative to what the server
+  // actually accepts. This only gates the button/optimistic auto-claim;
+  // the server re-validates every claim independently regardless (see
+  // ws.on("claim_result") in app.v6.js), so a mismatch here is a UX bug,
+  // never a financial one.
+  const MIN_WINNING_LINES = 2;
+
   function hasCompletePattern(calledSet, patterns) {
     if (!currentGrid) return false;
     const marked = (r, c) => currentGrid[r][c] === 0 || calledSet.has(currentGrid[r][c]);
+    let completedLines = 0;
 
     if (patterns.includes("row")) {
       for (let r = 0; r < 5; r++) {
-        if ([0, 1, 2, 3, 4].every((c) => marked(r, c))) return true;
+        if ([0, 1, 2, 3, 4].every((c) => marked(r, c))) completedLines++;
       }
     }
     if (patterns.includes("col")) {
       for (let c = 0; c < 5; c++) {
-        if ([0, 1, 2, 3, 4].every((r) => marked(r, c))) return true;
+        if ([0, 1, 2, 3, 4].every((r) => marked(r, c))) completedLines++;
       }
     }
     if (patterns.includes("diag")) {
-      if ([0, 1, 2, 3, 4].every((i) => marked(i, i))) return true;
-      if ([0, 1, 2, 3, 4].every((i) => marked(i, 4 - i))) return true;
+      if ([0, 1, 2, 3, 4].every((i) => marked(i, i))) completedLines++;
+      if ([0, 1, 2, 3, 4].every((i) => marked(i, 4 - i))) completedLines++;
     }
-    if (patterns.includes("corners")) {
-      if (marked(0, 0) && marked(0, 4) && marked(4, 0) && marked(4, 4)) return true;
-    }
-    return false;
+    return completedLines >= MIN_WINNING_LINES;
   }
 
   // tabindex="0" + role="button" + a keydown handler -- the same

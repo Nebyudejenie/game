@@ -25,9 +25,8 @@ ALL_PATTERNS = [
     ("col_4", "col", [(r, 4) for r in range(5)]),
     ("diag_main", "diag", [(i, i) for i in range(5)]),
     ("diag_anti", "diag", [(i, 4 - i) for i in range(5)]),
-    ("corners", "corners", [(0, 0), (0, 4), (4, 0), (4, 4)]),
 ]
-ALL_KINDS = ["row", "col", "diag", "corners"]
+ALL_KINDS = ["row", "col", "diag"]
 
 COLUMN_RANGES = [
     ("B", range(1, 16)),
@@ -85,13 +84,18 @@ def test_free_space_completes_middle_row_column_and_both_diagonals():
         assert name in {p.name for p in won}, f"{name} should win via free space"
 
 
-def test_free_space_does_not_help_four_corners():
+def test_corners_is_not_a_recognized_pattern():
+    """"corners" was removed as a win-pattern concept entirely (not folded
+    into the two-line count -- a room with only corners enabled would
+    otherwise be mathematically unwinnable, since there is exactly one
+    corners pattern). Even with all four corners called and "corners"
+    explicitly passed as an enabled kind, nothing should be reported won
+    under that name -- it simply no longer exists in _ALL_PATTERNS.
+    """
     grid = make_grid()
     corners_cells = [(0, 0), (0, 4), (4, 0), (4, 4)]
-    # Only 3 of 4 corners called -- free space is nowhere near this pattern
-    # and must not paper over the missing fourth corner.
-    called = {grid[r][c] for r, c in corners_cells[:3]}
-    won = bingo.winning_patterns(grid, called, ALL_KINDS)
+    called = {grid[r][c] for r, c in corners_cells}
+    won = bingo.winning_patterns(grid, called, ALL_KINDS + ["corners"])
     assert "corners" not in {p.name for p in won}
 
 
@@ -99,7 +103,59 @@ def test_winning_patterns_respects_enabled_filter():
     grid = make_grid()
     called = {grid[r][c] for r, c in [(0, 0), (0, 1), (0, 2), (0, 3), (0, 4)]}
     assert bingo.winning_patterns(grid, called, ["row"])
-    assert bingo.winning_patterns(grid, called, ["col", "diag", "corners"]) == []
+    assert bingo.winning_patterns(grid, called, ["col", "diag"]) == []
+
+
+# --- has_won(): the real win verdict (>= MIN_WINNING_LINES lines) ---
+
+
+def test_has_won_false_with_only_one_complete_line():
+    grid = make_grid()
+    called = {grid[r][c] for r, c in [(0, 0), (0, 1), (0, 2), (0, 3), (0, 4)]}
+    assert bingo.winning_patterns(grid, called, ALL_KINDS)  # sanity: row_0 is complete
+    assert bingo.has_won(grid, called, ALL_KINDS) is False
+
+
+def test_has_won_false_when_second_line_is_one_number_short():
+    grid = make_grid()
+    row_0 = {grid[0][c] for c in range(5)}
+    col_0_incomplete = {grid[r][0] for r in range(4)}  # withhold row 4's own number
+    called = row_0 | col_0_incomplete
+    assert len(bingo.winning_patterns(grid, called, ALL_KINDS)) == 1
+    assert bingo.has_won(grid, called, ALL_KINDS) is False
+
+
+def test_has_won_true_for_two_rows():
+    grid = make_grid()
+    called = {grid[r][c] for r in (0, 1) for c in range(5)}
+    assert bingo.has_won(grid, called, ALL_KINDS) is True
+
+
+def test_has_won_true_for_row_plus_column():
+    grid = make_grid()
+    called = {grid[0][c] for c in range(5)} | {grid[r][1] for r in range(5)}
+    assert bingo.has_won(grid, called, ALL_KINDS) is True
+
+
+def test_has_won_true_for_row_plus_diagonal():
+    grid = make_grid()
+    called = {grid[0][c] for c in range(5)} | {grid[i][i] for i in range(5)}
+    assert bingo.has_won(grid, called, ALL_KINDS) is True
+
+
+def test_has_won_true_for_two_diagonals():
+    grid = make_grid()
+    called = {grid[i][i] for i in range(5)} | {grid[i][4 - i] for i in range(5)}
+    assert bingo.has_won(grid, called, ALL_KINDS) is True
+
+
+def test_has_won_respects_enabled_filter_even_with_two_lines_physically_marked():
+    # Two rows are physically complete on the card, but the room only
+    # allows "col" -- has_won() must follow the same enabled-kind
+    # filtering winning_patterns() already does, not just count blindly.
+    grid = make_grid()
+    called = {grid[r][c] for r in (0, 1) for c in range(5)}
+    assert bingo.has_won(grid, called, ["col"]) is False
 
 
 def test_letter_for_and_label():

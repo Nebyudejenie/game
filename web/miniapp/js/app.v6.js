@@ -8,7 +8,7 @@ import { voiceCaller } from "./voice.js";
 
 const tg = window.Telegram && window.Telegram.WebApp;
 
-let winPatterns = ["row", "col", "diag", "corners"];
+let winPatterns = ["row", "col", "diag"];
 let countdownTimer = null;
 
 // --- screen management --------------------------------------------------

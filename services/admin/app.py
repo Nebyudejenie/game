@@ -612,7 +612,7 @@ class CreateRoomRequest(BaseModel):
     lobby_seconds: int = 30
     call_interval_ms: int = 4000
     result_seconds: int = 10
-    win_patterns: list[str] = ["row", "col", "diag", "corners"]
+    win_patterns: list[str] = ["row", "col", "diag"]
 
 
 @app.post("/rooms")

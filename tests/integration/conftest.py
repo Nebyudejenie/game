@@ -383,7 +383,7 @@ async def create_room(
         lobby_seconds,
         call_interval_ms,
         result_seconds,
-        json.dumps(win_patterns if win_patterns is not None else ["row", "col", "diag", "corners"]),
+        json.dumps(win_patterns if win_patterns is not None else ["row", "col", "diag"]),
         is_active,
         max_cards_per_player,
         no_player_next_round_delay_seconds,

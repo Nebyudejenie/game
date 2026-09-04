@@ -950,18 +950,19 @@ async def test_result_screen_shows_the_winning_card_preview(gateway_server, brow
         assert free_cell is not None
         assert (await free_cell.text_content()) == "F"
 
-        # The room's default win_patterns (tests/integration/conftest.py's
-        # create_room()) includes "corners" alongside row/col/diag -- a
-        # real random round can legitimately win on any of them, and
-        # corners is the one pattern with only 4 cells, not 5. Derive the
-        # expected count from the pattern the result screen itself
-        # reports (result.card_row's raw {pattern} interpolation, e.g.
-        # "corners" or "row_2") rather than assuming every win is 5 cells.
+        # A real win now needs >= bingo.MIN_WINNING_LINES (2) complete
+        # lines, and the result screen highlights every one of them, not
+        # just the first (render/card.js's renderStaticCard() unions all
+        # comma-joined pattern names from round_engine.py's own
+        # PendingWinner.pattern). Two rows or two columns never cross (10
+        # distinct cells); every other combination -- row+col, anything
+        # +diagonal, both diagonals -- crosses at exactly one cell (9).
+        # Either way this can never be 5 (one line) or 0 (no highlight),
+        # which is the actual thing this test needs to catch.
         result_meta_text = await page.text_content("#result-meta")
-        expected_winning_cells = 4 if "corners" in (result_meta_text or "") else 5
         winning_cells = await page.query_selector_all("#result-card .card-cell.winning")
-        assert len(winning_cells) == expected_winning_cells, (
-            f"expected {expected_winning_cells} cells highlighted for {result_meta_text!r}, "
+        assert len(winning_cells) in (9, 10), (
+            f"expected 9 or 10 cells highlighted for a real two-line win ({result_meta_text!r}), "
             f"got {len(winning_cells)}"
         )
         # Every highlighted cell must also actually be marked-called --
