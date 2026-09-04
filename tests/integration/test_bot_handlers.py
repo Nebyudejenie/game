@@ -1441,3 +1441,35 @@ async def test_unauthorized_sender_sms_text_is_never_ingested(pool, bot_ctx):
         "SELECT id FROM payment_evidence WHERE external_reference = $1", reference
     )
     assert row is None
+
+
+async def test_pasting_the_same_complete_sms_twice_produces_one_record_not_two(pool, bot_ctx):
+    # CTO directive section 29: an agent pasting the exact same complete
+    # SMS twice (a real, expected occurrence -- e.g. double-tapping paste)
+    # must produce exactly one payment_evidence row, and the bot's own
+    # second reply must say so, not silently look identical to a fresh
+    # success.
+    dp, bot, session = bot_ctx
+    agent_telegram_id = next_telegram_id()
+    await pool.execute(
+        "INSERT INTO payment_agents (telegram_user_id, display_name, is_active) VALUES ($1, $2, true)",
+        agent_telegram_id,
+        "Test Agent",
+    )
+    reference = f"DI{agent_telegram_id % 10**8:08d}"
+    sms = _agent_sms(reference)
+
+    await dp.feed_update(bot, make_text_update(agent_telegram_id, sms))
+    await _settle()
+    await dp.feed_update(bot, make_text_update(agent_telegram_id, sms))
+    await _settle()
+
+    assert len(session.sent) == 2
+    assert reference in session.sent[0].text
+    assert reference in session.sent[1].text
+    assert session.sent[0].text != session.sent[1].text  # the second reply must read differently
+
+    count = await pool.fetchval(
+        "SELECT count(*) FROM payment_evidence WHERE external_reference = $1", reference
+    )
+    assert count == 1

@@ -7,9 +7,11 @@ and availability-gating discipline as test_gateway_rest.py's existing
 
 import itertools
 import random
+from decimal import Decimal
 
 import httpx
 
+from packages.core import ledger
 from services.admin import queries as admin_queries
 from services.payments.telebirr_ingest import ingest_sms_evidence
 from tests.integration.conftest import build_init_data, next_telegram_id
@@ -102,6 +104,45 @@ async def test_redeem_endpoint_credits_a_real_reference_over_real_http(pool, con
         assert await pool.fetchval(
             "SELECT redeemed_by_user_id FROM payment_evidence WHERE external_reference = $1", reference
         ) == user_id
+    finally:
+        await admin_queries.set_payment_provider_availability_admin(
+            pool, admin_id=admin_id, provider="telebirr_sms", direction="in", enabled=False,
+            reason="test cleanup", ip_address=None,
+        )
+
+
+async def test_redeem_endpoint_ignores_a_client_supplied_amount_field(pool, conn, gateway_server):
+    # CTO directive section 9/28: "even if the client sends amount = 500,
+    # the server ignores that value." TelebirrRedeemRequest has no amount
+    # field at all -- a client-supplied one is silently dropped by
+    # pydantic's default extra="ignore" during request parsing, never
+    # reaching any code that could act on it. This proves that end to
+    # end over real HTTP with a real evidence row, not just by reading
+    # the model definition.
+    admin_id, *_ = await create_test_admin(pool)
+    await admin_queries.set_payment_provider_availability_admin(
+        pool, admin_id=admin_id, provider="telebirr_sms", direction="in", enabled=True,
+        reason="test: enable telebirr redemption", ip_address=None,
+    )
+    try:
+        reference = await _make_available_evidence(pool, conn, amount="20.00")
+        telegram_id = next_telegram_id()
+        init_data = build_init_data(telegram_id)
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{http_base(gateway_server)}/api/wallet/deposits/telebirr/redeem",
+                headers={"Authorization": f"tma {init_data}"},
+                json={"reference": reference, "amount": "5000.00"},
+            )
+        assert response.status_code == 200
+        body = response.json()
+        # The real SMS amount, never the tampered client value.
+        assert body["amount"] == "20.00"
+
+        user_id = await pool.fetchval("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
+        assert await ledger.balance(conn, cash.id) == Decimal("20.00")
     finally:
         await admin_queries.set_payment_provider_availability_admin(
             pool, admin_id=admin_id, provider="telebirr_sms", direction="in", enabled=False,
