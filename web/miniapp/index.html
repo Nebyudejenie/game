@@ -80,7 +80,7 @@
   </main>
 
   <!-- 2.3 Game screen (RUNNING) + 2.4 Spectate -->
-  <main id="screen-game" class="screen" data-screen="game">
+  <main id="screen-game" class="screen screen-game" data-screen="game">
     <div class="stat-strip">
       <div class="stat">
         <span class="stat-label" data-i18n="game.derash"></span>
@@ -105,28 +105,30 @@
       <button id="reserve-card-btn" class="btn-primary" style="margin-top:8px" data-i18n="spectate.reserve"></button>
     </div>
 
-    <div class="call-row">
-      <span data-i18n="game.your_card" style="display:none"></span>
-      <div class="recent-calls" id="recent-calls"></div>
-    </div>
-
+    <!-- Single-column-of-calls on the left, everything the player watches
+         moment-to-moment stacked in the right column (recent trail, the
+         current ball, AUTO/Voice, their own card, the Bingo button) --
+         one flex row so the whole screen's height is bounded by the taller
+         of the two columns, never by their sum. -->
     <div class="game-body">
       <div id="board"></div>
       <div class="call-panel">
+        <div class="recent-calls" id="recent-calls"></div>
         <div id="call-badge" class="call-badge"></div>
-        <div class="auto-toggle">
-          <span data-i18n="game.auto"></span>
-          <div id="auto-switch" class="switch on"><div class="switch-knob"></div></div>
+        <div class="toggle-row">
+          <div class="auto-toggle">
+            <span data-i18n="game.auto"></span>
+            <div id="auto-switch" class="switch on"><div class="switch-knob"></div></div>
+          </div>
+          <div class="auto-toggle">
+            <span data-i18n="voice.title"></span>
+            <div id="voice-switch" class="switch on"><div class="switch-knob"></div></div>
+          </div>
         </div>
-        <div class="auto-toggle">
-          <span data-i18n="voice.title"></span>
-          <div id="voice-switch" class="switch on"><div class="switch-knob"></div></div>
+        <div id="your-card-section" class="your-card-section">
+          <div id="your-cards-list" class="your-cards-list"></div>
         </div>
       </div>
-    </div>
-
-    <div id="your-card-section" class="your-card-section">
-      <div id="your-cards-list" class="your-cards-list"></div>
     </div>
   </main>
 

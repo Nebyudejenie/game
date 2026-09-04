@@ -125,29 +125,39 @@ button:disabled {
 .stat-strip {
   display: flex;
   justify-content: space-between;
-  background: var(--surface);
-  border-radius: var(--radius);
-  padding: 8px 12px;
+  gap: clamp(4px, 1.5vw, 8px);
   margin-bottom: 10px;
 }
 
+/* Each stat is its own dashboard-style card (not one shared bar) -- a
+   glance at the top of the screen should read as four distinct facts,
+   not one blended row. */
 .stat {
+  flex: 1 1 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 2px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: clamp(6px, 2vw, 9px) 4px;
 }
 
 .stat-label {
-  font-size: var(--fs-xs);
+  font-size: clamp(8px, 2.2vw, 10px);
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  white-space: nowrap;
 }
 
 .stat-value {
   font-family: var(--font-display);
-  font-size: var(--fs-lg);
+  font-weight: 700;
+  font-size: clamp(13px, 3.6vw, 17px);
+  white-space: nowrap;
 }
 
 .btn-primary {

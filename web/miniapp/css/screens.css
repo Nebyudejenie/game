@@ -367,37 +367,75 @@
   box-shadow: 0 0 0 2px var(--gold), 0 0 10px 2px var(--gold);
 }
 
-/* --- 2.3 Game screen --- */
+/* --- 2.3 Game screen ---
+   Single-screen composition: #screen-game itself is a fixed-height flex
+   column (dvh-based, see .screen-game below); .game-body is the one
+   flexible row inside it and everything the player watches turn to turn
+   -- the recent-call trail, the current ball, AUTO/Voice, their own
+   card, and the Bingo button -- lives in the right-hand column
+   (.call-panel) stacked in that exact order, so the page's total height
+   is bounded by the taller of the two columns, never by their sum. This
+   is the structural fix behind "the whole game must fit in one
+   viewport": previously .your-card-section sat *below* .game-body as a
+   third full-width block, so the page's real height was call-board-
+   height + card-height stacked, taller than any phone screen. */
 
-.call-row {
+/* .screen.active in base.css is TWO classes (specificity 0,0,2,0) --
+   plain .screen-game (one class) can never win a display/layout fight
+   against it regardless of stylesheet order, since specificity always
+   beats source order. Sizing rules that apply whether or not this
+   screen is currently shown are safe on the single-class selector;
+   display:flex specifically needs .screen.active.screen-game (three
+   classes, 0,0,3,0) to unambiguously outrank it. */
+.screen.screen-game {
+  /* 100dvh accounts for a mobile browser's own chrome shrinking the
+     visible area on scroll (Telegram's WebView included); 100vh is the
+     fallback for a browser old enough not to support dvh at all. */
+  height: 100vh;
+  height: 100dvh;
+  padding-top: max(12px, env(safe-area-inset-top));
+  padding-bottom: max(10px, env(safe-area-inset-bottom));
+  padding-left: max(12px, env(safe-area-inset-left));
+  padding-right: max(12px, env(safe-area-inset-right));
+  overflow: hidden;
+}
+
+.screen.active.screen-game {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 8px;
+  flex-direction: column;
+}
+
+.screen-game .stat-strip,
+.screen-game .spectate-banner {
+  flex: 0 0 auto;
 }
 
 .recent-calls {
+  flex: 0 0 auto;
   display: flex;
-  gap: 6px;
-  font-size: var(--fs-sm);
+  justify-content: center;
+  gap: clamp(4px, 1.5vw, 7px);
 }
 
 /* Small circles for the last few calls, spec section 6 -- one big
    glowing call-badge for the current number plus a short trail of
    smaller ones behind it, each still carrying its own column identity
    (border only, not a solid fill -- these are secondary information,
-   the current call stays the visually dominant one). */
+   the current call stays the visually dominant one). Sized with clamp()
+   rather than a fixed px so the 320-430px phone width range this app
+   targets scales proportionally instead of the trail overflowing its
+   column on the smallest screens. */
 .recent-calls span {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  width: clamp(22px, 7vw, 30px);
+  height: clamp(22px, 7vw, 30px);
   border-radius: 50%;
   border: 2px solid var(--border);
   background: var(--surface);
   color: var(--muted);
-  font-size: 10px;
+  font-size: clamp(9px, 2.4vw, 11px);
   font-weight: 700;
 }
 
@@ -408,46 +446,55 @@
 .recent-calls span[data-letter="O"] { border-color: var(--col-o); color: var(--col-o); }
 
 .game-body {
+  flex: 1 1 auto;
+  min-height: 0; /* let the two columns actually shrink to the available
+                    space instead of a flex item's default min-height:
+                    auto forcing the row to grow to its content's
+                    natural (taller-than-viewport) size */
   display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  margin-bottom: 10px;
+  gap: clamp(8px, 2.5vw, 14px);
+  align-items: stretch;
+  margin-top: 8px;
 }
 
-/* A real bug, not a design choice: render/board.js's buildBoard() puts
-   the .board grid *inside* the plain #board div that index.html actually
-   makes the flex child of .game-body -- flex properties only ever affect
-   a direct child of a flex container, so .board's own flex: 1 below was
-   a complete no-op on the *grandchild* it was set on, and #board (the
-   real flex item, with no sizing rule of its own at all) just shrank to
-   its content's minimum size. The whole call board rendering at a
-   fraction of the width it should have -- exactly the "numbers are
-   shrunk" this was named against -- traces to this one missing rule.
-   min-width: 0 overrides a flex item's default min-width: auto, the
-   other half of the same bug family: without it, a grid child this wide
-   can refuse to shrink below its own content's natural size even with
-   flex: 1 correctly applied, fighting the sibling .call-panel for space
-   on a narrow phone screen. */
+/* #board is the real flex-item child of .game-body; render/board.js's
+   buildBoard() nests .board-header + .board *inside* it, so #board is
+   made a flex column here (header, then the grid filling the rest of
+   the column's height) rather than a plain block -- this is what lets
+   all 15 rows share the column's available height instead of the grid
+   just growing to whatever a fixed per-cell size dictates. min-width: 0
+   overrides a flex item's default min-width: auto, letting this column
+   actually shrink to share space with its sibling on a narrow phone. */
 #board {
-  flex: 1;
+  flex: 1.15 1 0;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .board {
+  flex: 1 1 auto;
+  min-height: 0;
   display: grid;
   grid-template-columns: repeat(5, 1fr);
-  gap: 3px;
+  /* Rows share the column's available height as equal fractions, the
+     same reasoning the columns already use -- this is what makes all 15
+     rows fit the screen instead of each cell being some fixed px tall
+     that the 15-row total simply doesn't fit in. */
+  grid-template-rows: repeat(15, 1fr);
+  gap: clamp(2px, 0.6vw, 4px);
 }
 
 .board-header {
+  flex: 0 0 auto;
   display: grid;
   grid-template-columns: repeat(5, 1fr);
-  gap: 3px;
+  gap: clamp(2px, 0.6vw, 4px);
   text-align: center;
   color: var(--muted);
-  font-weight: 700;
-  font-size: var(--fs-sm);
-  margin-bottom: 3px;
+  font-weight: 800;
+  font-size: clamp(11px, 3vw, 14px);
+  margin-bottom: 4px;
 }
 
 .board-header > :nth-child(5n+1) { color: var(--col-b); }
@@ -457,13 +504,13 @@
 .board-header > :nth-child(5n)   { color: var(--col-o); }
 
 .board-cell {
-  aspect-ratio: 1;
   display: flex;
   align-items: center;
   justify-content: center;
   background: var(--surface-2);
-  border-radius: 4px;
-  font-size: 10px;
+  border-radius: 5px;
+  font-size: clamp(9px, 2.6vw, 12px);
+  font-weight: 600;
 }
 
 /* Uncalled: column-colored digits on the neutral background, same
@@ -476,6 +523,7 @@
 
 .board-cell.called {
   color: #f5f7fb;
+  font-weight: 800;
 }
 .board-cell.called:nth-child(5n+1) { background: var(--col-b); }
 .board-cell.called:nth-child(5n+2) { background: var(--col-i); }
@@ -495,16 +543,25 @@
 }
 
 .call-panel {
-  width: 92px;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
+  /* The ball/toggles/card group is naturally shorter than the call
+     board's own 15 rows once the card keeps square cells (below) --
+     centering the group in the column's full height reads as an
+     intentional composition instead of everything jammed at the top
+     with dead space underneath. */
+  justify-content: center;
+  gap: clamp(8px, 2.5vw, 14px);
 }
 
 .call-badge {
-  width: 88px;
-  height: 88px;
+  flex: 0 0 auto;
+  width: clamp(72px, 22vw, 96px);
+  height: clamp(72px, 22vw, 96px);
   border-radius: 50%;
   background: var(--surface);
   border: 3px solid var(--gold);
@@ -512,7 +569,8 @@
   align-items: center;
   justify-content: center;
   font-family: var(--font-display);
-  font-size: var(--fs-xl);
+  font-weight: 800;
+  font-size: clamp(20px, 6vw, 26px);
   transform: scale(0.8);
   opacity: 0;
   transition: transform 240ms ease, opacity 240ms ease, border-color 240ms ease;
@@ -549,20 +607,30 @@
   }
 }
 
+.toggle-row {
+  flex: 0 0 auto;
+  display: flex;
+  gap: clamp(8px, 3vw, 16px);
+}
+
 .auto-toggle {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: var(--fs-xs);
+  gap: 5px;
+  font-size: clamp(9px, 2.4vw, 11px);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
   color: var(--muted);
 }
 
 .switch {
-  width: 36px;
-  height: 20px;
+  width: 32px;
+  height: 18px;
   border-radius: 10px;
   background: var(--surface-2);
   position: relative;
+  flex: 0 0 auto;
 }
 
 .switch.on {
@@ -573,69 +641,128 @@
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
   background: var(--text);
   transition: left 120ms ease;
 }
 
 .switch.on .switch-knob {
-  left: 18px;
+  left: 16px;
 }
 
+/* The right column's own dominant element after the ball -- holds the
+   player's card(s) plus the Bingo button, filling whatever height
+   remains once the recent-calls trail, the ball, and the toggles have
+   taken theirs. Previously a full-width block placed *below* the whole
+   call board, forcing the page taller than one screen -- now it lives
+   inside .call-panel, sized to that column's own share of .game-body's
+   height instead. */
 .your-card-section {
+  /* Sized to its own content, not stretched to fill whatever's left of
+     the column -- a 5x5 grid of square cells has one correct height for
+     a given width, and forcing the surrounding box taller than that
+     just left a visibly empty bordered rectangle below the real card.
+     .call-panel's own justify-content: center (above) is what positions
+     this block nicely within the column instead. */
+  flex: 0 0 auto;
+  width: 100%;
   background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: 10px;
+  padding: clamp(8px, 2.5vw, 12px);
+  display: flex;
+  flex-direction: column;
 }
 
 /* A player can hold more than one card in the same round now (spec:
    configurable via room.max_cards_per_player) -- js/app.v6.js's
    buildGameCards() builds one .your-card-item per held card into this
-   list, each with its own grid and its own claim button underneath it. */
+   list, each with its own grid and its own claim button underneath it.
+   overflow-y is a pragmatic safety net for that multi-card case only --
+   a single held card (the common case, and the only case the reference
+   composition shows) fits without ever needing it. */
 .your-cards-list {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
+  /* Defensive only: a player holding several cards (room.max_cards_per_
+     player) could exceed the column's height even at content size --
+     the common single-card case (and the reference composition) never
+     triggers this. */
+  max-height: 100%;
+  overflow-y: auto;
+}
+
+.your-card-item {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .your-card-title {
-  font-size: var(--fs-sm);
+  flex: 0 0 auto;
+  font-size: clamp(9px, 2.4vw, 11px);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
   color: var(--muted);
-  margin-bottom: 6px;
+  margin-bottom: 4px;
   text-align: center;
 }
 
-/* The in-game card was rendering at the same large size as the winner
-   screen's celebratory card preview, leaving the call board/ball area
-   (the thing a player actually watches turn by turn) squeezed into the
-   top half of the screen. Shrunk to roughly half width here, scoped to
-   the live game screen only -- the lobby's own card preview and the
-   result screen's #result-card-panel both intentionally keep the full
-   .mini-card size (result-card-panel actually deserves to stay the big,
-   dominant element in its own screen). */
+/* The card itself is now the dominant element of its own (already
+   narrow, already column-constrained) half of the screen, not a small
+   shrunken block inside a full-width one -- close to the column's full
+   width, large bold digits, exactly the "large, highly visible numbers"
+   the reference asks for. */
 #your-card-section .mini-card-header,
 #your-card-section .mini-card {
-  max-width: 54%;
-  margin-left: auto;
-  margin-right: auto;
+  width: 100%;
+}
+
+#your-card-section .mini-card {
+  flex: 0 0 auto;
+  gap: clamp(2px, 1vw, 4px);
+}
+
+#your-card-section .mini-card-header {
+  flex: 0 0 auto;
+  font-size: clamp(10px, 2.8vw, 13px);
 }
 
 #your-card-section .card-cell {
-  font-size: var(--fs-xs);
-  border-radius: 4px;
+  font-size: clamp(14px, 4.6vw, 21px);
+  font-weight: 800;
+  border-radius: 6px;
 }
 
 .bingo-btn {
-  margin: 10px auto 0;
-  max-width: 54%;
+  flex: 0 0 auto;
+  margin-top: clamp(6px, 2vw, 10px);
+  width: 100%;
   display: block;
-  background: var(--gold);
-  color: #1a1200;
+  background: linear-gradient(160deg, #ffe27a, var(--gold) 55%, #d99a1f);
+  color: #2a1a00;
   font-family: var(--font-display);
-  font-size: var(--fs-lg);
+  font-weight: 800;
+  font-size: clamp(14px, 4vw, 18px);
   letter-spacing: 0.08em;
+  padding: clamp(9px, 3vw, 13px);
+  box-shadow: 0 4px 0 0 #a9740f, 0 6px 14px rgba(0, 0, 0, 0.35);
+  transition: transform 100ms ease, box-shadow 100ms ease;
+}
+
+.bingo-btn:active:not(:disabled) {
+  transform: translateY(3px);
+  box-shadow: 0 1px 0 0 #a9740f, 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+
+.bingo-btn:disabled {
+  background: var(--surface-2);
+  color: var(--muted);
+  box-shadow: none;
 }
 
 .bingo-btn.shake {
