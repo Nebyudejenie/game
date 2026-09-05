@@ -14,14 +14,10 @@ required for that specific job.
 - [ ] A charger, kept permanently plugged in.
 - [ ] Stable internet (mobile data or Wi-Fi).
 - [ ] The real ingestion URL: `https://payments.arada.fun/internal/telebirr/ingest`
-      — a dedicated production payment hostname, not a path under the
-      main Mini App domain. The auth behavior (missing token → 401,
-      wrong token → 401, unconfigured → 503) was confirmed live
-      2026-09-05 against the same backend route before this hostname was
-      switched over; see `docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md`'s
-      Status table for whether the tunnel-side DNS routing has finished
-      landing yet — if this URL isn't resolving, that's why, and it's not
-      something to work around on the phone.
+      — a dedicated production payment hostname, fully live end to end
+      (DNS, Cloudflare Tunnel, Traefik, the real payments service),
+      confirmed 2026-09-05 with real external requests: missing token →
+      401, wrong token → 401, malformed body → 422.
 - [ ] The real `MACRODROID_INGEST_TOKEN` value (get this from an admin —
       it is a secret, never write it anywhere other than this one macro's
       configuration). Confirmed configured in production as of 2026-09-05.

@@ -10,10 +10,8 @@ second payment system.
 
 ## Access
 
-`https://agent.arada.fun` (pending the tunnel-config step in
-`docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md`'s Status table; until then,
-reach the identical service at `payments.arada.fun/` directly). No
-username or password exists to give out.
+`https://agent.arada.fun` — live. No username or password exists to
+give out.
 
 ## How an agent logs in
 

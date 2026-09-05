@@ -14,14 +14,15 @@ mapping.
 |---|---|:---:|---|:---:|
 | `arada.fun`, `www.arada.fun` | gateway (Mini App + player REST API) | YES | Telegram `initData` HMAC (per-request) | YES (`/ws`, verified live) |
 | `arada.fun/webhook` | bot (Telegram webhook) | YES | Telegram webhook secret | NO |
-| `payments.arada.fun` | payments (MacroDroid ingestion, Chapa webhook, `/internal/telebirr/ingest`) | Traefik ready, DNS live — **pending the tunnel config** (see domain doc) | Bearer token (`hmac.compare_digest`) for ingestion; provider-signature check for the Chapa webhook | NO |
-| `agent.arada.fun` | payments (Agent Portal — same container as above) | same pending state | Opaque Redis session, obtained via a one-time Telegram-delivered link | NO |
-| `admin.arada.fun` | admin console | same pending state | Username + password + TOTP → bearer session token | NO |
-| `finance.arada.fun` | admin console (finance-role login, same container) | same pending state | Same as admin | NO |
+| `payments.arada.fun` | payments (MacroDroid ingestion, Chapa webhook, `/internal/telebirr/ingest`) | YES | Bearer token (`hmac.compare_digest`) for ingestion; provider-signature check for the Chapa webhook | NO |
+| `agent.arada.fun` | payments (Agent Portal — same container as above) | YES | Opaque Redis session, obtained via a one-time Telegram-delivered link | NO |
+| `admin.arada.fun` | admin console | YES | Username + password + TOTP → bearer session token, plus `ADMIN_IP_ALLOWLIST` (confirmed live: a non-allowlisted external request gets a real `403 "source IP not permitted"`) | NO |
+| `finance.arada.fun` | admin console (finance-role login, same container) | YES | Same as admin | NO |
 
-Until the tunnel config lands, `payments.arada.fun` etc. resolve in DNS
-but return cloudflared's own `404` (its ingress catch-all) rather than
-reaching Traefik at all — confirmed live, not assumed.
+All five hostnames verified with real external requests: missing/wrong
+bearer token on payments → `401`, malformed ingest body → `422`,
+unauthenticated Agent Portal API → `401`, admin/finance IP-allowlist →
+`403` for this session's own non-allowlisted IP.
 
 `api.arada.fun` was not created: `gateway` already serves `/api/*` at
 `arada.fun` itself.
@@ -38,7 +39,7 @@ reaching Traefik at all — confirmed live, not assumed.
 | `payments`'s own `/metrics` | **NO** | The new `Host(payments.arada.fun)` Traefik rule covers the whole service, but `/metrics` has no auth of its own — deliberately left this way since it's low-sensitivity (counts, not values, per `packages/core/metrics.py`), matching directive guidance to avoid inventing unnecessary hardening; flagged here for visibility, not hidden |
 | `admin`'s own `/metrics`, if it has one | N/A | Admin has no `/metrics` route to worry about |
 
-## Admin console: now exposable, because the blocking issue is fixed
+## Admin console: now exposed, publicly live
 
 Previously not exposed because its IP-allowlist check
 (`services/admin/app.py::_client_ip`) trusted only the raw TCP connection
@@ -53,8 +54,11 @@ connection_ip`): an allowed `CF-Connecting-IP` passes even when the raw
 test-client IP itself was never allowlisted, and a disallowed one is
 still blocked.
 
-`admin.arada.fun` and `finance.arada.fun` Traefik routes exist now; both
-wait on the same tunnel-config step as `payments`/`agent`.
+`admin.arada.fun` and `finance.arada.fun` are both live publicly now,
+confirmed with a real external request: a request without a matching
+`CF-Connecting-IP` gets a real `403 "source IP not permitted"`, proving
+the allowlist survives the full Cloudflare → Tunnel → Traefik path
+intact, not silently bypassed.
 
 ## RBAC: enforced at the API, not just hidden in the UI
 

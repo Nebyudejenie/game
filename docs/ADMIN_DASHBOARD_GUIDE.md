@@ -12,11 +12,12 @@ identity at all), and `docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md` for why
 `admin.arada.fun` and `finance.arada.fun` both point at this exact same
 container rather than two deployments.
 
-Access: `admin.arada.fun` and `finance.arada.fun` (same login, same
-console — the hostname you're told to use just matches your role),
-pending the tunnel-config step in the domain doc's Status table; until
-then, `http://127.0.0.1:8001` on the production host via an SSH tunnel,
-unchanged from before. Frontend served at `/console`.
+Access: `https://admin.arada.fun/console/` and
+`https://finance.arada.fun/console/` — live (same login, same console;
+the hostname you're told to use just matches your role). Gated by
+`ADMIN_IP_ALLOWLIST` if configured, in addition to the password+TOTP
+login — verified live, both together. `http://127.0.0.1:8001` on the
+production host via an SSH tunnel still works too, unchanged.
 
 ## The 14 screens (`web/admin/js/app.js`'s own nav order)
 

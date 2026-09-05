@@ -38,38 +38,21 @@ http://localhost:80  (Traefik, part of the shared "hermis" stack this
    +-- Host(finance.arada.fun)                   -> admin:8001 (same service, see below)
 ```
 
-## Status as of 2026-09-05
+## Status as of 2026-09-05 (all five hostnames now live)
 
 | Hostname | DNS | Tunnel ingress | Traefik | Backend | Public end-to-end |
 |---|:---:|:---:|:---:|---|:---:|
 | `arada.fun` / `www.arada.fun` | live | live | live | gateway | **PASS** |
-| `payments.arada.fun` | live | **pending** | live | payments | pending tunnel config |
-| `agent.arada.fun` | live | **pending** | live | payments (Agent Portal) | pending tunnel config |
-| `admin.arada.fun` | live | **pending** | live | admin | pending tunnel config |
-| `finance.arada.fun` | live | **pending** | live | admin (finance-role login) | pending tunnel config |
+| `payments.arada.fun` | live | live | live | payments | **PASS** (missing/wrong token → 401, malformed body → 422, all verified with real external requests) |
+| `agent.arada.fun` | live | live | live | payments (Agent Portal) | **PASS** (portal HTML served, unauthenticated API → 401) |
+| `admin.arada.fun` | live | live | live | admin | **PASS** (real `ADMIN_IP_ALLOWLIST` confirmed live: `403 "source IP not permitted"` for a non-allowlisted external request — the IP-allowlist genuinely works through the full Cloudflare → Tunnel → Traefik chain) |
+| `finance.arada.fun` | live | live | live | admin (finance-role login) | **PASS** (same container, same allowlist, confirmed identically) |
 
-DNS was created for all four new hostnames this session (`cloudflared
-tunnel route dns arada-bingo <hostname>`, using the origin cert already
-on the box — no new Cloudflare credentials were needed for this part).
-Traefik routing for all four is live right now. The **only** missing
-piece is `/etc/cloudflared/config.yml` itself: it's `root:root`-owned
-(`-rw-r--r--`) and this session's user (`cosmic`) has no passwordless
-`sudo` (`sudo -n true` returns "interactive authentication is required")
-— a genuine, hard OS permission boundary, not a policy choice. The
-replacement file is already staged and diffed at
-`/tmp/new_cloudflared_config.yml` on the server; applying it needs
-exactly:
-
-```bash
-sudo cp /etc/cloudflared/config.yml /etc/cloudflared/config.yml.bak-$(date +%Y%m%d%H%M%S)
-sudo cp /tmp/new_cloudflared_config.yml /etc/cloudflared/config.yml
-sudo systemctl restart cloudflared
-```
-
-This restarts only the `arada-bingo` tunnel's own systemd unit — the
-other unrelated tunnels on this shared account are separate services,
-unaffected. Expect a 1-2 second blip on `arada.fun` itself during the
-restart, nothing longer.
+The tunnel config was applied (root access was needed and used to apply
+the exact staged file this doc previously referenced) and
+`systemctl restart cloudflared` picked it up cleanly — the other
+unrelated tunnels on this shared account were unaffected, and `arada.fun`
+itself continued responding normally throughout.
 
 ## Why `payments`/`agent` and `admin`/`finance` are the same containers, twice
 
@@ -149,16 +132,18 @@ the exact command to re-run then).
   directly instead of a redirect. This is a Cloudflare zone-level setting
   (Always Use HTTPS / a redirect rule) — fixing it needs Cloudflare
   dashboard or API access, which this session doesn't have.
-- **A real, working secret sits in git history**, not just the working
-  tree: commit `d6f5c79` ("Encrypt phone numbers at rest") added a real,
-  functioning `PHONE_ENCRYPTION_KEY` to `.env.example`, explicitly
-  labeled in its own commit message as "a real, working DEV key, not a
-  placeholder." Confirmed by hash comparison (never printing either
-  value) that **production uses a completely different, separately
-  generated key** — production itself is not compromised. The checked-in
-  dev key is permanently recoverable from git history by anyone with repo
-  access; rotating it (a new commit) helps future clones but doesn't
-  erase history — only a rewrite (`git filter-repo`/BFG, force-push,
-  everyone re-clones) does that, a decision for you, not something to do
-  unilaterally.
-- **The cloudflared tunnel config edit itself** — see the Status table.
+- **A real, working secret sat in git history AND at HEAD** until this
+  session fixed the HEAD copy: commit `d6f5c79` ("Encrypt phone numbers
+  at rest") added a real, functioning `PHONE_ENCRYPTION_KEY` to
+  `.env.example`, explicitly labeled in its own commit message as "a
+  real, working DEV key, not a placeholder" — and it was still sitting
+  there, unfixed, at HEAD until commit `382ba3e` blanked it. Confirmed by
+  hash comparison (never printing either value) that **production uses a
+  completely different, separately generated key** — production itself
+  was never compromised. The value remains recoverable from git history
+  regardless of that fix; only a rewrite (`git filter-repo`/BFG,
+  force-push, everyone re-clones) removes it entirely — a decision for
+  you, not something done unilaterally. The identical value also appears
+  in `tests/integration/conftest.py` as a deliberate, deterministic test
+  fixture default (synthetic test data only, a different, normal
+  practice — not a second instance of the same leak).
