@@ -6,6 +6,22 @@ venv/
 .env
 .env.local
 *.log
+
+# Private key / certificate material -- no legitimate reason for any of
+# these shapes to ever be a tracked file; a production-readiness audit
+# found none committed today, but nothing previously stopped `git add .`
+# from staging one by accident.
+*.pem
+*.key
+*.pfx
+*.p12
+id_rsa*
+id_ed25519*
+
+# Screen recordings / scratch captures -- never a commit, but nothing
+# previously stopped one from becoming one.
+*.mp4
+*.mov
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

@@ -47,6 +47,35 @@ async def _language_for_telegram_id(pool: asyncpg.Pool, telegram_id: int) -> str
 
 async def process_one(pool: asyncpg.Pool, redis: Redis, notifier: Notifier, *, msg_id: str, fields: dict[str, str]) -> None:
     telegram_id = int(fields["telegram_id"])
+    delivery_id_raw = fields.get("delivery_id")
+
+    if delivery_id_raw is not None:
+        # The idempotency guard that makes services/bot/campaign_worker
+        # .py's own stuck-delivery reclaim safe: a reclaim can enqueue a
+        # second stream entry for a delivery whose *original* enqueue
+        # actually succeeded (the process only died before recording that
+        # fact) -- this relay's own per-user sequential processing
+        # (_drain_one_user() below never runs two entries for the same
+        # user concurrently) guarantees that by the time a duplicate
+        # entry for the same delivery is dequeued, an earlier one already
+        # ran to completion, including the mark_delivery_outcome() call
+        # below. Re-checking the delivery's live status right before
+        # ever calling notifier.send() is what turns "a delivery might
+        # get enqueued twice" into "still sent at most once" -- without
+        # this check, the reclaim sweep alone would risk a real duplicate
+        # Telegram message.
+        current_status = await pool.fetchval(
+            "SELECT status FROM notification_deliveries WHERE id = $1", int(delivery_id_raw)
+        )
+        if current_status != "processing":
+            logger.info(
+                "notification_relay_skipped_already_resolved_delivery",
+                delivery_id=delivery_id_raw,
+                status=current_status,
+            )
+            await redis.xack(NOTIFICATIONS_STREAM, GROUP, msg_id)
+            return
+
     # Two message shapes share this one stream: notify_user()'s own
     # {key, kwargs} (an i18n lookup -- every existing caller) and the
     # Notification Center's {raw_text, delivery_id} (an admin-authored

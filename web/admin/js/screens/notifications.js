@@ -60,7 +60,9 @@ const AUDIENCE_FIELDS_HTML = `
     <label>Exclude user IDs <input type="text" name="exclude_user_ids" placeholder="Optional, comma-separated" /></label>
   </div>
   <p class="wallet-note">Filled-in filters combine together (a recipient must match all of them). Leave everything
-  blank to target every player. Reaches Telegram only -- there is no email/SMS/push channel in this system.</p>
+  blank to target every eligible player. Reaches Telegram only -- there is no email/SMS/push channel in this
+  system. Self-excluded and banned players are never included, regardless of any filter above -- this can't
+  be overridden from this screen.</p>
 `;
 
 export async function render(container) {

@@ -45,6 +45,28 @@ from packages.core.config import get_settings
 # this constant is at the time, not the other way around.
 SOCKET_TIMEOUT_SECONDS = 10.0
 
+# redis-py's own ConnectionPool defaults to exactly 100 when this is left
+# unset (confirmed directly against the installed version, not assumed --
+# it is NOT unbounded by default the way a bare `Redis.from_url()` call
+# might suggest). A production-readiness pass traced a real, previously
+# unexplained class of test failures (`redis.exceptions.MaxConnectionsError:
+# Too many connections`, non-deterministic, hitting a different random
+# test file each time late in a long full-suite run) to this exact cap:
+# one shared, session-scoped Redis client backs every RoundEngine's own
+# lock-refresh loop, every worker's consumer group, and every fixture in
+# a 1000+ test suite, and asyncio task cancellation (this codebase's own
+# standard way to simulate a crash in tests) occasionally leaves a
+# connection unable to cleanly return to the pool mid-command. The same
+# risk exists in production, independent of tests, for any single process
+# juggling enough concurrent Redis-touching work at once (the gateway
+# under real concurrent WebSocket load, or an engine-worker owning many
+# simultaneous rooms) -- 100 was never a deliberate capacity decision
+# anywhere in this codebase, just an unexamined library default. Raised
+# with real headroom rather than tuned to the exact number this suite
+# currently needs, so it isn't a ticking clock against a slowly growing
+# test count or production load.
+MAX_CONNECTIONS = 200
+
 
 def get_redis(*, decode_responses: bool = True) -> Redis:
     settings = get_settings()
@@ -54,4 +76,5 @@ def get_redis(*, decode_responses: bool = True) -> Redis:
         socket_connect_timeout=SOCKET_TIMEOUT_SECONDS,
         socket_timeout=SOCKET_TIMEOUT_SECONDS,
         health_check_interval=30,
+        max_connections=MAX_CONNECTIONS,
     )

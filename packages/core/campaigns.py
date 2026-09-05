@@ -75,6 +75,39 @@ def _build_where(filter_: dict[str, Any], exclude_user_ids: list[int]) -> tuple[
     if exclude_user_ids:
         clauses.append(f"id != ALL({_p(list(exclude_user_ids))})")
 
+    # Unconditional, not merely a `status` filter value an admin has to
+    # remember to set: a production-readiness pass found that leaving
+    # every audience field blank -- the UI's own documented way to
+    # "reach every player" -- resolved to a bare `WHERE true`, which
+    # includes self_excluded and banned users. A self-excluded player has
+    # made a real, serious responsible-gambling commitment; a promotional
+    # broadcast reaching them regardless of what filter an admin happened
+    # to pick is exactly the server-side enforcement gap this module's
+    # only two callers (the Notification Center's audience count/send
+    # path -- confirmed via a repo-wide grep this function has no other
+    # caller) must never have. Applied after every other clause, so it
+    # can never be weakened by a status filter that requests one of these
+    # explicitly (e.g. an admin filtering "status": "banned" to see who
+    # would have matched otherwise still gets zero real recipients, not a
+    # bypass).
+    clauses.append(f"status NOT IN ({_p('self_excluded')}, {_p('banned')})")
+    # A currently-cooling-off user (a temporary, self-requested pause --
+    # packages/core/responsible_gaming.py::cool_off(), distinct from the
+    # permanent `self_excluded` status above) must be excluded the same
+    # way. packages/core/responsible_gaming.py::marketing_eligible_
+    # user_ids() already encodes this exact rule -- its own docstring
+    # calls it "the one query any future marketing/promotional send must
+    # use" -- but was never actually wired into this module when it was
+    # built; confirmed unused anywhere in the codebase outside its own
+    # test file. Mirrored here (a NOT EXISTS subquery rather than a JOIN,
+    # so this function's own callers don't need to change their base
+    # query) instead of routing through it directly, since this function
+    # only ever produces a WHERE-clause fragment, never runs a query of
+    # its own.
+    clauses.append(
+        "id NOT IN (SELECT user_id FROM responsible_gaming_limits WHERE cooloff_until > now())"
+    )
+
     where = " AND ".join(clauses) if clauses else "true"
     return where, params
 

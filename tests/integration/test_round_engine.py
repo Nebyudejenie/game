@@ -610,7 +610,21 @@ async def test_claim_rejected_on_one_line_then_accepted_once_a_second_line_compl
     same card must then be accepted once a second line completes, however
     that second line got there (row/col/diagonal, any combination).
     """
-    room_id = await create_room(conn, stake=Decimal("20.00"), min_players=2, call_interval_ms=15)
+    # A deliberately wider interval than this file's usual 15ms: this test
+    # makes two sequential await engine.claim() calls after its own
+    # wait_until() and asserts the game state hasn't moved on between
+    # them. At 15ms, two real Postgres-transaction-plus-Redis-publish
+    # round trips can occasionally take longer than one call interval
+    # under real system load (confirmed directly: a flaky run reproduced
+    # the *engine* correctly recognizing a genuine second-line win, or
+    # correctly recognizing the round had already ended, exactly because
+    # the next number(s) were called in the gap between these two claim()
+    # awaits -- not a bug in the accept/reject logic under test, a race in
+    # this test's own timing margin). The win-condition logic being tested
+    # is identical regardless of call speed, so widening the interval only
+    # removes the false precision requirement, it doesn't weaken what's
+    # actually verified.
+    room_id = await create_room(conn, stake=Decimal("20.00"), min_players=2, call_interval_ms=300)
     room = await load_room_config(pool, room_id)
     engine = RoundEngine(pool, redis, room, card_pool)
     task = asyncio.create_task(engine.run_forever())
@@ -630,7 +644,7 @@ async def test_claim_rejected_on_one_line_then_accepted_once_a_second_line_compl
             called = engine._called  # noqa: SLF001
             return len(bingo.winning_patterns(grid_a, called, room.win_patterns)) == 1
 
-        await wait_until(exactly_one_line, timeout=15)
+        await wait_until(exactly_one_line, timeout=30)
 
         # One line is not a win: rejected, and specifically not locked out
         # -- a player who genuinely goes on to complete a second line on
@@ -644,7 +658,10 @@ async def test_claim_rejected_on_one_line_then_accepted_once_a_second_line_compl
         def has_real_win() -> bool:
             return bingo.has_won(grid_a, engine._called, room.win_patterns)  # noqa: SLF001
 
-        await wait_until(has_real_win, timeout=15)
+        # Matches the wider call_interval_ms above: worst case needs
+        # close to the full 75-ball draw at 300ms/call (~22.5s), so this
+        # needs real margin beyond that, not just beyond the typical case.
+        await wait_until(has_real_win, timeout=30)
 
         final = await engine.claim(user_a, card_a)
         assert final.ok, final

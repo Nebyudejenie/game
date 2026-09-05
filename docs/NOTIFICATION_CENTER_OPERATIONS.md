@@ -42,28 +42,22 @@ ship a Prometheus alert rule for it yet (unlike the Telebirr rail's
 `deploy/prometheus/alerts.yml` entries) — add one against this metric
 before running a campaign at real scale if paging matters to you.
 
-There is currently no metric for the one documented crash-safety gap (a
-delivery stuck at `processing` forever — see
-`docs/NOTIFICATION_CENTER_ARCHITECTURE.md`'s "Crash safety" section).
-Until one exists, that's a manual check:
-
-```sql
-SELECT id, campaign_id, user_id, last_attempt_at
-FROM notification_deliveries
-WHERE status = 'processing' AND last_attempt_at < now() - interval '10 minutes';
-```
-
-Any row this returns is stuck — a `bot` container crash landed in the
-narrow window between marking it `processing` and the message actually
-reaching the Redis stream. Its campaign will show as permanently
-`sending` in the admin console. Fix by hand: `UPDATE
-notification_deliveries SET status = 'failed', failure_reason =
-'stuck_reset' WHERE id = <id>` (there is no automated re-send for this —
-resending would risk delivering a duplicate to a recipient who may have
-already received it if the enqueue actually succeeded and only the
-worker's own follow-up bookkeeping was what crashed) — the campaign
-worker's own finalize step will pick up the corrected status on its next
-tick and complete the campaign.
+A delivery stuck at `processing` (a `bot` crash landing between marking
+it `processing` and the message reaching Redis) self-heals automatically
+now — `services/bot/campaign_worker.py::_reclaim_stuck_deliveries()`
+resets anything idle past `RECLAIM_STUCK_AFTER_SECONDS` (15 minutes) back
+to `pending` every tick, and `notification_relay.py`'s own idempotency
+check (re-verifying a delivery's live status immediately before ever
+calling `notifier.send()`) is what guarantees this can never produce a
+real duplicate Telegram message, even in the rare case where the
+original send had actually gone through. No manual intervention needed;
+see `docs/NOTIFICATION_CENTER_ARCHITECTURE.md`'s "Crash safety" section
+for the full mechanism. `notification_delivery_reclaimed_from_stuck_
+processing` (a structured log line, `delivery_ids` field) fires whenever
+this actually happens — worth watching for a *sustained* rate of these
+(an occasional one is expected background noise; a steady stream
+suggests the `bot` container is crash-looping, not that this mechanism
+itself is broken).
 
 ## Troubleshooting
 
@@ -79,11 +73,14 @@ doesn't kill the worker). Confirm `campaign_task` was actually created in
 current build, not a stale image predating this feature.
 
 **A campaign stays `sending` with a nonzero delivered/failed count but
-never reaches `completed`.** Check for a stuck `processing` delivery (the
-SQL above) or genuinely still-`pending` rows — the latter just means the
-worker hasn't caught up yet (`DISPATCH_BATCH_SIZE` is 200 per campaign
-per tick; a campaign with tens of thousands of recipients takes multiple
-ticks by design, not a bug).
+never reaches `completed`.** A `processing` delivery reclaims itself
+within `RECLAIM_STUCK_AFTER_SECONDS` (15 minutes) if it's genuinely
+stuck, so this is usually just still-`pending` rows the worker hasn't
+caught up to yet (`DISPATCH_BATCH_SIZE` is 200 per campaign per tick; a
+campaign with tens of thousands of recipients takes multiple ticks by
+design, not a bug). If it's been well over 15 minutes with no progress
+at all, check the `bot` container is actually running (see the
+`queued`/`scheduled` case above).
 
 **A specific recipient never got their message.** Look up their delivery
 row's `status`/`failure_reason` on the campaign's detail page. `blocked`

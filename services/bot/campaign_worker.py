@@ -6,16 +6,23 @@ already holding the shared Notifier/Bot instance every outbound message
 goes through -- campaigns reuse that exact pipeline, they never get a
 second one.
 
-Crash-safety by construction, not a separate recovery sweep: a
-campaign's own status only ever advances 'queued'/'scheduled' -> 'sending'
-via one atomic claim (see _claim_due_campaigns), but *dispatching* a
-sending campaign's still-pending deliveries is not a one-time event tied
-to that claim -- every tick re-scans every 'sending' campaign for
-deliveries still sitting at 'pending' and enqueues exactly those. A crash
-between marking a delivery 'processing' and it actually reaching
-Notifier just leaves it 'pending' (never advanced), so the very next
-tick picks it up again -- the same outcome a dedicated startup recovery
-sweep would produce, without needing one.
+Crash-safety by construction for most of the pipeline: a campaign's own
+status only ever advances 'queued'/'scheduled' -> 'sending' via one
+atomic claim (see _claim_due_campaigns), but *dispatching* a sending
+campaign's still-pending deliveries is not a one-time event tied to that
+claim -- every tick re-scans every 'sending' campaign for deliveries
+still sitting at 'pending' and enqueues exactly those. The one narrower
+window this didn't originally cover -- a delivery stuck at 'processing'
+because the process died between marking it and actually enqueueing it
+-- is closed by _reclaim_stuck_deliveries(), run every tick before
+dispatch: any 'processing' row idle past RECLAIM_STUCK_AFTER_SECONDS
+resets to 'pending' and gets picked up by the normal dispatch path on
+this same tick. This can occasionally cause a delivery to be enqueued
+twice (once before a crash, once by the reclaim, if the original enqueue
+had actually succeeded) -- notification_relay.py::process_one() is what
+guarantees that never becomes a real duplicate Telegram message, by
+checking the delivery's own current status before ever calling
+notifier.send().
 """
 
 from __future__ import annotations
@@ -34,6 +41,51 @@ logger = structlog.get_logger()
 
 POLL_INTERVAL_SECONDS = 10
 DISPATCH_BATCH_SIZE = 200
+# A production-readiness pass closed the one previously-accepted gap in
+# this worker (see docs/NOTIFICATION_CENTER_ARCHITECTURE.md's "Crash
+# safety" section, written when this was still an open limitation): a
+# delivery stuck at 'processing' because the process died between the
+# Postgres UPDATE and the Redis XADD no longer sits there forever.
+# 15 minutes is deliberately generous, not tightly tuned -- Notifier's
+# own worst case for one message (services/bot/notifier.py's
+# max_attempts=5, each a real TelegramRetryAfter wait) is on the order of
+# a few minutes, plus whatever the global rate-limited queue's own depth
+# adds ahead of it. Reclaiming too early only costs a harmless extra
+# stream entry (see notification_relay.py's own idempotency check, which
+# is what actually makes any reclaim safe against a duplicate send, not
+# this threshold's precision) -- reclaiming too late just delays recovery.
+RECLAIM_STUCK_AFTER_SECONDS = 900
+
+
+async def _reclaim_stuck_deliveries(pool: asyncpg.Pool) -> int:
+    """Resets a delivery stuck at 'processing' well past any plausible
+    real in-flight time back to 'pending', so the very next dispatch pass
+    in this same tick (process_once() calls this before
+    _dispatch_pending_deliveries()) picks it up again through the normal
+    path -- no separate re-enqueue code path to keep in sync with the
+    real one. Safe against ever double-sending: if the original enqueue
+    actually did succeed and the relay just hasn't gotten to it yet, a
+    second dispatch would enqueue a second stream entry for the same
+    delivery_id, but notification_relay.py::process_one() checks the
+    delivery's own current status before ever calling notifier.send()
+    and skips a redundant entry outright.
+    """
+    rows = await pool.fetch(
+        """
+        UPDATE notification_deliveries
+        SET status = 'pending'
+        WHERE status = 'processing'
+          AND last_attempt_at < now() - make_interval(secs => $1)
+        RETURNING id
+        """,
+        RECLAIM_STUCK_AFTER_SECONDS,
+    )
+    if rows:
+        logger.warning(
+            "notification_delivery_reclaimed_from_stuck_processing",
+            delivery_ids=[r["id"] for r in rows],
+        )
+    return len(rows)
 
 
 async def _claim_due_campaigns(pool: asyncpg.Pool) -> list[int]:
@@ -91,19 +143,15 @@ async def _resolve_and_seed_deliveries(pool: asyncpg.Pool, campaign_id: int) -> 
 async def _dispatch_pending_deliveries(pool: asyncpg.Pool, redis: Redis, campaign_id: int) -> int:
     """Enqueues up to DISPATCH_BATCH_SIZE still-pending deliveries for one
     sending campaign. Marking 'processing' happens per-row, immediately
-    before that row's own enqueue -- deliberately in that order, and
-    deliberately not atomic across Postgres and Redis: a crash between
-    the two never sends the same delivery twice (this query only ever
-    selects 'pending' rows, so a row already marked 'processing' is never
-    re-enqueued), matching this feature's explicit priority of no
-    duplicate delivery over no lost delivery. The accepted cost is the
-    narrow inverse case: a crash landing in the gap between the UPDATE
-    committing and enqueue_campaign_message() completing leaves that one
-    row stuck at 'processing' forever (nothing re-selects it, and its
-    campaign never finalizes) -- not silent, since such a campaign stays
-    visibly 'sending' with a permanently non-terminal delivery in the
-    admin console's own Deliveries view, just not self-healing. See
-    docs/NOTIFICATION_CENTER_ARCHITECTURE.md's "Crash safety" section.
+    before that row's own enqueue -- deliberately in that order: this
+    query only ever selects 'pending' rows, so a row already marked
+    'processing' is never re-enqueued by this loop itself, meaning a
+    crash between the two steps can never double-send *from this path
+    alone*. The former gap this left (a delivery stuck at 'processing'
+    forever if the process died in that exact window) is now closed by
+    _reclaim_stuck_deliveries(), called every tick before this function;
+    see its own docstring for why a reclaim-triggered re-enqueue still
+    can't cause a real duplicate Telegram message either.
     """
     campaign = await pool.fetchrow(
         "SELECT title, body FROM notification_campaigns WHERE id = $1", campaign_id
@@ -122,7 +170,9 @@ async def _dispatch_pending_deliveries(pool: asyncpg.Pool, redis: Redis, campaig
     )
     for row in rows:
         await pool.execute(
-            "UPDATE notification_deliveries SET status = 'processing' WHERE id = $1", row["delivery_id"]
+            "UPDATE notification_deliveries SET status = 'processing', last_attempt_at = now() "
+            "WHERE id = $1",
+            row["delivery_id"],
         )
         await enqueue_campaign_message(
             redis, telegram_id=row["telegram_id"], text=text, delivery_id=row["delivery_id"]
@@ -181,6 +231,7 @@ async def process_once(pool: asyncpg.Pool, redis: Redis) -> bool:
     run_forever() skip its poll sleep right after a busy tick.
     """
     claimed = await _claim_due_campaigns(pool)
+    reclaimed = await _reclaim_stuck_deliveries(pool)
 
     sending_ids = [row["id"] for row in await pool.fetch(
         "SELECT id FROM notification_campaigns WHERE status = 'sending'"
@@ -191,7 +242,7 @@ async def process_once(pool: asyncpg.Pool, redis: Redis) -> bool:
         dispatched += await _dispatch_pending_deliveries(pool, redis, campaign_id)
 
     finalized = await _finalize_completed_campaigns(pool)
-    return bool(claimed) or dispatched > 0 or finalized > 0
+    return bool(claimed) or reclaimed > 0 or dispatched > 0 or finalized > 0
 
 
 async def run_forever(pool: asyncpg.Pool, redis: Redis) -> None:

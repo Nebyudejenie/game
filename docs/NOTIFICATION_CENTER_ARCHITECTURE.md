@@ -60,7 +60,19 @@ string:
 
 `user_ids`, `status` (active/limited/self_excluded/banned), `language`
 (am/en/om/ti), `min_kyc_level`, `registered_after`, `registered_before`,
-`active_since`. An empty object (`{}`) matches every player.
+`active_since`. An empty object (`{}`) matches every *eligible* player.
+
+**`self_excluded` and `banned` users are never resolved into any
+audience, unconditionally** — this is applied after every filter clause
+in `_build_where()`, not exposed as something a filter combination could
+turn off, and confirmed to have no caller anywhere in this codebase other
+than this feature's own audience count/send path. A responsible-gambling
+finding during a production-readiness pass: leaving every filter blank
+(the UI's own documented way to "reach every player") previously resolved
+to a bare `WHERE true`, which included self-excluded and banned users —
+a real player commitment (self-exclusion) must hold regardless of what an
+admin's filter happened to say, not depend on someone remembering to
+exclude them every time.
 
 ## Campaign lifecycle
 
@@ -110,7 +122,7 @@ One tick (`process_once`) does three things in order:
 3. **Finalize**: any `sending` campaign whose deliveries are all terminal
    moves to `completed`/`partially_failed`/`failed`.
 
-### Crash safety — and its one honest, accepted gap
+### Crash safety
 
 Step 2 re-scans **every** `sending` campaign on **every** tick, not just
 freshly-claimed ones. Verified directly in `tests/integration/
@@ -125,26 +137,34 @@ Within `_dispatch_pending_deliveries()`, marking a delivery `processing`
 `enqueue_campaign_message()`) are two separate operations against two
 separate systems — not one atomic step. That ordering was chosen
 deliberately: this query only ever selects `pending` rows, so a row
-already marked `processing` is never re-enqueued, which means a crash
-here **can never send the same message twice**. That was picked over the
-alternative ordering (enqueue, then mark `processing`) specifically
-because this feature's own priority is no duplicate delivery over no
-lost delivery.
+already marked `processing` is never re-enqueued by *this* loop, which
+means a crash here can never send the same message twice **from this
+path alone**.
 
-The accepted cost is the inverse, narrower case: a crash landing in the
-gap between the `UPDATE` committing and the `XADD` completing leaves that
-one delivery row stuck at `processing` forever — no later tick re-selects
-it (it isn't `pending`), and its campaign never reaches a terminal status
-(`_finalize_completed_campaigns` only advances once every delivery is
-terminal). This is not silent: such a campaign stays visibly `sending`
-with a permanently non-advancing delivery row in the admin console's own
-Deliveries view, so it's observable, not swallowed — but it does not
-self-heal, and today there is no automated reclaim for it. Given how
-narrow the window is (one row, one await, no retries or backoff in
-between) this is treated as an accepted, documented limitation rather
-than a blocking defect — flagged explicitly rather than left implicit,
-per this project's own standing rule against overclaiming a guarantee
-a comment or doc doesn't actually back up.
+**The narrower gap this used to leave** — a crash landing in the exact
+gap between the `UPDATE` committing and the `XADD` completing left that
+one delivery row stuck at `processing` forever, with no automated
+reclaim — is now closed. `_reclaim_stuck_deliveries()` (run every tick,
+before dispatch) resets any `processing` row idle past
+`RECLAIM_STUCK_AFTER_SECONDS` (15 minutes — deliberately generous, not
+tightly tuned) back to `pending`, so the same tick's own dispatch pass
+picks it up again through the normal path. This can, in principle,
+enqueue a delivery twice (once before the crash, if the original `XADD`
+had actually landed; once from the reclaim) — what makes that still never
+become a real duplicate Telegram message is `notification_relay.py::
+process_one()` re-checking the delivery's own live status immediately
+before ever calling `notifier.send()`, and skipping outright if it's no
+longer `processing` (i.e. an earlier stream entry for the same
+`delivery_id` already resolved it). This relies on the relay's own
+existing guarantee that one user's own stream entries are always
+processed in order, never concurrently with each other (see
+`_drain_one_user()`) — so a duplicate entry is only ever dequeued *after*
+the original one has already reached a terminal state. Verified directly:
+`test_reclaim_resets_a_delivery_stuck_at_processing_past_the_threshold`
+(a real crash simulation, carried through the real relay to an actual
+`delivered` outcome) and `test_relay_skips_a_duplicate_stream_entry_for_
+an_already_delivered_delivery` (the idempotency check itself, in
+isolation).
 
 ### Delivery outcome tracking
 

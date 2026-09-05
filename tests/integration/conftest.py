@@ -35,8 +35,14 @@ os.environ.setdefault("PAYMENTS_PUBLIC_BASE_URL", "https://payments.test")
 # cannot function without it) -- a fixed, obviously-not-production key so
 # every test run derives the exact same encryption/lookup subkeys, the
 # same reasoning TELEGRAM_BOT_TOKEN above is fixed rather than randomized.
+# Generated fresh by a production-readiness security pass (`python -c
+# "import secrets; print(secrets.token_hex(32))"`) specifically to stop
+# reusing the value that had briefly leaked into .env.example's own git
+# history (removed from HEAD, but a value once committed is recoverable
+# from history forever regardless) -- this one has never appeared in any
+# committed file anywhere, so it carries no such residual exposure.
 os.environ.setdefault(
-    "PHONE_ENCRYPTION_KEY", "e3ac1d8cf1864fbd35540bf4a462be1bf0a7beec9c59cf28c50e4166f760c197"
+    "PHONE_ENCRYPTION_KEY", "27700ffefaa807ec0441662e1efb8c8e262152ed804dc7e45f29abf936d3d6cc"
 )
 # The payments app under test builds its /internal/telebirr/ingest bearer
 # check from settings.macrodroid_ingest_token at request time -- a fixed,
