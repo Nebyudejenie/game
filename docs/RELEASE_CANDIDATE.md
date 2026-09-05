@@ -9,10 +9,11 @@ memory.
 
 | Field | Value |
 |---|---|
+| Release candidate commit | `cd5f297e8993fadebb97fb02b86c5fcb6192244d` |
 | Base commit (parent of this pass's work) | `baeef84f68c911c2087db838a45f63a3b593b96a` |
-| Working tree state at record time | Modified (this pass's fixes/additions not yet committed — see "Changes in this pass" below); commit immediately after this document is written |
+| Working tree state at record time | Clean (committed locally; per this project's standing convention, the assistant commits and the user pushes — not yet pushed to `origin` as of this record) |
 | Branch | `main` |
-| Migration head | `4bbb21e0f5ad` (`alembic -c migrations/alembic.ini current`) |
+| Migration head | `4bbb21e0f5ad` (`alembic -c migrations/alembic.ini current`) — unchanged this pass, no schema migration added |
 | Python version | 3.12.3 |
 
 ## Dependencies (from `pyproject.toml`)
