@@ -25,7 +25,7 @@ ADMIN_WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web" / "admin"
 from packages.core.config import get_settings
 from packages.core.db_pool import create_pool
 from packages.core.redis_conn import get_redis
-from services.admin import auth, queries
+from services.admin import auth, notification_queries, queries
 from services.admin.auth import AdminSession
 from services.admin.rbac import has_permission
 
@@ -983,6 +983,284 @@ async def metrics_endpoint(request: Request) -> Response:
     # whole admin panel to have -- now applies here too.
     _check_ip_allowlist(request)
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+# --- Notification Center -----------------------------------------------
+#
+# Templates/campaigns/audience/queue/history/analytics. Sending itself
+# never happens synchronously in a request handler -- every route here
+# only ever reads state or flips a campaign's own status; the real work
+# (audience resolution, delivery, retries) is services/bot/
+# campaign_worker.py, running in the bot process against the exact same
+# rows these routes read and write.
+
+
+class CreateTemplateRequest(BaseModel):
+    name: str
+    category: str
+    title: str
+    body: str
+
+
+@app.post("/notifications/templates")
+async def create_notification_template(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("notifications:templates_manage"))],
+    body: CreateTemplateRequest,
+) -> dict[str, int]:
+    template_id = await notification_queries.create_template_admin(
+        app.state.pool,
+        admin_id=admin.admin_id,
+        name=body.name,
+        category=body.category,
+        title=body.title,
+        body=body.body,
+        ip_address=_client_ip(request),
+    )
+    return {"id": template_id}
+
+
+@app.get("/notifications/templates")
+async def list_notification_templates(
+    admin: Annotated[AdminSession, Depends(require("notifications:view"))],
+) -> list[dict[str, Any]]:
+    return await notification_queries.list_templates_admin(app.state.pool)
+
+
+class UpdateTemplateRequest(BaseModel):
+    changes: dict[str, Any]
+
+
+@app.patch("/notifications/templates/{template_id}")
+async def update_notification_template(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("notifications:templates_manage"))],
+    template_id: int,
+    body: UpdateTemplateRequest,
+) -> dict[str, bool]:
+    try:
+        updated = await notification_queries.update_template_admin(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            template_id=template_id,
+            changes=body.changes,
+            ip_address=_client_ip(request),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail="template not found")
+    return {"updated": updated}
+
+
+class AudienceCountRequest(BaseModel):
+    audience_filter: dict[str, Any] = {}
+    exclude_user_ids: list[int] = []
+
+
+@app.post("/notifications/audience/count")
+async def count_notification_audience(
+    admin: Annotated[AdminSession, Depends(require("notifications:view"))],
+    body: AudienceCountRequest,
+) -> dict[str, int]:
+    try:
+        count = await notification_queries.resolve_audience_count(
+            app.state.pool, audience_filter=body.audience_filter, exclude_user_ids=body.exclude_user_ids
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"count": count}
+
+
+class CreateCampaignRequest(BaseModel):
+    internal_name: str
+    title: str
+    body: str
+    audience_filter: dict[str, Any] = {}
+    exclude_user_ids: list[int] = []
+    template_id: int | None = None
+
+
+@app.post("/notifications/campaigns")
+async def create_notification_campaign(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("notifications:create"))],
+    body: CreateCampaignRequest,
+) -> dict[str, int]:
+    if not body.title.strip() or not body.body.strip():
+        raise HTTPException(status_code=422, detail="title and body are required")
+    campaign_id = await notification_queries.create_campaign_admin(
+        app.state.pool,
+        admin_id=admin.admin_id,
+        internal_name=body.internal_name,
+        title=body.title,
+        body=body.body,
+        audience_filter=body.audience_filter,
+        exclude_user_ids=body.exclude_user_ids,
+        template_id=body.template_id,
+        ip_address=_client_ip(request),
+    )
+    return {"id": campaign_id}
+
+
+@app.get("/notifications/campaigns")
+async def list_notification_campaigns(
+    admin: Annotated[AdminSession, Depends(require("notifications:view"))],
+    status: str | None = None,
+    search: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    return await notification_queries.list_campaigns_admin(
+        app.state.pool, status=status, search=search, limit=limit, offset=offset
+    )
+
+
+@app.get("/notifications/campaigns/{campaign_id}")
+async def get_notification_campaign(
+    admin: Annotated[AdminSession, Depends(require("notifications:view"))],
+    campaign_id: int,
+) -> dict[str, Any]:
+    detail = await notification_queries.get_campaign_detail_admin(app.state.pool, campaign_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    return detail
+
+
+class UpdateCampaignRequest(BaseModel):
+    changes: dict[str, Any]
+
+
+@app.patch("/notifications/campaigns/{campaign_id}")
+async def update_notification_campaign(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("notifications:create"))],
+    campaign_id: int,
+    body: UpdateCampaignRequest,
+) -> dict[str, bool]:
+    try:
+        updated = await notification_queries.update_campaign_admin(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            campaign_id=campaign_id,
+            changes=body.changes,
+            ip_address=_client_ip(request),
+        )
+    except notification_queries.CampaignNotEditable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    return {"updated": updated}
+
+
+@app.delete("/notifications/campaigns/{campaign_id}")
+async def delete_draft_notification_campaign(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("notifications:create"))],
+    campaign_id: int,
+) -> dict[str, bool]:
+    deleted = await notification_queries.delete_draft_campaign_admin(
+        app.state.pool, admin_id=admin.admin_id, campaign_id=campaign_id, ip_address=_client_ip(request)
+    )
+    if not deleted:
+        raise HTTPException(status_code=404, detail="draft campaign not found")
+    return {"deleted": deleted}
+
+
+@app.post("/notifications/campaigns/{campaign_id}/duplicate")
+async def duplicate_notification_campaign(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("notifications:create"))],
+    campaign_id: int,
+) -> dict[str, int]:
+    new_id = await notification_queries.duplicate_campaign_admin(
+        app.state.pool, admin_id=admin.admin_id, campaign_id=campaign_id, ip_address=_client_ip(request)
+    )
+    if new_id is None:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    return {"id": new_id}
+
+
+@app.post("/notifications/campaigns/{campaign_id}/send")
+async def send_notification_campaign_now(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("notifications:send"))],
+    campaign_id: int,
+) -> dict[str, bool]:
+    try:
+        sent = await notification_queries.send_campaign_now_admin(
+            app.state.pool, admin_id=admin.admin_id, campaign_id=campaign_id, ip_address=_client_ip(request)
+        )
+    except notification_queries.InvalidCampaignTransition as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not sent:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    return {"queued": sent}
+
+
+class ScheduleCampaignRequest(BaseModel):
+    scheduled_at: datetime
+
+
+@app.post("/notifications/campaigns/{campaign_id}/schedule")
+async def schedule_notification_campaign(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("notifications:schedule"))],
+    campaign_id: int,
+    body: ScheduleCampaignRequest,
+) -> dict[str, bool]:
+    try:
+        scheduled = await notification_queries.schedule_campaign_admin(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            campaign_id=campaign_id,
+            scheduled_at=body.scheduled_at,
+            ip_address=_client_ip(request),
+        )
+    except notification_queries.InvalidCampaignTransition as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not scheduled:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    return {"scheduled": scheduled}
+
+
+@app.post("/notifications/campaigns/{campaign_id}/cancel")
+async def cancel_notification_campaign(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("notifications:cancel"))],
+    campaign_id: int,
+) -> dict[str, bool]:
+    try:
+        cancelled = await notification_queries.cancel_campaign_admin(
+            app.state.pool, admin_id=admin.admin_id, campaign_id=campaign_id, ip_address=_client_ip(request)
+        )
+    except notification_queries.InvalidCampaignTransition as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not cancelled:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    return {"cancelled": cancelled}
+
+
+@app.get("/notifications/campaigns/{campaign_id}/deliveries")
+async def list_notification_campaign_deliveries(
+    admin: Annotated[AdminSession, Depends(require("notifications:view_delivery_details"))],
+    campaign_id: int,
+    status: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    return await notification_queries.list_deliveries_admin(
+        app.state.pool, campaign_id=campaign_id, status=status, limit=limit, offset=offset
+    )
+
+
+@app.get("/notifications/overview")
+async def notification_center_overview(
+    admin: Annotated[AdminSession, Depends(require("notifications:view_analytics"))],
+) -> dict[str, Any]:
+    return await notification_queries.notification_overview_admin(app.state.pool)
 
 
 # Mounted last, same reasoning as services/gateway/app.py's own miniapp

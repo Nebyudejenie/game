@@ -379,9 +379,33 @@ textarea {
 .badge-approved,
 .badge-succeeded,
 .badge-done,
-.badge-redeemed {
+.badge-redeemed,
+.badge-sending,
+.badge-queued {
   background: #dbeafe;
   color: var(--primary);
+}
+
+.badge-draft,
+.badge-cancelled {
+  background: #e5e7eb;
+  color: var(--text-dim);
+}
+
+.badge-scheduled,
+.badge-partially_failed {
+  background: #fef3c7;
+  color: var(--warn);
+}
+
+.badge-completed {
+  background: #dcfce7;
+  color: var(--success);
+}
+
+.badge-failed {
+  background: #fde8e6;
+  color: var(--danger);
 }
 
 pre.code-block {

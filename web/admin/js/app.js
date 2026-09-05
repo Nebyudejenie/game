@@ -12,6 +12,7 @@ import * as paymentAgentsScreen from "./screens/payment_agents.js";
 import * as providerAvailabilityScreen from "./screens/provider_availability.js";
 import * as roundsScreen from "./screens/rounds.js";
 import * as roomsScreen from "./screens/rooms.js";
+import * as notificationsScreen from "./screens/notifications.js";
 import * as reportsScreen from "./screens/reports.js";
 import * as riskScreen from "./screens/risk.js";
 import * as auditScreen from "./screens/audit.js";
@@ -32,6 +33,7 @@ const SCREENS = {
   provider_availability: providerAvailabilityScreen,
   rounds: roundsScreen,
   rooms: roomsScreen,
+  notifications: notificationsScreen,
   reports: reportsScreen,
   risk: riskScreen,
   audit: auditScreen,
@@ -48,6 +50,7 @@ const SCREENS = {
 const SCREEN_VIEW_ROLES = {
   reports: ["finance", "superadmin"],
   risk: ["ops", "finance", "superadmin"],
+  notifications: ["ops", "superadmin"],
   audit: ["superadmin"],
 };
 

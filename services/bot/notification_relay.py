@@ -47,9 +47,21 @@ async def _language_for_telegram_id(pool: asyncpg.Pool, telegram_id: int) -> str
 
 async def process_one(pool: asyncpg.Pool, redis: Redis, notifier: Notifier, *, msg_id: str, fields: dict[str, str]) -> None:
     telegram_id = int(fields["telegram_id"])
-    key = fields["key"]
-    kwargs: dict[str, Any] = json.loads(fields["kwargs"])
-    language = await _language_for_telegram_id(pool, telegram_id)
+    # Two message shapes share this one stream: notify_user()'s own
+    # {key, kwargs} (an i18n lookup -- every existing caller) and the
+    # Notification Center's {raw_text, delivery_id} (an admin-authored
+    # campaign message -- there is no i18n key for content an admin typed
+    # themselves). raw_text's presence is what distinguishes them, not a
+    # separate stream or a type field, so every existing producer/consumer
+    # of NOTIFICATIONS_STREAM is untouched.
+    if "raw_text" in fields:
+        text = fields["raw_text"]
+    else:
+        key = fields["key"]
+        kwargs: dict[str, Any] = json.loads(fields["kwargs"])
+        language = await _language_for_telegram_id(pool, telegram_id)
+        text = t(key, language, **kwargs)
+
     # Notifier.send() only enqueues -- the actual Telegram API call happens
     # later, in Notifier's own background worker, subject to its global
     # rate pace and 429 backoff. A code review pass caught that acking
@@ -61,8 +73,25 @@ async def process_one(pool: asyncpg.Pool, redis: Redis, notifier: Notifier, *, m
     # stream entry claiming it was already gone. Awaiting the future
     # send() now returns makes this ack happen only once Notifier reaches
     # a real terminal outcome for this message.
-    done = await notifier.send(telegram_id, t(key, language, **kwargs))
-    await done
+    done = await notifier.send(telegram_id, text)
+    outcome = await done
+
+    delivery_id = fields.get("delivery_id")
+    if delivery_id is not None:
+        # Local import: keeps packages/core/campaigns.py (which never
+        # otherwise appears in the bot process's import graph) out of
+        # every other, non-campaign call through this same relay.
+        from packages.core.campaigns import mark_delivery_outcome
+        from packages.core.metrics import notification_campaign_deliveries_total
+
+        notification_campaign_deliveries_total.labels(outcome=outcome).inc()
+        await mark_delivery_outcome(
+            pool,
+            delivery_id=int(delivery_id),
+            outcome="delivered" if outcome == "delivered" else "failed",
+            failure_reason=None if outcome == "delivered" else outcome,
+        )
+
     await redis.xack(NOTIFICATIONS_STREAM, GROUP, msg_id)
 
 

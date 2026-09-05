@@ -19,7 +19,7 @@ the hostname you're told to use just matches your role). Gated by
 login — verified live, both together. `http://127.0.0.1:8001` on the
 production host via an SSH tunnel still works too, unchanged.
 
-## The 14 screens (`web/admin/js/app.js`'s own nav order)
+## The 15 screens (`web/admin/js/app.js`'s own nav order)
 
 | Screen | Backing endpoint(s) | Visible to |
 |---|---|---|
@@ -34,6 +34,7 @@ production host via an SSH tunnel still works too, unchanged.
 | Provider Availability | `GET /payment-provider-availability`, toggle | all four roles can view; toggling `telebirr_sms`/`chapa`/`manual` on or off is superadmin-only |
 | Rounds | round history/detail | all four roles |
 | Rooms | room config CRUD | all four roles (mutations are superadmin-gated server-side where they affect money — win_patterns, stake, etc.) |
+| Notifications | `services/admin/app.py`'s `/notifications/*` routes — see `docs/NOTIFICATION_CENTER_ADMIN_GUIDE.md` | **ops + superadmin only** (hidden from support/finance in the nav and in `rbac.py`; drafting/viewing/templates/analytics is ops+superadmin, actually sending/scheduling/cancelling a real send is superadmin-only) |
 | Reports | aggregate financial reporting | **finance + superadmin only** (hidden from support/ops in the nav; a direct API call from support/ops still gets a real `403`, verified) |
 | Risk | risk/fraud signals | **ops + finance + superadmin only** |
 | Audit Log | `GET /audit-log` | **superadmin only** |

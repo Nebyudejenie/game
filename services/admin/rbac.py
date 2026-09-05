@@ -45,6 +45,23 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     # shows (ops handles collusion/room abuse, finance handles payout
     # fraud), not a general reporting/analytics permission.
     "risk:view": frozenset({"ops", "finance", "superadmin"}),
+    # Notification Center: deliberately does NOT include finance or
+    # support -- messaging every player is an operational (ops) concern
+    # (maintenance windows, game announcements), not a financial-review
+    # or player-support one, and existing roles gain nothing here just
+    # because the feature exists. Drafting/viewing is ops+superadmin;
+    # actually causing a real send is superadmin-only, the same
+    # "highest-leverage lever" reasoning payments:configure already uses
+    # -- a real broadcast reaches every targeted player at once, the
+    # same blast-radius shape as redirecting where deposits get paid.
+    "notifications:view": frozenset({"ops", "superadmin"}),
+    "notifications:create": frozenset({"ops", "superadmin"}),
+    "notifications:send": frozenset({"superadmin"}),
+    "notifications:schedule": frozenset({"superadmin"}),
+    "notifications:cancel": frozenset({"superadmin"}),
+    "notifications:templates_manage": frozenset({"ops", "superadmin"}),
+    "notifications:view_analytics": frozenset({"ops", "superadmin"}),
+    "notifications:view_delivery_details": frozenset({"ops", "superadmin"}),
 }
 
 

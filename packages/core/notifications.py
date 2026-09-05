@@ -46,3 +46,25 @@ async def notify_user(
         )
     except Exception as exc:
         logger.error("notify_user_enqueue_failed", user_id=user_id, key=key, error=str(exc))
+
+
+async def enqueue_campaign_message(
+    redis: Redis, *, telegram_id: int, text: str, delivery_id: int
+) -> None:
+    """The Notification Center's own producer: an admin-authored campaign
+    sends raw text, never an i18n key (there is no translated string to
+    look up for content an admin typed themselves) -- the one real
+    difference from notify_user() above. Same stream, same consumer
+    (services/bot/notification_relay.py), same Notifier underneath, so
+    campaign traffic gets the exact same rate limiting and 429 backoff as
+    every other outbound message, not a second pipeline that could
+    together exceed Telegram's real rate limit. delivery_id lets the
+    relay report the real per-recipient outcome back to
+    notification_deliveries once Notifier reaches a terminal state --
+    absent for every other (non-campaign) caller of this stream, so the
+    relay's own handling stays a no-op for them.
+    """
+    await redis.xadd(
+        NOTIFICATIONS_STREAM,
+        {"telegram_id": str(telegram_id), "raw_text": text, "delivery_id": str(delivery_id)},
+    )

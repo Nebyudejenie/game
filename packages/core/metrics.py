@@ -116,6 +116,13 @@ telebirr_evidence_by_status = Gauge(
     ["status"],
 )
 
+notification_campaign_deliveries_total = Counter(
+    "notification_campaign_deliveries_total",
+    "Notification Center campaign deliveries by terminal outcome "
+    "(delivered, blocked, gave_up, failed)",
+    ["outcome"],
+)
+
 # --- reconcile_job -----------------------------------------------------
 
 # A one-shot batch job (packages/core/reconcile_job.py), not a scraped

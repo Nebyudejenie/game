@@ -30,7 +30,7 @@ from packages.core.db_pool import create_pool
 from packages.core.logging import configure_logging
 from packages.core.redis_conn import get_redis
 from packages.core.tracing import configure_tracing
-from services.bot import dedup, notification_relay
+from services.bot import campaign_worker, dedup, notification_relay
 from services.bot.handlers import router
 from services.bot.notifier import Notifier
 
@@ -111,9 +111,10 @@ def main() -> None:
     redis: Redis | None = None
     notifier: Notifier | None = None
     relay_task: asyncio.Task[None] | None = None
+    campaign_task: asyncio.Task[None] | None = None
 
     async def _on_startup() -> None:
-        nonlocal relay_task
+        nonlocal relay_task, campaign_task
         assert notifier is not None and pool is not None and redis is not None
         if settings.public_base_url:
             await bot.set_webhook(
@@ -122,10 +123,18 @@ def main() -> None:
             )
         notifier.start()
         relay_task = asyncio.create_task(notification_relay.run_forever(pool, redis, notifier))
+        # Notification Center campaign delivery -- same process, same
+        # Notifier instance, same reasoning as relay_task above: this is
+        # the one process already holding the shared rate-limited/
+        # 429-backed-off outbound pipeline every Telegram message goes
+        # through, campaigns reuse it rather than starting a second one.
+        campaign_task = asyncio.create_task(campaign_worker.run_forever(pool, redis))
 
     async def _on_shutdown() -> None:
         if relay_task is not None:
             relay_task.cancel()
+        if campaign_task is not None:
+            campaign_task.cancel()
         assert notifier is not None and pool is not None and redis is not None
         await notifier.stop()
         if pool is not None:
