@@ -20,10 +20,18 @@ from redis.asyncio import Redis
 from packages.core import bingo, ledger, metrics
 from packages.core.notifications import notify_user
 from packages.core.phone_crypto import decrypt_phone, phone_lookup_hash
-from services.admin import audit
+from services.admin import audit, auth, rbac
 from services.bot.phone import normalize_ethiopian_phone
 from services.engine.refunds import refund_round_in_transaction
 from services.payments.withdrawals import enqueue_payout
+
+
+class AdminUsernameTaken(ValueError):
+    pass
+
+
+class CannotModifyOwnAccount(ValueError):
+    pass
 
 
 # A code review pass caught dashboard_summary()/daily_ggr() computing
@@ -1098,9 +1106,29 @@ async def resolve_payment_evidence_admin(
 
 
 async def list_payment_agents(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+    # Real activity, not just the allowlist: services/bot/handlers.py's
+    # on_agent_sms stamps source_ref with str(message.from_user.id) for
+    # every SMS an agent forwards (source='telegram_agent'), which is
+    # exactly payment_agents.telegram_user_id -- joined here (aggregated
+    # first, in a subquery, rather than a raw join against the full
+    # evidence table) so "is this agent actually doing anything" is
+    # answerable without a separate query per agent.
     rows = await pool.fetch(
-        "SELECT id, telegram_user_id, display_name, is_active, created_at "
-        "FROM payment_agents ORDER BY id"
+        """
+        SELECT pa.id, pa.telegram_user_id, pa.display_name, pa.is_active, pa.created_at,
+               COALESCE(stats.submission_count, 0) AS submission_count,
+               stats.last_submission_at
+        FROM payment_agents pa
+        LEFT JOIN (
+            SELECT source_ref::bigint AS telegram_user_id,
+                   count(*) AS submission_count,
+                   max(received_at) AS last_submission_at
+            FROM payment_evidence
+            WHERE source = 'telegram_agent'
+            GROUP BY source_ref::bigint
+        ) stats ON stats.telegram_user_id = pa.telegram_user_id
+        ORDER BY pa.id
+        """
     )
     return [dict(r) for r in rows]
 
@@ -1151,6 +1179,150 @@ async def set_payment_agent_active_admin(
                 target_id=str(agent_id),
                 before={"is_active": before["is_active"]},
                 after={"is_active": is_active},
+                ip_address=ip_address,
+            )
+    return True
+
+
+# --- admin account management (services/admin/auth.py's own docstring
+# used to say "provisioned out-of-band by a trusted operator" -- there
+# was never a console route for it, only direct DB/script access. These
+# are the console-facing wrappers around auth.create_admin_user() and
+# admin_users.is_active, gated to admin_users:manage (superadmin-only,
+# see rbac.py's own comment on why) -----------------------------------
+
+_MIN_ADMIN_PASSWORD_LENGTH = 12
+
+
+async def list_admin_users(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+    rows = await pool.fetch(
+        "SELECT id, username, role, is_active, created_at, last_login_at "
+        "FROM admin_users ORDER BY id"
+    )
+    return [dict(r) for r in rows]
+
+
+async def create_admin_user_admin(
+    pool: asyncpg.Pool, *, admin_id: int, username: str, password: str, role: str, ip_address: str | None
+) -> dict[str, Any]:
+    """Returns {id, totp_secret, totp_provisioning_uri} -- the one and
+    only time the secret is ever visible, same guarantee auth.py's own
+    docstring already makes for the script-based path this replaces.
+    """
+    if role not in rbac.KNOWN_ADMIN_ROLES:
+        raise ValueError(f"unknown role: {role!r}")
+    if len(password) < _MIN_ADMIN_PASSWORD_LENGTH:
+        raise ValueError(f"password must be at least {_MIN_ADMIN_PASSWORD_LENGTH} characters")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            try:
+                new_admin_id, totp_secret = await auth.create_admin_user(
+                    conn, username=username, password=password, role=role
+                )
+            except asyncpg.UniqueViolationError as exc:
+                raise AdminUsernameTaken(f"username already taken: {username!r}") from exc
+            # Never the password or the TOTP secret -- the audit log is
+            # readable by every superadmin, not just the one who ran this.
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="admin_users.create",
+                target_type="admin_user",
+                target_id=str(new_admin_id),
+                after={"username": username, "role": role},
+                ip_address=ip_address,
+            )
+    return {
+        "id": new_admin_id,
+        "totp_secret": totp_secret,
+        "totp_provisioning_uri": auth.totp_provisioning_uri(totp_secret, username),
+    }
+
+
+async def set_admin_user_active_admin(
+    pool: asyncpg.Pool, *, admin_id: int, target_admin_id: int, is_active: bool, ip_address: str | None
+) -> bool:
+    if target_admin_id == admin_id:
+        raise CannotModifyOwnAccount("cannot deactivate your own account")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            before = await conn.fetchrow(
+                "SELECT is_active FROM admin_users WHERE id = $1 FOR UPDATE", target_admin_id
+            )
+            if before is None:
+                return False
+            await conn.execute(
+                "UPDATE admin_users SET is_active = $2 WHERE id = $1", target_admin_id, is_active
+            )
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="admin_users.set_active",
+                target_type="admin_user",
+                target_id=str(target_admin_id),
+                before={"is_active": before["is_active"]},
+                after={"is_active": is_active},
+                ip_address=ip_address,
+            )
+    return True
+
+
+async def set_admin_user_role_admin(
+    pool: asyncpg.Pool, *, admin_id: int, target_admin_id: int, role: str, ip_address: str | None
+) -> bool:
+    if target_admin_id == admin_id:
+        raise CannotModifyOwnAccount("cannot change your own role")
+    if role not in rbac.KNOWN_ADMIN_ROLES:
+        raise ValueError(f"unknown role: {role!r}")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            before = await conn.fetchrow(
+                "SELECT role FROM admin_users WHERE id = $1 FOR UPDATE", target_admin_id
+            )
+            if before is None:
+                return False
+            await conn.execute(
+                "UPDATE admin_users SET role = $2 WHERE id = $1", target_admin_id, role
+            )
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="admin_users.set_role",
+                target_type="admin_user",
+                target_id=str(target_admin_id),
+                before={"role": before["role"]},
+                after={"role": role},
+                ip_address=ip_address,
+            )
+    return True
+
+
+async def reset_admin_user_password_admin(
+    pool: asyncpg.Pool, *, admin_id: int, target_admin_id: int, new_password: str, ip_address: str | None
+) -> bool:
+    if len(new_password) < _MIN_ADMIN_PASSWORD_LENGTH:
+        raise ValueError(f"password must be at least {_MIN_ADMIN_PASSWORD_LENGTH} characters")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            exists = await conn.fetchval(
+                "SELECT id FROM admin_users WHERE id = $1 FOR UPDATE", target_admin_id
+            )
+            if exists is None:
+                return False
+            await conn.execute(
+                "UPDATE admin_users SET password_hash = $2 WHERE id = $1",
+                target_admin_id,
+                auth.hash_password(new_password),
+            )
+            # Never the password itself, before or after -- resetting is
+            # the one admin_users action with nothing safe to log beyond
+            # that it happened.
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="admin_users.reset_password",
+                target_type="admin_user",
+                target_id=str(target_admin_id),
                 ip_address=ip_address,
             )
     return True

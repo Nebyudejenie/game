@@ -16,6 +16,7 @@ import * as notificationsScreen from "./screens/notifications.js";
 import * as reportsScreen from "./screens/reports.js";
 import * as riskScreen from "./screens/risk.js";
 import * as auditScreen from "./screens/audit.js";
+import * as adminUsersScreen from "./screens/admin_users.js";
 
 // Order here is the nav order. Each screen owns its own error handling
 // (an inline banner using the real API error detail, e.g. "role 'support'
@@ -37,6 +38,7 @@ const SCREENS = {
   reports: reportsScreen,
   risk: riskScreen,
   audit: auditScreen,
+  admin_users: adminUsersScreen,
 };
 
 // A client-side mirror of services/admin/rbac.py's *:view permissions,
@@ -52,6 +54,7 @@ const SCREEN_VIEW_ROLES = {
   risk: ["ops", "finance", "superadmin"],
   notifications: ["ops", "superadmin"],
   audit: ["superadmin"],
+  admin_users: ["superadmin"],
 };
 
 function visibleScreens(role) {

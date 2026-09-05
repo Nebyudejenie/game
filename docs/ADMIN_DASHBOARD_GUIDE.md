@@ -19,7 +19,7 @@ the hostname you're told to use just matches your role). Gated by
 login — verified live, both together. `http://127.0.0.1:8001` on the
 production host via an SSH tunnel still works too, unchanged.
 
-## The 15 screens (`web/admin/js/app.js`'s own nav order)
+## The 16 screens (`web/admin/js/app.js`'s own nav order)
 
 | Screen | Backing endpoint(s) | Visible to |
 |---|---|---|
@@ -37,7 +37,8 @@ production host via an SSH tunnel still works too, unchanged.
 | Notifications | `services/admin/app.py`'s `/notifications/*` routes — see `docs/NOTIFICATION_CENTER_ADMIN_GUIDE.md` | **ops + superadmin only** (hidden from support/finance in the nav and in `rbac.py`; drafting/viewing/templates/analytics is ops+superadmin, actually sending/scheduling/cancelling a real send is superadmin-only) |
 | Reports | aggregate financial reporting | **finance + superadmin only** (hidden from support/ops in the nav; a direct API call from support/ops still gets a real `403`, verified) |
 | Risk | risk/fraud signals | **ops + finance + superadmin only** |
-| Audit Log | `GET /audit-log` | **superadmin only** |
+| Audit Log | `GET /audit-log`, filterable by `admin_id`/`action` | **superadmin only** |
+| Admin Users | `GET/POST /admin-users`, `PATCH .../active`, `PATCH .../role`, `POST .../reset-password` | **superadmin only** — see below |
 
 The nav-visibility list (`SCREEN_VIEW_ROLES` in `app.js`) is a courtesy —
 its own comment says so directly: "the backend remains the sole real
@@ -60,7 +61,40 @@ ever exists as a Telegram user. An admin (with `payments:configure`,
 superadmin-only) manages the agent allowlist itself — who's authorized
 at all — through the **Payment Agents** screen above; that's a different
 capability from an agent viewing their own submission history, which is
-what the separate Agent Portal is for.
+what the separate Agent Portal is for. That screen also shows each
+agent's real activity (`submission_count`/`last_submission_at`, joined
+from `payment_evidence` where `source = 'telegram_agent'`) — not just
+the allowlist, so a superadmin can tell an authorized-but-idle agent
+from one actually forwarding SMS.
+
+## Admin Users — who can log into this console at all
+
+Before this screen existed, every admin account (support/finance/ops/
+superadmin) was provisioned entirely out-of-band: `services/admin/
+auth.py::create_admin_user()` always existed, but nothing in the console
+ever called it — a new account meant someone with direct database/script
+access running it by hand. The **Admin Users** screen (and the
+`admin_users:manage` permission behind it, `rbac.py`'s own comment calls
+it "the single highest-leverage lever in the whole system, higher even
+than `payments:configure`") replaces that with a real console flow:
+
+- **Create** an account (username, temporary password, role) — the TOTP
+  secret and provisioning URI are shown exactly once, in the response to
+  that one request, and are never retrievable again afterward (same
+  guarantee the script-based path always made, now surfaced in the UI).
+- **Activate/deactivate** — `auth.resolve_session()` already re-checks
+  `is_active` on every request, so deactivating someone revokes their
+  *current* session immediately, not just future logins.
+- **Change role** — takes effect on that admin's next login (an
+  already-issued session keeps the role it was issued with until it
+  expires or they log in again).
+- **Reset password** — for a forgotten password; never logs the new
+  value anywhere, including the audit trail.
+
+An admin can't deactivate or change the role of their **own** account
+through this screen (`CannotModifyOwnAccount`, a `409`) — both would risk
+a superadmin locking themselves out mid-session with no one else able to
+undo it from inside the console.
 
 ## Financial data safety (verified, not assumed)
 

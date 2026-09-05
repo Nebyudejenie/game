@@ -902,6 +902,124 @@ async def set_payment_agent_active(
     return {"updated": updated}
 
 
+# --- admin account management (superadmin-only -- see rbac.py's own
+# comment on admin_users:manage) -----------------------------------------
+
+
+@app.get("/admin-users")
+async def list_admin_users(
+    admin: Annotated[AdminSession, Depends(require("admin_users:manage"))],
+) -> list[dict[str, Any]]:
+    return await queries.list_admin_users(app.state.pool)
+
+
+class CreateAdminUserRequest(BaseModel):
+    username: str
+    password: str
+    role: str
+
+
+@app.post("/admin-users")
+async def create_admin_user_route(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("admin_users:manage"))],
+    body: CreateAdminUserRequest,
+) -> dict[str, Any]:
+    try:
+        return await queries.create_admin_user_admin(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            username=body.username,
+            password=body.password,
+            role=body.role,
+            ip_address=_client_ip(request),
+        )
+    except queries.AdminUsernameTaken as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+class SetAdminUserActiveRequest(BaseModel):
+    is_active: bool
+
+
+@app.patch("/admin-users/{target_admin_id}/active")
+async def set_admin_user_active(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("admin_users:manage"))],
+    target_admin_id: int,
+    body: SetAdminUserActiveRequest,
+) -> dict[str, bool]:
+    try:
+        updated = await queries.set_admin_user_active_admin(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            target_admin_id=target_admin_id,
+            is_active=body.is_active,
+            ip_address=_client_ip(request),
+        )
+    except queries.CannotModifyOwnAccount as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail="admin user not found")
+    return {"updated": updated}
+
+
+class SetAdminUserRoleRequest(BaseModel):
+    role: str
+
+
+@app.patch("/admin-users/{target_admin_id}/role")
+async def set_admin_user_role(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("admin_users:manage"))],
+    target_admin_id: int,
+    body: SetAdminUserRoleRequest,
+) -> dict[str, bool]:
+    try:
+        updated = await queries.set_admin_user_role_admin(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            target_admin_id=target_admin_id,
+            role=body.role,
+            ip_address=_client_ip(request),
+        )
+    except queries.CannotModifyOwnAccount as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail="admin user not found")
+    return {"updated": updated}
+
+
+class ResetAdminUserPasswordRequest(BaseModel):
+    new_password: str
+
+
+@app.post("/admin-users/{target_admin_id}/reset-password")
+async def reset_admin_user_password(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("admin_users:manage"))],
+    target_admin_id: int,
+    body: ResetAdminUserPasswordRequest,
+) -> dict[str, bool]:
+    try:
+        updated = await queries.reset_admin_user_password_admin(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            target_admin_id=target_admin_id,
+            new_password=body.new_password,
+            ip_address=_client_ip(request),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail="admin user not found")
+    return {"updated": updated}
+
+
 # --- reports ---------------------------------------------------------------
 
 
@@ -952,12 +1070,39 @@ async def risk_repeat_pairings(
 
 @app.get("/audit-log")
 async def audit_log(
-    admin: Annotated[AdminSession, Depends(require("audit:view"))], limit: int = 100
+    admin: Annotated[AdminSession, Depends(require("audit:view"))],
+    limit: int = 100,
+    admin_id: int | None = None,
+    action: str | None = None,
 ) -> list[dict[str, Any]]:
+    # admin_id/action let a superadmin pull one specific admin's (or one
+    # specific action type's) history without scrolling the combined feed
+    # of every admin's actions -- exact-match only, both parameterized,
+    # same as every other filtered list in this console.
+    clauses = []
+    params: list[Any] = []
+
+    def _p(value: Any) -> str:
+        params.append(value)
+        return f"${len(params)}"
+
+    if admin_id is not None:
+        clauses.append(f"l.admin_id = {_p(admin_id)}")
+    if action is not None:
+        clauses.append(f"l.action = {_p(action)}")
+    where = " AND ".join(clauses) if clauses else "true"
+    params.append(limit)
     rows = await app.state.pool.fetch(
-        "SELECT id, admin_id, action, target_type, target_id, before, after, "
-        "reason, ip_address, created_at FROM admin_audit_log ORDER BY id DESC LIMIT $1",
-        limit,
+        f"""
+        SELECT l.id, l.admin_id, a.username AS admin_username, l.action, l.target_type, l.target_id,
+               l.before, l.after, l.reason, l.ip_address, l.created_at
+        FROM admin_audit_log l
+        JOIN admin_users a ON a.id = l.admin_id
+        WHERE {where}
+        ORDER BY l.id DESC
+        LIMIT ${len(params)}
+        """,
+        *params,
     )
     return [dict(r) for r in rows]
 

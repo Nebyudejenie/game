@@ -21,6 +21,7 @@ import pyotp
 from redis.asyncio import Redis
 
 from packages.core import rate_limit
+from packages.core.ledger import AsyncpgConnection
 
 SESSION_TTL_SECONDS = 8 * 60 * 60  # one working shift
 SESSION_KEY_PREFIX = "admin_session:"
@@ -78,12 +79,15 @@ def totp_provisioning_uri(secret: str, username: str, issuer: str = "Jo Bingo Ad
 
 
 async def create_admin_user(
-    pool: asyncpg.Pool, *, username: str, password: str, role: str
+    pool: asyncpg.Pool | AsyncpgConnection, *, username: str, password: str, role: str
 ) -> tuple[int, str]:
     """Provisions a new admin account. Returns (admin_id, totp_secret) --
     the secret must be handed to the operator out-of-band (shown once,
     scanned into an authenticator app) and is never retrievable again
-    through this module.
+    through this module. Accepts either a pool or an already-acquired
+    connection -- services/admin/queries.py's console-facing wrapper
+    calls this from inside its own transaction, so the audit log entry
+    for a new account commits atomically with the account itself.
     """
     totp_secret = generate_totp_secret()
     row = await pool.fetchrow(

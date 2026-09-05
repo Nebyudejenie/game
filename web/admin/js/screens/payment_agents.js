@@ -46,7 +46,7 @@ export async function render(container) {
     listEl.innerHTML = `
       <table class="data-table">
         <thead>
-          <tr><th>Telegram user id</th><th>Display name</th><th>Active</th><th>Added</th><th></th></tr>
+          <tr><th>Telegram user id</th><th>Display name</th><th>Active</th><th>Added</th><th>Submissions</th><th>Last submission</th><th></th></tr>
         </thead>
         <tbody>
           ${agents.map((a) => `
@@ -55,6 +55,8 @@ export async function render(container) {
               <td>${escapeHtml(a.display_name || "—")}</td>
               <td>${a.is_active ? "yes" : "no"}</td>
               <td>${fmtDate(a.created_at)}</td>
+              <td>${a.submission_count}</td>
+              <td>${fmtDate(a.last_submission_at)}</td>
               <td>
                 <button class="btn btn-secondary btn-sm toggle-active-btn">${a.is_active ? "Deactivate" : "Activate"}</button>
               </td>

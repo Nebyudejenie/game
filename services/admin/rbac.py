@@ -8,6 +8,15 @@ assigned to, checked through the exact same function as everyone else.
 
 from __future__ import annotations
 
+# Matches admin_users.role's own CHECK constraint exactly (migrations/
+# versions/1c85c3d09653_admin_console.py's ADMIN_ROLES) -- kept here
+# rather than imported from that migration (migrations are one-off,
+# frozen-in-time scripts, never a runtime dependency for app code) so
+# services/admin/queries.py's admin-account provisioning can validate a
+# requested role before insert instead of surfacing a raw DB constraint
+# violation as a 500.
+KNOWN_ADMIN_ROLES = frozenset({"support", "finance", "ops", "superadmin"})
+
 PERMISSIONS: dict[str, frozenset[str]] = {
     "dashboard:view": frozenset({"support", "finance", "ops", "superadmin"}),
     "users:view": frozenset({"support", "finance", "ops", "superadmin"}),
@@ -62,6 +71,13 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     "notifications:templates_manage": frozenset({"ops", "superadmin"}),
     "notifications:view_analytics": frozenset({"ops", "superadmin"}),
     "notifications:view_delivery_details": frozenset({"ops", "superadmin"}),
+    # The single highest-leverage lever in the whole system, higher even
+    # than payments:configure: this is what decides who *holds* every
+    # other permission in this table, including this one. superadmin-only
+    # on purpose -- finance/ops/support managing their own or each
+    # other's accounts would mean a compromised lower-privilege account
+    # could mint itself a fresh, unaudited-by-anyone-above-it identity.
+    "admin_users:manage": frozenset({"superadmin"}),
 }
 
 
