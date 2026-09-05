@@ -142,6 +142,7 @@ async def bot_setup(pool, redis):
         # miniapp_url) monkeypatch it back to "" for themselves.
         miniapp_url="https://miniapp.test",
         telegram_bot_username="jobingo_bot",
+        agent_portal_base_url="https://agent.test",
     )
     bot, session = make_bot()
     notifier = Notifier(bot)
@@ -1473,3 +1474,41 @@ async def test_pasting_the_same_complete_sms_twice_produces_one_record_not_two(p
         "SELECT count(*) FROM payment_evidence WHERE external_reference = $1", reference
     )
     assert count == 1
+
+
+async def test_portal_command_sends_a_login_link_only_to_an_active_agent(pool, redis, bot_ctx):
+    dp, bot, session = bot_ctx
+    agent_telegram_id = next_telegram_id()
+    await pool.execute(
+        "INSERT INTO payment_agents (telegram_user_id, display_name, is_active) VALUES ($1, $2, true)",
+        agent_telegram_id,
+        "Portal Test Agent",
+    )
+
+    await dp.feed_update(bot, make_text_update(agent_telegram_id, "/portal"))
+    await _settle()
+
+    assert len(session.sent) == 1
+    assert "https://agent.test/login?token=" in session.sent[0].text
+    # Command("portal") must win over on_agent_sms's own bare F.text
+    # catch-all -- this is the actual regression this test guards against:
+    # without registering the command handler *before* on_agent_sms, "/portal"
+    # would be swallowed as if it were a forwarded (unparseable) SMS.
+    unparseable_count = await pool.fetchval(
+        "SELECT count(*) FROM payment_evidence WHERE source_ref = $1", str(agent_telegram_id)
+    )
+    assert unparseable_count == 0
+
+
+async def test_portal_command_ignored_for_an_unregistered_sender(pool, bot_ctx):
+    dp, bot, session = bot_ctx
+    stranger_telegram_id = next_telegram_id()
+
+    await dp.feed_update(bot, make_text_update(stranger_telegram_id, "/portal"))
+    await _settle()
+
+    # Falls through to on_menu_text's own "please register" reply, exactly
+    # like an unregistered sender's forwarded-SMS text does above -- never
+    # a portal link handed to someone not in payment_agents.
+    assert len(session.sent) == 1
+    assert "https://agent.test/login?token=" not in session.sent[0].text

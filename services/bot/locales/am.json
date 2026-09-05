@@ -95,5 +95,7 @@
   "agent.ingest_rejected": "ማጣቀሻ {reference} ተመዝግቧል ነገር ግን ውድቅ ሆኗል ({reason})።",
   "agent.ingest_duplicate": "ማጣቀሻ {reference} አስቀድሞ ተመዝግቧል — ምንም ለውጥ የለም።",
   "agent.ingest_conflicting": "ማጣቀሻ {reference} በተለያዩ ዝርዝሮች አስቀድሞ ተመዝግቧል — ለግምገማ ተልኳል።",
-  "agent.ingest_unparseable": "ከዚያ መልእክት የክፍያ ማጣቀሻ ማንበብ አልተቻለም ({reason})።"
+  "agent.ingest_unparseable": "ከዚያ መልእክት የክፍያ ማጣቀሻ ማንበብ አልተቻለም ({reason})።",
+  "agent.portal_link": "የወኪል ፖርታል መግቢያ ማገናኛ (በ5 ደቂቃ ውስጥ ያበቃል፣ አንድ ጊዜ ብቻ ይጠቀሙበት)፦ {url}",
+  "agent.portal_not_available": "የወኪል ፖርታል በቅርቡ ይጀምራል። እባክዎ ትንሽ ይታገሱ።"
 }

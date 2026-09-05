@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Jo Bingo Agent Portal</title>
+  <link rel="stylesheet" href="css/agent.css" />
+</head>
+<body>
+  <div id="toast" class="toast"></div>
+
+  <div id="login-screen">
+    <div class="login-card">
+      <h1>Agent Portal</h1>
+      <div id="login-status" class="login-status">Send <strong>/portal</strong> to the
+        payments bot on Telegram, then open the link it sends you.</div>
+    </div>
+  </div>
+
+  <div id="app-shell" hidden>
+    <header id="header">
+      <div class="header-title">Agent Portal</div>
+      <div class="header-identity">
+        <span id="agent-name"></span>
+        <button id="logout-btn" class="btn-secondary">Log out</button>
+      </div>
+    </header>
+    <main id="content">
+      <h2>Recent submissions</h2>
+      <div id="submissions-region"></div>
+    </main>
+  </div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

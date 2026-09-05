@@ -228,6 +228,37 @@ async def test_ip_allowlist_blocks_disallowed_source(admin_server, pool):
         admin_app.state.ip_allowlist = []
 
 
+async def test_ip_allowlist_trusts_cf_connecting_ip_over_the_raw_connection_ip(admin_server, pool):
+    """The actual regression this exists to prevent: once this service
+    sits behind Cloudflare Tunnel + Traefik, request.client.host is
+    always the proxy's own address, not the real visitor's -- an
+    allowlist keyed on the raw connection IP would then either block
+    every real visitor (Traefik's IP was never allowlisted) or, worse,
+    silently allow everyone (if someone allowlisted Traefik's IP itself
+    to work around that). CF-Connecting-IP is what Cloudflare's own edge
+    sets to the true visitor IP, so the allowlist must honor it -- both
+    directions checked here: an allowed CF-Connecting-IP must pass even
+    though the raw test-client connection IP itself was never
+    allowlisted, and a disallowed one must still be blocked.
+    """
+    headers = await _auth_headers(admin_server, pool, role="superadmin")
+    admin_app.state.ip_allowlist = ["203.0.113.7"]
+    try:
+        async with httpx.AsyncClient() as client:
+            allowed = await client.get(
+                f"{admin_server}/dashboard",
+                headers={**headers, "CF-Connecting-IP": "203.0.113.7"},
+            )
+            blocked = await client.get(
+                f"{admin_server}/dashboard",
+                headers={**headers, "CF-Connecting-IP": "198.51.100.9"},
+            )
+        assert allowed.status_code == 200
+        assert blocked.status_code == 403
+    finally:
+        admin_app.state.ip_allowlist = []
+
+
 async def test_login_endpoint_is_blocked_by_the_ip_allowlist(admin_server, pool):
     # Regression: a real code review pass caught this endpoint bypassing
     # the IP allowlist entirely. It's the one route that can never go

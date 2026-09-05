@@ -49,6 +49,21 @@ app = FastAPI(lifespan=lifespan, title="Jo Bingo Admin API")
 
 
 def _client_ip(request: Request) -> str:
+    # Once this service sits behind Cloudflare Tunnel + Traefik,
+    # request.client.host only ever sees Traefik's own container IP --
+    # ADMIN_IP_ALLOWLIST would silently stop meaning anything. CF-
+    # Connecting-IP is the trustworthy signal instead: Cloudflare's edge
+    # sets it to the real visitor IP and overwrites any value a client
+    # tries to send itself (unlike X-Forwarded-For, which a client could
+    # forge freely) -- this container is never reachable except through
+    # Cloudflare once actually exposed publicly, so there is no other
+    # path an attacker could use to inject a fake header directly. Falls
+    # back to the raw connection IP so today's access pattern (an SSH
+    # tunnel straight to this container's own port, no proxy in front at
+    # all) is completely unaffected.
+    cf_connecting_ip = request.headers.get("cf-connecting-ip")
+    if cf_connecting_ip:
+        return cf_connecting_ip
     return request.client.host if request.client else "unknown"
 
 

@@ -95,5 +95,7 @@
   "agent.ingest_rejected": "Reference {reference} was recorded but rejected ({reason}).",
   "agent.ingest_duplicate": "Reference {reference} was already recorded -- no change.",
   "agent.ingest_conflicting": "Reference {reference} already exists with different details -- flagged for review.",
-  "agent.ingest_unparseable": "Could not read a payment reference from that message ({reason})."
+  "agent.ingest_unparseable": "Could not read a payment reference from that message ({reason}).",
+  "agent.portal_link": "Your Agent Portal login link (expires in 5 minutes, use it once): {url}",
+  "agent.portal_not_available": "The Agent Portal is launching soon. Please check back shortly."
 }

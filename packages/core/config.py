@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     # same URL as the player's browser-return redirect, a path with no
     # route at all. See DECISIONS.md.
     payments_public_base_url: str = ""
+    # The Payment Agent Portal's own externally-reachable base URL --
+    # used only to build the one-time login link the bot's own /portal
+    # command sends (services/payments/agent_auth.py). Same "empty means
+    # honestly refuse" discipline as public_base_url above.
+    agent_portal_base_url: str = ""
     min_deposit_etb: Decimal = Decimal("10.00")
     daily_deposit_cap_etb: Decimal = Decimal("50000.00")
     min_withdraw_etb: Decimal = Decimal("50.00")

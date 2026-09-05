@@ -34,7 +34,7 @@ from services.bot.registration import (
     get_registered_user,
     register_from_contact,
 )
-from services.payments import availability, deposits, manual, withdrawals
+from services.payments import agent_auth, availability, deposits, manual, withdrawals
 from services.payments.chapa import ChapaProvider
 from services.payments.manual_provider import ManualProvider
 from services.payments.provider import PaymentProvider
@@ -649,6 +649,34 @@ async def _is_active_payment_agent(message: Message, pool: asyncpg.Pool) -> bool
         "SELECT 1 FROM payment_agents WHERE telegram_user_id = $1 AND is_active", message.from_user.id
     )
     return row is not None
+
+
+@router.message(Command("portal"), _is_active_payment_agent)
+async def on_agent_portal_command(
+    message: Message, pool: asyncpg.Pool, redis: Redis, notifier: Notifier, settings: Settings
+) -> None:
+    """Registered before on_agent_sms's own bare F.text handler below --
+    aiogram checks handlers in registration order, so this specific
+    Command("portal") match must win over the catch-all "any text from an
+    active agent is a forwarded SMS" handler, or "/portal" itself would
+    be swallowed as if it were a Telebirr message.
+
+    The Agent Portal (web/agent) has no password of its own -- an active
+    agent is already provably authenticated right here, on the one
+    channel they've always used, so this mints a one-time login link
+    rather than standing up a second credential system (see
+    services/payments/agent_auth.py's own docstring for the full
+    reasoning).
+    """
+    assert message.from_user is not None
+    language = await _language_for(pool, message.from_user.id)
+    if not settings.agent_portal_base_url:
+        await notifier.send(message.chat.id, t("agent.portal_not_available", language))
+        return
+    url = await agent_auth.generate_login_link(
+        redis, telegram_user_id=message.from_user.id, portal_base_url=settings.agent_portal_base_url
+    )
+    await notifier.send(message.chat.id, t("agent.portal_link", language, url=url))
 
 
 @router.message(F.text, _is_active_payment_agent)

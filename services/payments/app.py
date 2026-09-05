@@ -11,18 +11,22 @@ from __future__ import annotations
 import hmac
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
+
+AGENT_WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web" / "agent"
 
 from packages.core import metrics
 from packages.core.config import get_settings
 from packages.core.db_pool import create_pool
 from packages.core.redis_conn import get_redis
 from packages.core.tracing import configure_tracing
-from services.payments import deposits
+from services.payments import agent_auth, deposits
 from services.payments.chapa import ChapaProvider
 from services.payments.provider import InvalidSignature
 from services.payments.telebirr_ingest import SOURCE_MACRODROID, ingest_sms_evidence
@@ -103,6 +107,89 @@ async def telebirr_ingest(
     }
 
 
+# --- Payment Agent Portal ---------------------------------------------
+#
+# An agent's only prior identity was a row in payment_agents plus
+# whatever Telegram already authenticated them as (see services/bot/
+# handlers.py's /portal command and agent_auth.py's own docstring for
+# why this reuses that rather than adding a second login system). These
+# three routes are the entire portal backend: exchange a one-time
+# Telegram-delivered link for a session, read who that session belongs
+# to, and read that agent's own submission history -- nothing else.
+# Never their raw SMS, never another agent's or player's data.
+
+
+class AgentLoginRequest(BaseModel):
+    token: str
+
+
+def _agent_bearer_token(authorization: str) -> str:
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    return authorization[len("Bearer ") :]
+
+
+async def _current_agent(authorization: Annotated[str, Header()] = "") -> agent_auth.AgentSession:
+    token = _agent_bearer_token(authorization)
+    session = await agent_auth.resolve_session(app.state.pool, app.state.redis, token)
+    if session is None:
+        raise HTTPException(status_code=401, detail="invalid or expired session")
+    return session
+
+
+@app.post("/agent-portal/login")
+async def agent_portal_login(body: AgentLoginRequest) -> dict[str, str]:
+    session_token = await agent_auth.consume_login_token(app.state.pool, app.state.redis, body.token)
+    if session_token is None:
+        raise HTTPException(status_code=401, detail="invalid, expired, or already-used login link")
+    return {"session_token": session_token}
+
+
+@app.post("/agent-portal/logout")
+async def agent_portal_logout(authorization: Annotated[str, Header()] = "") -> dict[str, bool]:
+    token = _agent_bearer_token(authorization)
+    await agent_auth.logout(app.state.redis, token)
+    return {"ok": True}
+
+
+@app.get("/agent-portal/me")
+async def agent_portal_me(
+    session: Annotated[agent_auth.AgentSession, Depends(_current_agent)],
+) -> dict[str, str | int | None]:
+    return {"telegram_user_id": session.telegram_user_id, "display_name": session.display_name}
+
+
+@app.get("/agent-portal/submissions")
+async def agent_portal_submissions(
+    session: Annotated[agent_auth.AgentSession, Depends(_current_agent)],
+) -> list[dict[str, str | float | None]]:
+    # Deliberately not raw_sms, payer_name, payer_phone, recipient_name,
+    # or recipient_phone -- an agent sees enough to know their own
+    # submission's fate, never another person's private information (the
+    # exact same fields the admin console's own non-finance roles are
+    # kept away from, see docs/TELEBIRR_ROLES_AND_ACCESS.md).
+    rows = await app.state.pool.fetch(
+        """
+        SELECT external_reference, amount, status, reject_reason, received_at
+        FROM payment_evidence
+        WHERE source = 'telegram_agent' AND source_ref = $1
+        ORDER BY received_at DESC
+        LIMIT 50
+        """,
+        str(session.telegram_user_id),
+    )
+    return [
+        {
+            "reference": row["external_reference"],
+            "amount": float(row["amount"]) if row["amount"] is not None else None,
+            "status": row["status"],
+            "reject_reason": row["reject_reason"],
+            "received_at": row["received_at"].isoformat(),
+        }
+        for row in rows
+    ]
+
+
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     async with app.state.pool.acquire() as conn:
@@ -131,3 +218,15 @@ async def metrics_endpoint() -> Response:
     metrics.house_revenue_total.set(float(revenue))
 
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+# Mounted last, same discipline gateway/admin's own static mounts already
+# follow: every real API route above must be registered first, or this
+# catch-all swallows it. agent.arada.fun and payments.arada.fun currently
+# route to this exact same container (see docs/PRODUCTION_DOMAIN_AND_
+# CLOUDFLARE.md) -- the Agent Portal is genuinely part of the payments
+# service, not a second service, so this static bundle also happens to
+# be reachable at payments.arada.fun/. That's harmless: it carries no
+# secrets and every real capability still requires the bearer-token/
+# session checks above regardless of which hostname reached it.
+app.mount("/", StaticFiles(directory=AGENT_WEB_DIR, html=True), name="agent_portal")
