@@ -166,6 +166,24 @@ the original one has already reached a terminal state. Verified directly:
 an_already_delivered_delivery` (the idempotency check itself, in
 isolation).
 
+A distinct scenario from the above: what if Redis itself is briefly
+unavailable at the exact moment `enqueue_campaign_message()`'s own
+`XADD` runs, rather than the process crashing? `_dispatch_pending_
+deliveries()` has no per-row try/except around that call, so the
+exception propagates up through `process_once()` to `run_forever()`'s
+own tick-level `try/except` (logs `campaign_worker_tick_failed`,
+continues to the next tick) — the row stays exactly at `processing`,
+already-committed by the `UPDATE` that ran immediately before the failed
+`XADD`, exactly the same recoverable state a mid-crash leaves it in.
+Verified directly with a real, live exception (not just a pre-seeded
+stuck row) in `test_a_redis_outage_during_dispatch_leaves_the_delivery_
+recoverable_not_lost`. One real, minor consequence worth naming
+explicitly: a delivery caught by a *short* Redis blip (seconds) still
+has to wait out the full `RECLAIM_STUCK_AFTER_SECONDS` (15 minutes)
+before the reclaim sweep resets it — a bounded, self-healing delay, not
+data loss, but a real latency characteristic an operator investigating
+"why did this one message arrive 15 minutes late" should know about.
+
 ### Delivery outcome tracking
 
 `services/bot/notifier.py`'s `Notifier` already resolved a message's

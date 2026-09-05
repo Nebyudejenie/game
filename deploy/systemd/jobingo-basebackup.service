@@ -1,0 +1,12 @@
+[Unit]
+Description=Jo Bingo physical base backup for PITR (pg_basebackup via deploy/basebackup.sh)
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+# CHANGE THIS: same real deploy checkout path as jobingo-backup.service.
+WorkingDirectory=/home/cosmic/game
+Environment=COMPOSE_FILE=/home/cosmic/game/deploy/docker-compose.prod.yml
+Environment=POSTGRES_USER=jobingo
+ExecStart=/home/cosmic/game/deploy/basebackup.sh

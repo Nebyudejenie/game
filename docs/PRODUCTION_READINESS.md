@@ -94,6 +94,44 @@ was written:
    `*.pem`/`*.key`/`*.pfx`/`id_rsa*`/`*.mp4`/`*.mov`. Added — nothing was
    ever actually committed in these shapes, but nothing stopped a future
    `git add .` from doing so.
+7. **A real, wall-clock-time-dependent test bug, root-caused, not
+   dismissed.** `test_today_net_loss_uses_the_ethiopian_calendar_day_not_
+   utc` and `test_deposit_daily_cap_uses_the_ethiopian_calendar_day_not_
+   utc` failed for the first time all session, reproducibly, at a real
+   01:02 EAT run. The *production* code (`responsible_gaming.py:320`,
+   `deposits.py:156`) is correct — both already use
+   `now() AT TIME ZONE 'Africa/Addis_Ababa'` for the EAT day boundary, not
+   a naive UTC one. The *tests'* own boundary construction
+   (`date_trunc('day', now()) - interval '1 hour'`) implicitly assumed
+   "1 hour before UTC midnight" always falls in *today's* EAT calendar
+   day — true most of the time, but false whenever the test happens to
+   run while "now" itself is within the first ~3 hours of the EAT day
+   (EAT is UTC+3, so UTC 21:00-23:59), exactly the window this run hit.
+   Fixed by anchoring both tests' boundary to today's actual EAT-day start
+   (the same expression the production query itself uses) plus a small
+   positive offset — correct by construction regardless of what time the
+   suite happens to run. Verified by re-running both at the exact same
+   real wall-clock moment that had just failed them: 2/2 passed.
+8. **A real, non-deterministic test flake in `test_worker.py`, fully
+   root-caused (not merely characterized) and fixed.** An earlier pass of
+   this same directive left `test_run_active_rooms_is_safe_to_call_
+   repeatedly` as an unresolved "connection-handling sensitivity in
+   `room_lock.py`" — reproducing 8/8 failures in isolation while
+   `redis-cli info clients` showed only 1 real server-side connection,
+   which was itself only ever a symptom, not the cause. Reproduced
+   directly by instrumenting the real connection pool: this dev database
+   had accumulated **560** `rooms.is_active = true` rows from this long
+   session's own testing (2355 total rows, this DB is shared and never
+   truncated between runs), and `EngineWorker.run_active_rooms()` claims
+   *every* such row with no limit — so a single call spun up 560 real
+   engines/locks/stream-readers concurrently, trivially exceeding the
+   200-connection cap. Confirmed via `room_lock_refresh_failed_retrying`
+   warnings for rooms the test never created, all tied to one worker id.
+   No redis-py bug, no cancellation-safety bug — root cause was test-data
+   hygiene. Fixed by having the test neutralize pre-existing rows before
+   creating its own, the same defensive pattern already used elsewhere in
+   this codebase for this exact shared-DB hazard. Re-ran 8x in isolation
+   clean (previously 8/8 failing), ~1.4s each (previously up to 85s).
 
 ## Acceptance matrix
 
@@ -104,7 +142,7 @@ was written:
 | Bingo engine | GREEN | `packages/core/bingo.py`, `services/engine/round_engine.py`, `refunds.py`, `settlement.py` all real, no stubs (`grep` for TODO/FIXME/stub/"not implemented" returns nothing). Full existing test suite (round engine, refunds, settlement) passes. | — | — | — |
 | Two-line win | GREEN | `packages/core/bingo.py:138` `MIN_WINNING_LINES = 2`, confirmed as the actual running logic both callers use (`round_engine.py`'s manual claim path and its auto-mark scan), not just a commit message claim. The one failing test tied to this was a test-timing flake, root-caused and fixed (see #2 above), not an engine bug. | — | — | — |
 | Card assignment | GREEN | `PRIMARY KEY (round_id, card_no)` at the DB level; existing `test_card_taken`-style tests pass; no double-ownership path found. | — | — | — |
-| Spectator mode (0 players) | UNVERIFIED | No dedicated test or code path specifically confirming "0 players keeps a room visibly live" was found or exercised this pass. | Needs a direct look — wasn't part of this pass's scope until now. | Confirm the intended product rule with the room-lobby code directly, add a test if none covers it. | P2 |
+| Spectator mode (0 players) | GREEN | `services/gateway/queries.py::list_rooms()` has no player-count filter; `RoundEngine.run_forever()` proactively opens a room's first round the instant it's claimed, so an empty room shows `status="lobby"`, `players=0`, a live countdown — never disappears or errors. New test `test_a_zero_player_room_still_appears_live_in_the_room_list` (`tests/integration/test_gateway_gameplay.py`) proves this over a real WS client; passed on the first run, confirming existing behavior rather than fixing anything. | — | — | — |
 | Telegram bot (webhook) | GREEN | `services/bot/app.py` — real `SimpleRequestHandler`/`set_webhook`, no polling anywhere. 3 background tasks confirmed (`notification_relay`, `campaign_worker`, `bot_content_sync`), all sharing one `Notifier`. | — | — | — |
 | Mini App auth (initData) | GREEN | `packages/core/telegram_auth.py` — real HMAC-SHA256, constant-time compare, confirmed **actually called** from both `services/gateway/app.py`'s REST auth dependency and `connection.py`'s WS handshake, not dead code. | — | — | — |
 | WebSocket | GREEN | Real endpoint, real HMAC-authenticated handshake, DB-backed stateless resync (any replica can resume a reconnect). Client-side: exponential backoff with jitter, **explicitly documented as unbounded** ("retries forever... no timeout") in its own code comments. | Unbounded client retry is a deliberate choice, not a bug, but worth a second look for a genuinely dead connection. | Confirm this is still the intended behavior; consider a max-attempts UI fallback ("having trouble connecting") if not already present. | P3 |
@@ -121,14 +159,14 @@ was written:
 | Domain | Status | Evidence | Blocker | Required action | Priority |
 |---|---|---|---|---|---|
 | Admin console (general) | GREEN | 79 real routes (`grep -c "@app\."`), 1623-line `app.py`, no stubs. | — | — | — |
-| RBAC | GREEN | 30 permissions across 4 roles, all additive, no god-mode bypass; every permission's real boundary verified over real HTTP this session and in prior sessions (403/200 both directions, every role). | — | — | — |
+| RBAC | GREEN | 30 permissions across 4 roles, all additive, no god-mode bypass; every permission's real boundary verified over real HTTP this session and in prior sessions (403/200 both directions, every role). Re-confirmed this pass by direct static analysis of all 79 routes in `services/admin/app.py`: exactly 3 have no `require_permission`/`Depends` gate — `/auth/login`, `/healthz`, `/metrics` — the only 3 that legitimately should be public. No unguarded "god endpoint" exists. | — | — | — |
 | Admin Users (superadmin control plane) | GREEN | Real create/activate/deactivate/role-change/reset-password, self-modification blocked, session revocation on deactivation confirmed live (re-checked on every request, not just at login). 15 tests. | Force-logout-all-sessions / force-TOTP-reset (Section 6's extra asks) don't exist yet — deactivate+reset-password covers the practical case (kills the current session and changes the password) but isn't literally either of those two named actions. | Add if the practical difference matters operationally; not blocking. | P3 |
 | Finance | GREEN | Same console, RBAC-scoped; manual deposit/withdrawal approval, two-person gate above a threshold, all audited. | — | — | — |
 | Payment Agents | GREEN | Separate auth (`agent_auth.py`, Telegram-delivered one-time link, no password), real activity view (submission counts/last-active) added this session, narrower data exposure than admin roles (no raw SMS/payer info ever shown). | — | — | — |
 | Audit | GREEN | Append-only, DB-trigger-enforced (no UPDATE/DELETE grant), every sensitive mutation across every subsystem this session confirmed to call `audit.record()`. | — | — | — |
 | Risk | GREEN | Two real, tested, on-demand queries (shared payout accounts, repeat room pairings); explicitly documents device-fingerprint clustering as **not implemented** (no writer anywhere) rather than faking it. | Device fingerprinting is a real, separate product/legal decision (Section 19 lists it conditionally — "if legally/technically appropriate"). | Explicit decision needed before building it — not a code gap. | P2 |
 | Bot Content | GREEN | ~85 real strings, 4 languages, live override without deploy (30s poll), placeholder-mismatch validation, full audit trail, RBAC-gated. Preview-as-user and version-history/rollback UI (Section 11's extra asks) don't exist — only "current vs. default" is shown today, no history of *prior* overrides. | No history table for bot content overrides — a `PATCH`/`DELETE` just mutates or removes the current override row today. | Add if editorial-history/rollback is a real operational need; the audit log does capture every change's before/after already, just not as a dedicated in-UI history view. | P2 |
-| Notification Center | GREEN | Full lifecycle (draft/schedule/send/cancel/duplicate/history/analytics/RBAC), crash-safety gap closed this pass (#3 above), audience compliance gap closed this pass (#4 above). Pause/resume-a-campaign and per-recipient retry (Section 9's extra asks) don't exist — cancel exists, a paused-then-resumed campaign doesn't. | No pause/resume state, no selective per-failure retry. | Scope and build if wanted; current cancel-and-duplicate-a-fresh-draft covers the practical "stop this" case. | P2 |
+| Notification Center | GREEN | Full lifecycle (draft/schedule/send/cancel/duplicate/history/analytics/RBAC), crash-safety gap closed this pass (#3 above), audience compliance gap closed this pass (#4 above). Pause/resume-a-campaign and per-recipient retry (Section 9's extra asks) don't exist — cancel exists, a paused-then-resumed campaign doesn't. Failure-simulation audit against 7 named crash scenarios (crash before/after DB claim, before/after Redis enqueue, Redis unavailable, worker restart, duplicate-worker processing): 6 of 7 already had real test coverage; the 7th (Redis unavailable mid-dispatch) had its outcome proven indirectly (via the reclaim test) but not its *input* behavior — added `test_a_redis_outage_during_dispatch_leaves_the_delivery_recoverable_not_lost`, proving a live `ConnectionError` thrown mid-dispatch leaves the delivery in a safe, recoverable `processing` state, not lost or corrupted. | No pause/resume state, no selective per-failure retry. | Scope and build if wanted; current cancel-and-duplicate-a-fresh-draft covers the practical "stop this" case. | P2 |
 | Bonuses & Referrals | GREEN | Rule-driven (no hardcoded amounts), sticky-bonus wallet integration (zero changes to `round_engine.py`), fraud guards (self-referral, shared payout account, DB-enforced one-reward-per-referee), concurrency-tested (10-way race settles once). Deposit-triggered bonus grants confirmed safe-by-construction against self-excluded/banned/cooling-off users (deposits from such users are rejected upstream, before any bonus-trigger code ever runs — verified directly in `services/payments/deposits.py::_check_deposit_eligibility`). | — | — | — |
 | Promotions as a unified concept (Section 15) | GRAY | Not built as a single named "Promotions" entity distinct from Bonus Rules + a manual "Announce" link to Notifications — the two systems are connected (an "Announce this rule" button), but there's no single object with its own draft/publish/pause/archive lifecycle spanning both. | This is a real product-scope decision (a genuinely new unifying abstraction, not a bug fix), not something to build silently as a side effect of an audit pass. | Scope as its own piece of work if wanted; today's two-system-plus-a-link design already covers the *functional* requirement (configure a reward, announce it), just not as one named object. | P2 |
 | Campaign recipe templates (Section 17) | GRAY | Not built — a real, scoped UI/content feature, not a bug. | — | Same as above: a deliberate follow-on feature, not a gap in what exists. | P3 |
@@ -159,8 +197,9 @@ was written:
 | Cloudflare/Traefik/DNS/TLS routing | GREEN, but stale docs | `docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md`/`PRODUCTION_ACCESS_MATRIX.md` document all 5 hostnames verified live **directly against the real production server** in an earlier session (2026-09-05). Those docs are 5 commits behind current HEAD (don't cover Notification Center/Admin Users/Bot Content/Bonuses' own new admin routes) — but those all live inside the *same*, already-verified `admin.arada.fun` container, so this is a documentation lag, not a functional gap. | Can't be re-verified live from this sandbox (no network path to confirm current state, only historical record). | Re-run the same real external checks those docs describe, from a machine that can reach the public domains, to reconfirm nothing has drifted since. | P1 |
 | HTTP → HTTPS redirect | RED (documented gap, unresolved) | `docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md` itself states this was never configured — a Cloudflare zone-level setting neither this nor an earlier session had dashboard/API access to set. | Needs the Cloudflare dashboard or an API token with zone-edit rights — not available in any session so far. | Set "Always Use HTTPS" (or an equivalent redirect rule) in the Cloudflare dashboard for the zone. | P0 |
 | WebSocket (production) | UNVERIFIED (see deployment state above) | Code-level behavior verified locally; real production WS behavior under real Telegram WebView conditions not verified this pass. | Same network access gap as deployment state. | Real-device smoke test per Section 65, from the user's own network. | P1 |
-| Redis reliability | GREEN (systemic issue), YELLOW (one narrow residual) | The systemic bug (redis-py's 100-connection default silently capping every shared client) is fixed and confirmed: the previously-every-single-run, random-file failure pattern is gone across the final clean full-suite run. One narrower, pre-existing, test-specific connection-handling sensitivity remains in `RoundEngine`/`room_lock.py` under rapid repeated invocation — see the "Full regression suite" section's own detailed characterization below; no evidence of real production risk, recommended as a scoped follow-up. | The narrower issue's own root cause (likely `room_lock.py`'s Lua-script eval() being cancelled mid-flight) isn't fully identified yet. | A dedicated investigation into `room_lock.py`'s cancellation handling, isolated from this already-large pass. | P2 |
+| Redis reliability | GREEN | Both issues found this engagement are now fully root-caused and fixed, not just characterized. (1) The systemic 100-connection default is fixed (`max_connections=200`). (2) The narrower `test_run_active_rooms_is_safe_to_call_repeatedly` flake, previously left as an unresolved "connection-handling sensitivity in room_lock.py," was reproduced directly by instrumenting the real connection pool and was **not** a redis-py or cancellation bug at all: this dev database had accumulated 560 `rooms.is_active = true` rows across this long session's testing (2355 total rows, never truncated between runs), and `EngineWorker.run_active_rooms()` claims *every* such row with no limit — so a single call spun up 560 real engines/locks/stream-readers concurrently, exceeding the 200-connection cap outright. Confirmed by observing `room_lock_refresh_failed_retrying` warnings for rooms the test never created, all tied to the same worker id. Fixed by having the test neutralize pre-existing rows before creating its own (`tests/integration/test_worker.py`), the same defensive pattern already used elsewhere in this codebase's tests for this exact shared-DB hazard. Re-ran 8x in isolation clean (previously 8/8 failing), ~1.4s each (previously up to 85s). Client-creation-site audit (this pass): exactly one Redis client construction point exists in the entire codebase (`packages/core/redis_conn.py::get_redis()`), and every one of the 6 real entrypoints imports and calls it (confirmed by grep) — no rogue/inconsistent client construction anywhere, so the `max_connections=200` fix covers 100% of this codebase's Redis usage by construction. | — | — | — |
 | Workers | GREEN | 6 real entrypoints inventoried (engine worker, bot, payout worker + 5 sweeps, 2 one-shot CLIs). All confirmed running real, non-stub logic. | — | — | — |
+| Engine worker cold-start room count | GREEN (hardened, not just noted) | `EngineWorker.run_active_rooms()` (`services/engine/worker.py`) previously claimed every `rooms.is_active = true` row in one pass with no limit — a follow-up audit explicitly refused to treat this as "only ever a test artifact" and required proof the production code is actually safe at scale (1/10/100/1,000/10,000 rooms). Fixed: `MAX_NEW_CLAIMS_PER_POLL = 50` now caps new claims per call; any room not claimed this cycle is claimed at most one `CLAIM_POLL_INTERVAL_SECONDS` (30s) later — the same latency a brand-new room already tolerates today. Verified with a real test using the real production constant (`test_run_active_rooms_caps_new_claims_per_poll`): 55 real rooms, first call claims exactly 50, second call claims the remaining 5. This means even a genuine 10,000-active-room future cannot cause an unbounded connection-claiming storm on any single poll, regardless of *why* the count got that high. This cap immediately broke one existing test (`test_run_active_rooms_recovers_a_room_that_dies_mid_session`) by exposing an implicit ordering assumption it made about the shared dev database; fixed at the test's own defensive scoping (the same established pattern used elsewhere in this file), never by weakening the new cap — see `DECISIONS.md`'s own entry for the full root-cause narrative. Full `test_worker.py` re-run 5/5 clean afterward. | — | — | — |
 | Backups (mechanism) | GREEN | Real `pg_dump`/`pg_basebackup`/PITR/WAL-pruning scripts exist, and — per this repo's own test suite — `tests/integration/test_backup_restore.py` proves the dump→restore and basebackup→PITR round trips actually work. | — | — | — |
 | Backups (schedule) | RED | Every one of `backup.sh`/`basebackup.sh`/`prune_wal_archive.sh`'s own comments states outright that **no cron/systemd-timer is wired anywhere in this repo** — confirmed by grep, only comments describing the gap. Whether an out-of-band schedule exists on the actual production host is unverifiable from here. | Same network access gap as deployment state, plus: even if reachable, this is a real deployment-configuration step that was never made, not just unconfirmed. | Wire an actual backup schedule (cron/systemd timer) on the production host and prove a *recent* real backup exists there — "the script works" is not the same claim as "backups are actually happening." | P0 |
 | Restore | GREEN (mechanism), UNVERIFIED (against real prod data) | `restore.sh`/`restore_pitr.sh` real and tested against synthetic data locally. Never run against an actual production backup from this environment. | Needs a real production backup file + a safe place to restore it (never production itself). | Run a real restore drill against production's actual latest backup, on a disposable instance, once a real schedule (above) has produced one. | P1 |
@@ -243,26 +282,34 @@ lifetime** (a fresh client pool per pytest invocation can't accumulate
 leaked connections *across* runs the way the earlier systemic bug did),
 not a symptom of lingering server-side state this time.
 
-This narrows the finding precisely: this specific test's own exercise
-pattern (rapid `run_active_rooms()` calls plus `EngineWorker.shutdown()`
-cancelling every owned engine's tasks) can, on its own, occasionally
-drive connection usage high enough to matter — a real, if narrow,
-connection-handling sensitivity in `RoundEngine`/`room_lock.py`'s
-interaction with task cancellation, not fully resolved by this pass's
-fix. It was already independently confirmed via a `git stash` A/B test
-earlier this session to fail identically on the original, unmodified
-commit (`a665463`) with none of this session's changes present — **it
-predates this entire pass** and this pass's fix measurably narrowed its
-blast radius (from "randomly hits any of 1150+ tests on nearly every
-full-suite run" to "occasionally hits this one specific test under rapid
-repeated invocation") without fully eliminating it. No evidence this
-represents a real *production* risk: production runs one long-lived
-`engine-worker` process with one persistent pool, never this test's
-artificial back-to-back-fresh-process pattern, and the test itself
-verifies task bookkeeping (no duplicate engine per room), not any
-financial code path. Recommended as a real, scoped follow-up
-investigation into `room_lock.py`'s Lua-script cancellation handling —
-not a launch blocker, and not left unexplained.
+**This characterization has since been superseded** by a follow-up pass
+under the same directive that refused to leave it there: instrumenting
+the real connection pool directly (rather than reasoning about redis-py
+internals in the abstract) showed the actual cause was 560 stale
+`is_active = true` rooms accumulated in this shared dev database from
+unrelated tests across the session — `run_active_rooms()` claiming all
+of them at once, not any redis-py or cancellation bug. See fix #8 above.
+Fully resolved, not merely narrowed.
 
-mypy: clean (0 errors, 102 source files) at every checkpoint during this
+6. **Post-fix confirmation run** (after fixes #7 and #8 above):
+   `pytest tests/ -q` → 1157 passed, 2 failed (only the two
+   Ethiopian-calendar-day tests, both caused by the real 01:02 EAT
+   wall-clock moment this run happened to execute at — see fix #7).
+   Zero `MaxConnectionsError`, zero generic Redis timeouts, zero
+   `test_worker.py` failures anywhere in this run — the fix from #8 held
+   under the full suite, not just in isolation.
+7. **Confirmation run after the core fixes: `pytest tests/ -q` →
+   1161 passed, 0 failed, 51 deselected, in 7:43.** The first fully clean
+   full-suite run in this entire engagement's history — every prior run
+   had at least one failure. Zero `MaxConnectionsError`, zero generic
+   Redis timeouts, zero `test_worker.py` failures, zero Ethiopian-
+   calendar-day failures.
+8. **Absolute final confirmation run, after every remaining test added
+   during this pass's systematic gap audits (Bingo 16-scenario coverage,
+   zero-player room, malformed-claim, Notification Center Redis-outage
+   simulation): `pytest tests/ -q` → 1168 passed, 0 failed, 51
+   deselected, in 8:24.** Still zero failures — every new test this pass
+   added holds inside the full suite, not just in isolation.
+
+mypy: clean (0 errors, 103 source files) at every checkpoint during this
 pass, including after every fix above.

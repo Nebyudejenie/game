@@ -10805,3 +10805,101 @@ committing, and none was given) — most likely explanation is the user
 staging/committing/pushing via VS Code's Source Control panel while working
 alongside this session. Content pushed matches what was verified with a
 green test suite, so noted here rather than acted on.
+
+---
+
+## 2026-09-06 — `test_run_active_rooms_is_safe_to_call_repeatedly`'s flake: not a redis-py bug, a polluted shared dev database
+
+An earlier pass of this same launch-readiness engagement left this test's
+`MaxConnectionsError`/`TimeoutError` flake characterized as "a narrow,
+pre-existing connection-handling sensitivity in `RoundEngine`/
+`room_lock.py`'s interaction with task cancellation" — reproduced 8/8 in
+isolation even at a raised `max_connections=200`, while a live `redis-cli
+info clients` check at that exact moment showed only 1 real server-side
+connection, which was read as proof the leak happened *within* one
+test's own process lifetime rather than from carried-over server state.
+That framing was correct about the "within one process" part and wrong
+about the cause.
+
+A follow-up pass, explicitly directed not to accept "pre-existing" as a
+final answer, spent real effort on the redis-py-internals theory first:
+read `Connection.read_response()`, `ConnectionPool.release()`,
+`should_reconnect()`/`mark_for_reconnect()` directly from the installed
+8.1.0 source, confirmed `execute_command()`'s `finally: pool.release()`
+does return connections even under `asyncio.CancelledError`, and confirmed
+`ensure_connection()` has its own real self-healing check
+(`can_read()` before reuse, disconnect-and-reconnect if a stale
+connection has unread data). Wrote two synthetic repro scripts
+(cancelling a task mid-blocking-`XREAD` and mid-`EVAL`, hundreds of times,
+concurrently, against a small-capped pool) — **zero corruption, zero
+leaks, in either.** The library-internals theory did not hold up under
+direct empirical pressure.
+
+Root cause, found by instrumenting the *real* pool inside the actual
+failing test instead: `EngineWorker.run_active_rooms()`
+(`services/engine/worker.py`) claims *every* `rooms.is_active = true`
+row with no limit. This dev database — shared across the whole session,
+never truncated between runs — had accumulated **560** such rows (2355
+total rooms) from unrelated tests' own `create_room(..., is_active=True)`
+calls over the session's length. A single call to `run_active_rooms()`
+in this one test spun up 560 real `RoundEngine`/`RoomLock`/
+`_serve_commands()` instances concurrently, trivially exceeding any
+connection cap — confirmed directly by seeing `room_lock_refresh_failed_
+retrying` warnings for room ids the test never created, all carrying the
+one worker id this test's own `EngineWorker` used.
+
+Fix: the test itself now runs `UPDATE rooms SET is_active = false WHERE
+is_active = true` before creating its own room — the same defensive
+shared-DB-hygiene pattern this session already uses elsewhere
+(campaigns' `_INERT_AUDIENCE`, `unique_username()`). Re-ran 8x in
+isolation clean (previously 8/8 failing), ~1.4s each (previously up to
+85s hung). A full `pytest tests/` run afterward: 1161 passed, 0 failed —
+the first fully clean full-suite run in this project's history.
+
+Lesson worth keeping: a plausible, well-evidenced-looking root cause
+(redis-py's newer "maintenance notifications" reconnect machinery looked
+like a real candidate) can still be wrong. The empirical repro scripts
+that found nothing were exactly as valuable as the one that found
+something — they're what stopped a wrong theory from being written down
+as fact.
+
+---
+
+## 2026-09-06 — `run_active_rooms()` hardened against unbounded claims; the hardening itself broke a test, which was the right test to break
+
+A follow-up forensic pass refused to accept the 560-stale-rooms finding
+above as "purely a test-data problem" and asked the harder question
+directly: can `EngineWorker.run_active_rooms()` (`services/engine/
+worker.py`) actually survive a legitimate 1,000 or 10,000-active-room
+future, or does it just happen not to have been tested at that scale?
+Real answer: no defense existed. The method claims *every*
+`is_active = true` row with no limit; nothing about it depends on the
+560 rows being test noise specifically — a genuine business-growth
+scenario with that many simultaneously active rooms would hit the exact
+same connection-exhaustion math on the next cold worker restart.
+
+Fixed with `MAX_NEW_CLAIMS_PER_POLL = 50`: caps new claims per call,
+deferring anything past the cap to the next `CLAIM_POLL_INTERVAL_SECONDS`
+(30s) poll — safe because a room not claimed this cycle already tolerates
+exactly that same latency today (a brand-new room's own first claim is
+never instant, it waits for the next poll regardless). New test
+(`test_run_active_rooms_caps_new_claims_per_poll`) proves the real
+production constant actually caps at 50 and picks up the rest next call.
+
+This immediately broke `test_run_active_rooms_recovers_a_room_that_dies_
+mid_session` — not by weakening what it verifies, but by exposing that it
+implicitly assumed its own room would always be *first* among however
+many `is_active=true` rows exist, an assumption the shared, never-
+truncated dev database doesn't actually guarantee once a cap exists.
+Root cause confirmed, not assumed: the fix was the same defensive
+`UPDATE rooms SET is_active = false WHERE is_active = true` cleanup
+already used elsewhere in this file, applied to the one remaining test
+that lacked it. All 3 `run_active_rooms()`-calling tests in
+`test_worker.py` now defend against this identically. Re-ran the full
+file (5/5 clean) and the full suite afterward.
+
+This is the right shape for a hardening pass to take: fixing a real
+production gap should be expected to occasionally reveal a test that was
+quietly relying on the *absence* of the protection just added — the fix
+belongs in the test's own defensive scoping, not in weakening the new
+production guarantee to make the old test pass unchanged.

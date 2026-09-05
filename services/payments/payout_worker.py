@@ -56,6 +56,7 @@ from packages.core.redis_conn import get_redis
 from services.payments.bonus_sweep import sweep_bonus_wagering
 from services.payments.chapa import ChapaProvider
 from services.payments.deposits import poll_pending_deposits, run_provider_reconciliation
+from services.payments.ledger_reconcile_sweep import sweep_ledger_reconciliation
 from services.payments.telebirr_reconcile import run_telebirr_reconciliation
 from services.payments.provider import PaymentProvider
 from services.payments.withdrawals import PAYOUT_STREAM, sweep_stuck_approved_payouts
@@ -413,6 +414,10 @@ WITHDRAWAL_SWEEP_INTERVAL_SECONDS = 60
 # rather than as an external cron job like packages/core/reconcile_job.py.
 PROVIDER_RECONCILE_INTERVAL_SECONDS = 3600
 BONUS_SWEEP_INTERVAL_SECONDS = 60
+# Same cadence as the two provider-level reconciliation sweeps above --
+# reconciliation as a job class already has an established interval in
+# this codebase; reusing it rather than inventing a new number.
+LEDGER_RECONCILE_INTERVAL_SECONDS = PROVIDER_RECONCILE_INTERVAL_SECONDS
 METRICS_PORT = 8005
 
 
@@ -434,7 +439,7 @@ async def _run_periodic_sweep(
 
 async def main_async() -> None:
     """Real production entrypoint: the payout stream consumer (this
-    module's own run_forever(), the primary job) alongside five other
+    module's own run_forever(), the primary job) alongside six other
     "safe to run on a timer" payments sweeps that need a periodic invoker
     somewhere -- deposits.py's poll_pending_deposits() (a webhook that
     never arrives), withdrawals.py's sweep_stuck_approved_payouts() (an
@@ -443,12 +448,18 @@ async def main_async() -> None:
     own hourly Chapa-vs-our-records check, previously built and tested but
     never actually invoked from anywhere -- an architecture audit caught
     this), telebirr_reconcile.py's run_telebirr_reconciliation()
-    (the same hourly cadence, CTO directive sections 124-127), and
+    (the same hourly cadence, CTO directive sections 124-127),
     bonus_sweep.py's sweep_bonus_wagering() (the only thing that ever
     converts a sticky bonus grant into real cash, or expires an unwagered
-    one -- see packages/core/bonuses.py's own module docstring). All six
-    share one process/provider rather than separate ones since none of
-    them individually justifies its own container, and all are already
+    one -- see packages/core/bonuses.py's own module docstring), and
+    ledger_reconcile_sweep.py's sweep_ledger_reconciliation() (the ledger-
+    level "cached balance equals sum of ledger entries" check --
+    packages/core/reconcile_job.py already built and tested this exact
+    comparison as a standalone CLI, but never had a real scheduler; this
+    reuses its comparison logic from a process that already runs on a
+    timer, instead of standing up a new one). All seven share one
+    process/provider rather than separate ones since none of them
+    individually justifies its own container, and all are already
     designed to be safe under concurrent, independent invocation.
     """
     settings = get_settings()
@@ -500,6 +511,13 @@ async def main_async() -> None:
                 "sweep_bonus_wagering",
                 BONUS_SWEEP_INTERVAL_SECONDS,
                 lambda: sweep_bonus_wagering(pool, redis),
+            )
+        ),
+        asyncio.create_task(
+            _run_periodic_sweep(
+                "sweep_ledger_reconciliation",
+                LEDGER_RECONCILE_INTERVAL_SECONDS,
+                lambda: sweep_ledger_reconciliation(pool),
             )
         ),
     ]

@@ -85,6 +85,20 @@ payment_reconciliation_mismatch_count = Gauge(
     "Deposits whose provider status/amount disagreed with our own payments row on the last reconciliation pass",
 )
 
+ledger_reconciliation_sweep_mismatch_count = Gauge(
+    "ledger_reconciliation_sweep_mismatch_count",
+    "Accounts whose cached balance disagreed with their ledger entries on the last in-process reconciliation sweep",
+)
+# Distinct from ledger_reconciliation_mismatch_count above: that one lives
+# on reconcile_registry and is pushed to a Pushgateway by the standalone
+# packages/core/reconcile_job.py CLI (never actually scheduled anywhere --
+# see that module's own docstring). This one is on the default registry so
+# payout_worker.py's existing /metrics endpoint (already scraped by the
+# "payout-worker" Prometheus job, same as payment_reconciliation_mismatch_
+# count right above) serves it for free from a sweep that *is* actually
+# running, reusing this codebase's existing periodic-sweep architecture
+# instead of standing up a new scheduler.
+
 telebirr_redemption_outcomes_total = Counter(
     "telebirr_redemption_outcomes_total",
     "Telebirr SMS-evidence redemption attempts by outcome",

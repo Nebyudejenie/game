@@ -320,7 +320,24 @@ async def test_today_net_loss_uses_the_ethiopian_calendar_day_not_utc(pool, conn
         conn, "stake", [ledger.Entry(cash.id, Decimal("-40.00")), ledger.Entry(pot.id, Decimal("40.00"))],
         idempotency_key=f"tz-boundary-loss-{user_id}",
     )
-    boundary = (await conn.fetchrow("SELECT date_trunc('day', now()) - interval '1 hour' AS ts"))["ts"]
+    # A fixed "1 hour before UTC midnight" offset only lands in *today's*
+    # EAT day when "now" itself isn't within the first ~3 hours of the EAT
+    # day (EAT is UTC+3, so that window is UTC 21:00-23:59) -- run this
+    # test during that window and the offset actually lands in *yesterday*
+    # EAT, making the test itself wrong rather than the code (caught live:
+    # this failed at a real 01:02 EAT run). Anchor to the start of today's
+    # EAT day instead (the same boundary the production query itself
+    # computes) plus a small positive offset -- always within today's EAT
+    # day by construction, regardless of what wall-clock time this runs at,
+    # while still landing on a different *UTC* calendar day than "now"
+    # whenever EAT and UTC don't already agree -- the exact cross-boundary
+    # case this test exists to prove.
+    boundary = (
+        await conn.fetchrow(
+            "SELECT (date_trunc('day', now() AT TIME ZONE 'Africa/Addis_Ababa') "
+            "AT TIME ZONE 'Africa/Addis_Ababa') + interval '1 minute' AS ts"
+        )
+    )["ts"]
     await conn.execute(
         "UPDATE ledger_entries SET created_at = $1 WHERE transaction_id = $2 AND account_id = $3",
         boundary, txn.id, cash.id,
@@ -374,7 +391,17 @@ async def test_deposit_daily_cap_uses_the_ethiopian_calendar_day_not_utc(pool, r
         pool, redis, conn, user_id, Decimal("60.00"),
         daily_cap=Decimal("100.00"), provider=FakePaymentProvider(),
     )
-    boundary = (await conn.fetchrow("SELECT date_trunc('day', now()) - interval '1 hour' AS ts"))["ts"]
+    # See test_today_net_loss_uses_the_ethiopian_calendar_day_not_utc's own
+    # comment: a fixed "1 hour before UTC midnight" offset is only within
+    # today's EAT day part of the time (it fails during EAT's first ~3
+    # hours) -- anchor to today's EAT-day start instead, always correct
+    # regardless of when this test actually runs.
+    boundary = (
+        await conn.fetchrow(
+            "SELECT (date_trunc('day', now() AT TIME ZONE 'Africa/Addis_Ababa') "
+            "AT TIME ZONE 'Africa/Addis_Ababa') + interval '1 minute' AS ts"
+        )
+    )["ts"]
     await conn.execute("UPDATE payments SET created_at = $1 WHERE id = $2", boundary, first.payment_id)
 
     # A second 60.00 deposit only exceeds the 100.00 cap if the first

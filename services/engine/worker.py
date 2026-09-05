@@ -40,6 +40,16 @@ METRICS_PORT = 8004
 # room's own timing.
 CLAIM_POLL_INTERVAL_SECONDS = 30
 
+# Caps how many *new* rooms a single run_active_rooms() call claims --
+# see that method's own docstring for the real incident (560 concurrent
+# claims from one unhygienic dev database) that motivated this. 50 is
+# comfortably under the Redis pool's own MAX_CONNECTIONS (200,
+# packages/core/redis_conn.py) even accounting for each newly-claimed
+# room needing a handful of connections (lock acquire/refresh, stream
+# reads) during its own startup, with headroom left for every
+# already-running room's ongoing traffic.
+MAX_NEW_CLAIMS_PER_POLL = 50
+
 
 class EngineWorker:
     def __init__(
@@ -105,15 +115,36 @@ class EngineWorker:
         wired to run once. It's a cheap, indexed, genuinely idempotent
         query (see its own docstring/refund_round()'s idempotency
         guarantee) safe to call on every poll, not just once.
+
+        Claims at most MAX_NEW_CLAIMS_PER_POLL rooms this doesn't already
+        own a live engine for -- a launch-readiness audit found this
+        method previously claimed *every* is_active=true row in one pass
+        with no limit; a shared, unhygienic dev database that had
+        accumulated 560 such rows made a single call spin up 560 real
+        engines/locks/stream-readers concurrently, trivially exhausting a
+        200-connection Redis pool. Real production room counts today are
+        nowhere near that, but nothing stopped it from becoming a genuine
+        cold-start risk if that ever changed -- so this is capped
+        regardless of *why* a large count might exist (data hygiene or
+        real growth). Safe to cap: this method is already called on a
+        CLAIM_POLL_INTERVAL_SECONDS timer (30s in production, see
+        main()), so any room not claimed in this pass is claimed at most
+        one poll interval later -- the same latency a brand-new room
+        already tolerates today between its own creation and its first
+        claim.
         """
         await recover_orphaned_rounds(self._pool, self._redis)
         rows = await self._pool.fetch("SELECT id FROM rooms WHERE is_active = true")
+        new_claims = 0
         for row in rows:
             room_id = row["id"]
             existing_task = self._tasks.get(room_id)
             if existing_task is not None and not existing_task.done():
                 continue
+            if new_claims >= MAX_NEW_CLAIMS_PER_POLL:
+                break
             await self.claim_room(room_id)
+            new_claims += 1
 
     def engine_for(self, room_id: int) -> RoundEngine | None:
         return self._engines.get(room_id)

@@ -28,6 +28,19 @@ groups:
         annotations:
           summary: "Ledger reconciliation found a cached-balance / ledger-entries mismatch"
 
+      - alert: LedgerReconciliationSweepMismatch
+        # payout_worker.py now also runs services.payments
+        # .ledger_reconcile_sweep.sweep_ledger_reconciliation() hourly (a
+        # real, wired periodic sweep on that already-running process, the
+        # same pattern as PaymentReconciliationMismatch below) -- so unlike
+        # the pushed metric above, this fires from a real, live-scraped
+        # gauge with no external scheduler required at all.
+        expr: ledger_reconciliation_sweep_mismatch_count > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "Ledger reconciliation sweep found a cached-balance / ledger-entries mismatch"
+
       - alert: PaymentReconciliationMismatch
         # payout_worker.py runs services.payments.deposits
         # .run_provider_reconciliation() hourly (a real, wired periodic

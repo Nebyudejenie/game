@@ -869,6 +869,41 @@ async def test_claim_from_user_not_in_round_rejected_and_logged(pool, redis, car
         await asyncio.wait_for(task, timeout=15)
 
 
+async def test_claim_for_a_card_someone_else_holds_is_rejected(pool, redis, card_pool, conn):
+    # Launch-readiness audit gap: the "unauthorized claim" test above only
+    # ever claims a card_no (99) nobody joined at all -- it doesn't prove
+    # the rejection is specifically about *ownership*, only that an
+    # unclaimed card can't be claimed. This targets the sharper case: a
+    # real player claims a card a *different*, real player actually holds.
+    room_id = await create_room(conn, stake=Decimal("20.00"), min_players=2, call_interval_ms=15)
+    engine = await make_engine(pool, redis, card_pool, room_id)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        owner = await create_funded_user(conn)
+        other = await create_funded_user(conn)
+        attacker = await create_funded_user(conn)
+        await engine.join(owner, 1)
+        await engine.join(other, 2)
+        await wait_until(lambda: engine.status == "running", timeout=5)
+
+        # attacker never joined at all, but names card 1 -- which `owner`,
+        # a real participant in this exact round, genuinely holds.
+        result = await engine.claim(attacker, 1)
+        assert result == ClaimResult(False, "not_in_round")
+
+        round_id = engine.round_id
+        row = await pool.fetchrow(
+            "SELECT valid FROM claim_attempts WHERE round_id = $1 AND user_id = $2",
+            round_id,
+            attacker,
+        )
+        assert row is not None
+        assert row["valid"] is False
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
 async def test_round_exhausted_no_winner_full_refund(pool, redis, card_pool, conn):
     # win_patterns=[] means nothing can ever validate -- guarantees
     # exhaustion of all 75 calls with zero winners, deterministically.

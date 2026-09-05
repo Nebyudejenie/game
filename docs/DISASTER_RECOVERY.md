@@ -82,10 +82,12 @@ state there before deciding to promote it to production traffic.
       basebackup actually exist, and check their timestamps against
       "recent enough to matter."
 - [ ] Confirm what's actually invoking `backup.sh`/`basebackup.sh`/
-      `prune_wal_archive.sh` on a schedule — `crontab -l`, `systemctl
-      list-timers`, or equivalent, on the production host itself. If
-      nothing appears, **no scheduled backup exists today** regardless of
-      what this document describes as possible.
+      `prune_wal_archive.sh` on a schedule — `systemctl list-timers |
+      grep jobingo` on the production host itself. Real, ready-to-install
+      systemd units for exactly this now exist at `deploy/systemd/` (see
+      its own `README.md`) — if nothing appears, they haven't been
+      installed there yet, and **no scheduled backup exists today**
+      regardless of what this document describes as possible.
 - [ ] Run one real restore drill against a *real* production backup file
       (never against production itself) and confirm the restored data
       looks right — proves the specific files being produced today are

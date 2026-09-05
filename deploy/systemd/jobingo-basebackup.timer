@@ -1,0 +1,16 @@
+[Unit]
+Description=Weekly Jo Bingo physical base backup
+
+[Timer]
+# Weekly, not daily: WAL archiving is continuous (docs/DISASTER_RECOVERY.md)
+# and is what actually bounds RPO -- a basebackup is just the anchor point
+# PITR replays forward from, so more than one a week adds storage cost
+# without meaningfully improving recovery time for this deployment's real
+# scale. Revisit if database size grows enough that WAL replay from a
+# week-old anchor becomes slow.
+OnCalendar=Sun *-*-* 03:00:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

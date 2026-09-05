@@ -11,6 +11,7 @@ import random
 
 import httpx
 import pytest
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from packages.core.campaigns import count_audience, resolve_audience_user_ids
 from services.admin import notification_queries
@@ -542,6 +543,63 @@ async def test_reclaim_resets_a_delivery_stuck_at_processing_past_the_threshold(
 
     final = await pool.fetchrow("SELECT status FROM notification_deliveries WHERE id = $1", delivery_id)
     assert final["status"] == "delivered"
+
+
+class _RedisUnavailableForXadd:
+    """Wraps a real Redis client but makes xadd() raise, simulating Redis
+    being unavailable at exactly the moment _dispatch_pending_deliveries()
+    tries to enqueue -- everything else proxies to the real client
+    unchanged, so this only breaks the one call path under test.
+    """
+
+    def __init__(self, real_redis):
+        self._real = real_redis
+
+    async def xadd(self, *args, **kwargs):
+        raise RedisConnectionError("simulated Redis outage")
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+async def test_a_redis_outage_during_dispatch_leaves_the_delivery_recoverable_not_lost(pool, conn):
+    """Launch-readiness audit case E (Redis unavailable): the existing
+    reclaim test above proves recovery *given* a stuck 'processing' row;
+    this proves the worker survives a *real*, live exception thrown mid-
+    dispatch without corrupting or losing the delivery -- it's left
+    exactly where _dispatch_pending_deliveries()'s own ordering guarantees
+    it would be (processing, no stream entry), not half-written, not
+    silently marked delivered.
+
+    Calls _resolve_and_seed_deliveries()/_dispatch_pending_deliveries()
+    directly for one specific campaign_id, rather than going through
+    process_once()'s own "scan every sending campaign" loop -- this dev
+    database is shared and never truncated between test runs, so a
+    process_once()-level test here would be at the mercy of whatever
+    *other* 'sending' campaigns happen to exist at that moment (the same
+    reason this file's own _INERT_AUDIENCE constant exists). Narrowing to
+    this campaign's own dispatch call is both more robust and a more
+    precise test of the actual claim.
+    """
+    admin_id, *_ = await create_test_admin(pool)
+    user_id, telegram_id = await _register_user(conn, status="active")
+    campaign_id = await notification_queries.create_campaign_admin(
+        pool, admin_id=admin_id, internal_name="x", title="Outage test", body="x",
+        audience_filter={"user_ids": [user_id]}, exclude_user_ids=[], template_id=None, ip_address=None,
+    )
+    await pool.execute(
+        "UPDATE notification_campaigns SET status = 'sending' WHERE id = $1", campaign_id
+    )
+
+    broken_redis = _RedisUnavailableForXadd(None)
+    await campaign_worker._resolve_and_seed_deliveries(pool, campaign_id)  # noqa: SLF001
+    with pytest.raises(RedisConnectionError):
+        await campaign_worker._dispatch_pending_deliveries(pool, broken_redis, campaign_id)  # noqa: SLF001
+
+    deliveries = await notification_queries.list_deliveries_admin(pool, campaign_id=campaign_id)
+    assert len(deliveries) == 1
+    assert deliveries[0]["status"] == "processing"  # not lost, not corrupted, not falsely delivered
+    assert deliveries[0]["delivered_at"] is None
 
 
 async def test_reclaim_leaves_a_recently_dispatched_delivery_alone(pool, conn):

@@ -9,6 +9,7 @@ import contextlib
 from decimal import Decimal
 
 from packages.core import ledger
+from services.engine import worker as worker_module
 from services.engine.round_engine import RoundEngine, load_card_pool, load_room_config
 from services.engine.worker import EngineWorker
 from tests.integration.conftest import create_funded_user, create_room
@@ -55,6 +56,22 @@ async def test_run_active_rooms_is_safe_to_call_repeatedly(pool, redis, conn):
     # would silently orphan the running task (still executing, but with no
     # reference left to stop it on shutdown) while a redundant second
     # engine raced it for a lock it could only ever lose.
+    #
+    # run_active_rooms() claims *every* is_active=true row with no limit --
+    # unlike every other test here, which only ever touches the one room it
+    # creates, this test is directly sensitive to how many such rows exist
+    # in the whole (shared, never-truncated-between-runs) database. Root-
+    # caused via a live reproduction: this dev DB had accumulated 560
+    # is_active=true rooms from unrelated tests over a long session, so a
+    # single run_active_rooms() call here span up 560 real engines/locks/
+    # stream-readers concurrently and blew straight through the Redis pool's
+    # connection cap -- the exact MaxConnectionsError/TimeoutError this test
+    # kept flaking with, confirmed by instrumenting the real pool and seeing
+    # room-lock refresh failures for rooms this test never created. Neutralize
+    # that shared-DB noise the same way other tests already defend against
+    # it (see the campaigns _INERT_AUDIENCE / unique_username() precedent)
+    # instead of assuming the table starts empty.
+    await conn.execute("UPDATE rooms SET is_active = false WHERE is_active = true")
     room_id = await create_room(conn, stake=Decimal("10.00"), min_players=2, is_active=True)
     worker = EngineWorker(pool, redis, worker_id="test-worker-repoll")
     await worker.start()
@@ -68,6 +85,34 @@ async def test_run_active_rooms_is_safe_to_call_repeatedly(pool, redis, conn):
 
         assert second_task is first_task, "an already-running room's engine got replaced"
         assert worker.engine_for(room_id) is first_engine
+    finally:
+        await worker.shutdown()
+
+
+async def test_run_active_rooms_caps_new_claims_per_poll(pool, redis, conn):
+    # Launch-readiness audit: proves the real MAX_NEW_CLAIMS_PER_POLL cap
+    # (worker.py) actually limits how many rooms one run_active_rooms()
+    # call claims, using the real production constant -- not a smaller
+    # stand-in -- so this is a direct proof of the real deployed behavior,
+    # not an approximation of it. Same defensive cleanup as the test
+    # above: this dev database is shared and never truncated.
+    await conn.execute("UPDATE rooms SET is_active = false WHERE is_active = true")
+    room_count = worker_module.MAX_NEW_CLAIMS_PER_POLL + 5
+    room_ids = [
+        await create_room(conn, stake=Decimal("10.00"), min_players=2, is_active=True)
+        for _ in range(room_count)
+    ]
+    worker = EngineWorker(pool, redis, worker_id="test-worker-cap")
+    await worker.start()
+    try:
+        await worker.run_active_rooms()
+        assert len(worker._tasks) == worker_module.MAX_NEW_CLAIMS_PER_POLL  # noqa: SLF001
+
+        # The remainder aren't lost -- the next poll (30s later in real
+        # production) picks up exactly the ones left over.
+        await worker.run_active_rooms()
+        assert len(worker._tasks) == room_count  # noqa: SLF001
+        assert set(worker._tasks) == set(room_ids)  # noqa: SLF001
     finally:
         await worker.shutdown()
 
@@ -123,6 +168,17 @@ async def test_run_active_rooms_recovers_a_room_that_dies_mid_session(pool, redi
     # eventually restarts. This proves the fix: one run_active_rooms()
     # call both refunds the abandoned round AND reclaims the room with a
     # working fresh engine, no restart needed.
+    #
+    # Real regression caught by this exact test after MAX_NEW_CLAIMS_PER_
+    # POLL was introduced (see worker.py): run_active_rooms() now caps how
+    # many *new* rooms it claims per call, and this shared, never-
+    # truncated-between-runs dev database can easily have 50+ other
+    # is_active=true rooms left behind by other tests within the same
+    # full-suite run -- enough to exhaust that cap before ever reaching
+    # this test's own room, since the underlying query has no ORDER BY.
+    # Same defensive cleanup as test_run_active_rooms_is_safe_to_call_
+    # repeatedly and test_run_active_rooms_caps_new_claims_per_poll above.
+    await conn.execute("UPDATE rooms SET is_active = false WHERE is_active = true")
     room_id = await create_room(
         conn, stake=Decimal("10.00"), min_players=2, call_interval_ms=50, is_active=True
     )

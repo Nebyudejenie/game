@@ -341,6 +341,70 @@ async def test_rooms_list_reports_a_real_lobby_deadline(gateway_server, pool, re
         await asyncio.wait_for(task, timeout=15)
 
 
+async def test_a_zero_player_room_still_appears_live_in_the_room_list(
+    gateway_server, pool, redis, card_pool, conn
+):
+    # Launch-readiness audit item: confirm a room with nobody in it yet
+    # doesn't disappear from, or error out of, the lobby list a player
+    # sees before joining anything. list_rooms() (services/gateway/
+    # queries.py) has no player-count filter and defends the aggregate
+    # count with `or 0`, and run_forever() proactively opens a room's very
+    # first round the instant its engine claims it (never leaving a fresh
+    # room sitting at a bare, round-less "idle") -- this proves both hold
+    # for a real client over the real WS path, not just by reading the
+    # code.
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=30, is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        await wait_until(lambda: engine.status == "lobby", timeout=5)
+
+        telegram_id = next_telegram_id()
+        async with websockets.connect(gateway_server) as ws:
+            await ws.send(json.dumps({"t": "auth", "init_data": build_init_data(telegram_id)}))
+            await ws.recv()  # authed
+
+            await ws.send(json.dumps({"t": "rooms"}))
+            rooms_msg = json.loads(await ws.recv())
+            assert rooms_msg["t"] == "rooms"
+
+            room_entry = next(r for r in rooms_msg["rooms"] if r["room_id"] == room_id)
+            assert room_entry["players"] == 0
+            assert room_entry["status"] == "lobby"
+            assert room_entry["lobby_deadline_ms"] is not None
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
+async def test_a_malformed_claim_is_rejected_gracefully_not_crashed(gateway_server, pool, redis):
+    # Launch-readiness audit gap: no existing test sent a genuinely
+    # malformed claim frame over the real WS path. connection.py's
+    # `_room_id_for_round()` already guards with `isinstance(round_id,
+    # int)` -- this proves that guard actually reaches a real client as a
+    # clean `bad_round_id` error, not an exception that drops the
+    # connection or a silent no-op the client can never distinguish from
+    # a dropped message.
+    telegram_id = next_telegram_id()
+    async with websockets.connect(gateway_server) as ws:
+        await ws.send(json.dumps({"t": "auth", "init_data": build_init_data(telegram_id)}))
+        await ws.recv()  # authed
+
+        await ws.send(json.dumps({"t": "claim", "round_id": "not-a-real-round-id", "card_no": 1}))
+        reply = json.loads(await ws.recv())
+        assert reply["t"] == "error"
+        assert reply["code"] == "bad_round_id"
+
+        # The connection itself must still be alive and usable afterward --
+        # a malformed message must never silently kill the socket.
+        await ws.send(json.dumps({"t": "rooms"}))
+        rooms_reply = json.loads(await ws.recv())
+        assert rooms_reply["t"] == "rooms"
+
+
 async def test_drop_card_true_is_not_treated_as_a_real_card_number(
     gateway_server, pool, redis, card_pool, conn
 ):

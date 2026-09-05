@@ -125,9 +125,36 @@ def test_has_won_false_when_second_line_is_one_number_short():
     assert bingo.has_won(grid, called, ALL_KINDS) is False
 
 
+def test_has_won_false_with_only_one_complete_column():
+    # Launch-readiness audit gap: the single-line-reject case was only
+    # ever proven for a row (test_has_won_false_with_only_one_complete_
+    # line above) -- a column is a structurally different index pattern
+    # in the same _ALL_PATTERNS table and deserves its own proof.
+    grid = make_grid()
+    called = {grid[r][0] for r in range(5)}
+    assert bingo.winning_patterns(grid, called, ALL_KINDS)  # sanity: col_0 is complete
+    assert bingo.has_won(grid, called, ALL_KINDS) is False
+
+
+def test_has_won_false_with_only_one_complete_diagonal():
+    # Same gap as above, for a diagonal -- the FREE space sits on both
+    # diagonals, so this also confirms one diagonal alone (even with the
+    # free square's "help") still isn't a win on its own.
+    grid = make_grid()
+    called = {grid[i][i] for i in range(5) if (i, i) != FREE}
+    assert bingo.winning_patterns(grid, called, ALL_KINDS)  # sanity: diag_main is complete
+    assert bingo.has_won(grid, called, ALL_KINDS) is False
+
+
 def test_has_won_true_for_two_rows():
     grid = make_grid()
     called = {grid[r][c] for r in (0, 1) for c in range(5)}
+    assert bingo.has_won(grid, called, ALL_KINDS) is True
+
+
+def test_has_won_true_for_two_columns():
+    grid = make_grid()
+    called = {grid[r][c] for c in (0, 1) for r in range(5)}
     assert bingo.has_won(grid, called, ALL_KINDS) is True
 
 
@@ -140,6 +167,12 @@ def test_has_won_true_for_row_plus_column():
 def test_has_won_true_for_row_plus_diagonal():
     grid = make_grid()
     called = {grid[0][c] for c in range(5)} | {grid[i][i] for i in range(5)}
+    assert bingo.has_won(grid, called, ALL_KINDS) is True
+
+
+def test_has_won_true_for_column_plus_diagonal():
+    grid = make_grid()
+    called = {grid[r][0] for r in range(5)} | {grid[i][4 - i] for i in range(5)}
     assert bingo.has_won(grid, called, ALL_KINDS) is True
 
 

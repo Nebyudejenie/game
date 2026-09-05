@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily Jo Bingo logical backup
+
+[Timer]
+# Daily at 02:00 host time -- outside typical peak play hours; adjust to
+# the real production timezone/traffic pattern once known. Persistent=true
+# means a backup that was missed because the host was down still runs once
+# it's back up, rather than silently waiting for the next scheduled tick.
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

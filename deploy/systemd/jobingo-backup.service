@@ -1,0 +1,22 @@
+[Unit]
+Description=Jo Bingo logical backup (pg_dump via deploy/backup.sh)
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+# CHANGE THIS: the real deploy checkout path on the production host --
+# the same path docs/PRODUCTION_ROLLBACK.md's own commands assume.
+WorkingDirectory=/home/cosmic/game
+Environment=COMPOSE_FILE=/home/cosmic/game/deploy/docker-compose.prod.yml
+# CHANGE THIS: the real production Postgres user, if it differs from the
+# dev default "jobingo" (see deploy/backup.sh's own header comment).
+Environment=POSTGRES_USER=jobingo
+ExecStart=/home/cosmic/game/deploy/backup.sh jobingo
+
+# Failure surfaces in `systemctl status jobingo-backup` and `journalctl -u
+# jobingo-backup` -- deliberately no retry-on-failure here: a silent retry
+# loop masking a real, repeated backup failure is worse than a visible one
+# that pages someone via the unit's own failed-state (wire an
+# OnFailure= unit or a monitoring check against `systemctl is-failed
+# jobingo-backup` if paging on this specifically matters).

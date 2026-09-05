@@ -1,0 +1,10 @@
+[Unit]
+Description=Jo Bingo WAL archive / basebackup retention pruning (deploy/prune_wal_archive.sh)
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+# CHANGE THIS: same real deploy checkout path as jobingo-backup.service.
+WorkingDirectory=/home/cosmic/game
+ExecStart=/home/cosmic/game/deploy/prune_wal_archive.sh 30
