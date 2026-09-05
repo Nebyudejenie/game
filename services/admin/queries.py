@@ -9,7 +9,7 @@ console included (spec section 26/34: "no hidden god mode").
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -753,6 +753,16 @@ async def create_manual_payment_destination_admin(
     effective_from: datetime | None = None,
     effective_until: datetime | None = None,
 ) -> int:
+    # Same explicit-UTC rule as _coerce_destination_changes above: a
+    # caller with no offset (FastAPI/Pydantic parses a plain "2026-09-05
+    # T09:00:00" body value into a *naive* datetime, exactly like
+    # datetime.fromisoformat() does) means UTC, deterministically, not
+    # whatever OS timezone this process happens to be running under.
+    if effective_from is not None and effective_from.tzinfo is None:
+        effective_from = effective_from.replace(tzinfo=timezone.utc)
+    if effective_until is not None and effective_until.tzinfo is None:
+        effective_until = effective_until.replace(tzinfo=timezone.utc)
+
     async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
@@ -796,6 +806,46 @@ _UPDATABLE_DESTINATION_FIELDS = {
     "effective_from", "effective_until",
 }
 
+# effective_from/effective_until arrive here as whatever a generic JSON
+# body decoded them to -- a plain str, never a real datetime -- since
+# `changes: dict[str, Any]` has no per-field schema to coerce them the
+# way a dedicated Pydantic field (like create_manual_payment_destination_
+# admin's own effective_from: datetime | None parameter) already does.
+# asyncpg binds a timestamptz column strictly: it rejects a str outright
+# rather than parsing it, so every edit to either date field 500'd --
+# a real bug, caught live (web/admin's own "Edit destination" form
+# submits exactly this shape), not a hypothetical.
+_DESTINATION_DATETIME_FIELDS = {"effective_from", "effective_until"}
+
+
+def _coerce_destination_changes(changes: dict[str, Any]) -> dict[str, Any]:
+    coerced: dict[str, Any] = {}
+    for field, value in changes.items():
+        if field in _DESTINATION_DATETIME_FIELDS and isinstance(value, str):
+            if not value.strip():
+                coerced[field] = None
+                continue
+            try:
+                parsed = datetime.fromisoformat(value)
+            except ValueError as exc:
+                raise ValueError(f"{field} is not a valid ISO datetime: {value!r}") from exc
+            # A caller with no explicit offset (the admin UI's own plain
+            # datetime-local input, no timezone selector) means UTC,
+            # deterministically -- never whatever OS timezone the Python
+            # process handling the request happens to be running under.
+            # asyncpg encodes a *naive* datetime using the local system
+            # timezone of the process itself, not UTC and not Postgres's
+            # own session `timezone` GUC -- confirmed directly: the exact
+            # same naive value round-tripped to a different stored instant
+            # in this project's own dev sandbox (a non-UTC system
+            # timezone) versus production (a UTC container), which is
+            # exactly the silent, environment-dependent drift this
+            # explicit attachment removes.
+            coerced[field] = parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+        else:
+            coerced[field] = value
+    return coerced
+
 
 async def update_manual_payment_destination_admin(
     pool: asyncpg.Pool,
@@ -811,6 +861,7 @@ async def update_manual_payment_destination_admin(
         raise ValueError(f"not an editable destination field: {unknown}")
     if not changes:
         return False
+    changes = _coerce_destination_changes(changes)
 
     async with pool.acquire() as conn:
         async with conn.transaction():

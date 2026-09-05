@@ -103,6 +103,50 @@ async def test_create_and_update_manual_payment_destination(pool, conn):
     assert audit_row["reason"] == "account closed"
 
 
+async def test_update_destination_effective_dates_from_a_real_json_body(pool):
+    """Regression: web/admin's own "Edit destination" form submits
+    effective_from/effective_until as plain ISO strings inside the
+    generic `changes` dict (services/admin/app.py's
+    UpdateManualPaymentDestinationRequest.changes: dict[str, Any] has no
+    per-field schema to coerce them the way create_manual_payment_
+    destination_admin's own dedicated `datetime | None` parameter
+    already does) -- asyncpg previously rejected the resulting str
+    outright with a real 500 (DataError: expected a datetime.datetime
+    instance, got 'str'), caught live via a real HTTP PATCH before this
+    fix, not a hypothetical.
+    """
+    admin_id, *_ = await create_test_admin(pool)
+    destination_id = await queries.create_manual_payment_destination_admin(
+        pool, admin_id=admin_id, method_kind="telebirr", account_ref="0911000000",
+        account_name="Jo Bingo PLC", instructions=None, ip_address="10.0.0.1",
+    )
+
+    updated = await queries.update_manual_payment_destination_admin(
+        pool, admin_id=admin_id, destination_id=destination_id,
+        changes={"effective_from": "2026-09-05T09:00:00", "effective_until": "2026-09-06T12:33:00"},
+        reason="test window", ip_address="10.0.0.1",
+    )
+    assert updated is True
+
+    rows = await queries.list_manual_payment_destinations(pool)
+    match = next(r for r in rows if r["id"] == destination_id)
+    assert match["effective_from"].isoformat().startswith("2026-09-05T09:00:00")
+    assert match["effective_until"].isoformat().startswith("2026-09-06T12:33:00")
+
+    # Clearing a date (the form's own "leave blank for always-valid") must
+    # also work -- an empty string, not a null, is what a cleared HTML
+    # form field actually sends.
+    cleared = await queries.update_manual_payment_destination_admin(
+        pool, admin_id=admin_id, destination_id=destination_id,
+        changes={"effective_until": ""},
+        reason="remove expiry", ip_address="10.0.0.1",
+    )
+    assert cleared is True
+    rows_after = await queries.list_manual_payment_destinations(pool)
+    match_after = next(r for r in rows_after if r["id"] == destination_id)
+    assert match_after["effective_until"] is None
+
+
 async def test_update_destination_rejects_an_unknown_field(pool):
     admin_id, *_ = await create_test_admin(pool)
     destination_id = await queries.create_manual_payment_destination_admin(
