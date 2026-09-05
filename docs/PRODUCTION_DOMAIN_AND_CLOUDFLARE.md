@@ -1,12 +1,14 @@
 # Production Domain and Cloudflare Architecture
 
 Everything in this file was verified directly against the live production
-server and a real external HTTPS client on 2026-09-05 — not inferred from
-the repo's own aspirational comments (`deploy/cloudflared/config.yml.example`
-describes a 4-subdomain scheme that was never actually implemented; this
-file describes what is actually running).
+server and real external HTTPS/WebSocket clients on 2026-09-05 — not
+inferred from the repo's own aspirational comments
+(`deploy/cloudflared/config.yml.example` describes a 4-subdomain scheme
+that was never actually implemented; this file describes what is
+actually running, and what is staged and ready pending one action only
+someone with root on the box can take).
 
-## The real, live architecture
+## The real architecture
 
 ```
 Internet
@@ -15,141 +17,148 @@ Internet
 Cloudflare (DNS + TLS, Let's Encrypt cert via Cloudflare)
    |
    v
-Cloudflare Tunnel (systemd service on the host, NOT a Docker container --
-   /etc/systemd/system/cloudflared.service, config at
-   /etc/cloudflared/config.yml)
+Cloudflare Tunnel "arada-bingo" (systemd service on the host, NOT a
+   Docker container -- /etc/systemd/system/cloudflared.service, config
+   at /etc/cloudflared/config.yml, tunnel ID 23b7b57e-a207-4d77-9bab-
+   33d39227d15b). The same Cloudflare account also runs several other,
+   completely unrelated tunnels (n8n, rustdesk, santimpay, ...) --
+   confirmed via `cloudflared tunnel list` before touching anything, and
+   only this one tunnel's own DNS routes were ever touched.
    |
    v
 http://localhost:80  (Traefik, part of the shared "hermis" stack this
                        box also runs -- not part of jobingo's own compose
                        file)
    |
-   +-- Host(arada.fun) || Host(www.arada.fun)              -> gateway:8000
-   +-- Host(arada.fun) && PathPrefix(/webhook)              -> bot:8003
-   +-- Host(arada.fun) && PathPrefix(/internal/telebirr)    -> payments:8002
+   +-- Host(arada.fun) || Host(www.arada.fun)   -> gateway:8000
+   +-- Host(arada.fun) && PathPrefix(/webhook)   -> bot:8003
+   +-- Host(payments.arada.fun)                  -> payments:8002
+   +-- Host(agent.arada.fun)                     -> payments:8002 (same service, see below)
+   +-- Host(admin.arada.fun)                     -> admin:8001
+   +-- Host(finance.arada.fun)                   -> admin:8001 (same service, see below)
 ```
 
-**One tunnel, two hostnames, that's it.** The live `/etc/cloudflared/config.yml`
-ingress list is exactly:
+## Status as of 2026-09-05
 
-```yaml
-ingress:
-  - hostname: arada.fun
-    service: http://localhost:80
-  - hostname: www.arada.fun
-    service: http://localhost:80
-  - service: http_status:404
+| Hostname | DNS | Tunnel ingress | Traefik | Backend | Public end-to-end |
+|---|:---:|:---:|:---:|---|:---:|
+| `arada.fun` / `www.arada.fun` | live | live | live | gateway | **PASS** |
+| `payments.arada.fun` | live | **pending** | live | payments | pending tunnel config |
+| `agent.arada.fun` | live | **pending** | live | payments (Agent Portal) | pending tunnel config |
+| `admin.arada.fun` | live | **pending** | live | admin | pending tunnel config |
+| `finance.arada.fun` | live | **pending** | live | admin (finance-role login) | pending tunnel config |
+
+DNS was created for all four new hostnames this session (`cloudflared
+tunnel route dns arada-bingo <hostname>`, using the origin cert already
+on the box — no new Cloudflare credentials were needed for this part).
+Traefik routing for all four is live right now. The **only** missing
+piece is `/etc/cloudflared/config.yml` itself: it's `root:root`-owned
+(`-rw-r--r--`) and this session's user (`cosmic`) has no passwordless
+`sudo` (`sudo -n true` returns "interactive authentication is required")
+— a genuine, hard OS permission boundary, not a policy choice. The
+replacement file is already staged and diffed at
+`/tmp/new_cloudflared_config.yml` on the server; applying it needs
+exactly:
+
+```bash
+sudo cp /etc/cloudflared/config.yml /etc/cloudflared/config.yml.bak-$(date +%Y%m%d%H%M%S)
+sudo cp /tmp/new_cloudflared_config.yml /etc/cloudflared/config.yml
+sudo systemctl restart cloudflared
 ```
 
-No `admin.`, `payments.`, `pay.`, `bot.`, `api.`, `finance.`, or
-`agent.arada.fun` DNS record or tunnel ingress rule exists. Every public
-route lives under the one tunneled hostname, disambiguated by Traefik's
-own `PathPrefix` matcher — the same pattern the `bot` service's webhook
-route already used before this work, now extended to `payments`.
+This restarts only the `arada-bingo` tunnel's own systemd unit — the
+other unrelated tunnels on this shared account are separate services,
+unaffected. Expect a 1-2 second blip on `arada.fun` itself during the
+restart, nothing longer.
 
-## Why path-based routing under `arada.fun`, not new subdomains
+## Why `payments`/`agent` and `admin`/`finance` are the same containers, twice
 
-A CTO-level request for this system asked for `admin.arada.fun`,
-`finance.arada.fun`, `agent.arada.fun`, `api.arada.fun`, and
-`payments.arada.fun` as literal separate subdomains. After inspecting the
-live code and infrastructure (not assuming), most of those don't
-correspond to a real, separate thing to route to:
+`agent.arada.fun` and `payments.arada.fun` both route to the exact same
+`jobingo-payments` container (two Traefik routers, `jobingo-payments` and
+`jobingo-agent`, both pointing at the identical
+`traefik.http.services.jobingo-payments` service) — not two deployments.
+The Agent Portal (`web/agent`, `services/payments/agent_auth.py`, the
+`/agent-portal/*` routes) is genuinely part of the payments service, the
+same "don't create a second payment system" discipline the whole Telebirr
+feature was built under. `finance.arada.fun` and `admin.arada.fun`
+likewise both route to the one `jobingo-admin` container: "Finance" is an
+RBAC role (`admin_users.role = 'finance'`) inside that one console, not a
+separate app — a finance login sees a different set of screens, enforced
+server-side, regardless of which hostname reached it. See
+`docs/ADMIN_DASHBOARD_GUIDE.md` and `docs/AGENT_DASHBOARD_GUIDE.md` for
+what each surface actually shows.
 
-- **`payments.arada.fun`**: reused the existing tunneled `arada.fun`
-  hostname with a Traefik `PathPrefix` instead, exactly mirroring how
-  `bot`'s own webhook route already works. A literal new subdomain would
-  require editing the systemd-level tunnel config and adding a real DNS
-  record — technically possible, but unnecessary when the path-based
-  approach reaches the identical destination with zero new public
-  attack surface and zero new infrastructure to maintain. The resulting
-  URL is `https://arada.fun/internal/telebirr/ingest` — confirmed live.
-- **`admin.arada.fun`**: the admin console (`services/admin` + `web/admin`)
-  currently has **no public route of any kind** — it's bound to
-  `127.0.0.1:8001` on the host only. Exposing it requires a real decision
-  (see `docs/PRODUCTION_ACCESS_MATRIX.md`) because unlike `bot`/`payments`,
-  its ~15 API routes aren't under one path prefix, and its IP-allowlist
-  security check (`services/admin/app.py::_check_ip_allowlist`) reads the
-  raw TCP connection IP, which would silently see only Traefik's own IP
-  if placed behind it — a real security regression if `ADMIN_IP_ALLOWLIST`
-  is ever configured, unless `X-Forwarded-For` handling is added first.
-  **Not exposed publicly** — this matches the explicit decision made this
-  session to verify the admin console is built and working without
-  changing its current (SSH-tunnel-only) access model.
-- **`finance.arada.fun` / `agent.arada.fun`**: these are not separate
-  backend services. "Finance" is an RBAC role (`admin_users.role =
-  'finance'`) inside the *same single* admin console app — a finance user
-  logs into the identical console at whatever hostname it's served from
-  and sees a different set of menu items/permissions, enforced server-side
-  (`services/admin/rbac.py`), not a different deployment. "Agent" isn't an
-  admin role at all: a Payment Agent's only interface is the private
-  Telegram bot (`services/bot/handlers.py`'s `_is_active_payment_agent`
-  filter) — there is no agent-facing web app in this codebase to route to.
-  Creating either subdomain would mean routing to the exact same admin
-  container a second time under a different name (all downside, no new
-  capability), or standing up a brand-new duplicate system that doesn't
-  exist today — both of which contradict the "no second wallet, no second
-  ledger" discipline this whole payment feature was already built under.
-- **`api.arada.fun`**: `gateway` already serves its REST API under
-  `/api/*` at the existing `arada.fun` hostname (the same service that
-  serves the Mini App itself). A separate `api.arada.fun` pointing at the
-  identical container would be two public hostnames for one service with
-  no functional difference — not created.
+`api.arada.fun` was not created: `gateway` already serves its REST API
+under `/api/*` at `arada.fun` itself (the same service as the Mini App) —
+a second hostname for the identical container would be redundant.
 
-## Verified live, 2026-09-05 (real external HTTPS requests, not local tests)
+## Verified live, 2026-09-05 (real external requests against `arada.fun`, already live)
 
 | Check | Result |
 |---|---|
 | `https://arada.fun/` (gateway / Mini App) | `200`, valid Let's Encrypt cert (`CN=arada.fun`) |
-| `http://arada.fun/` | `200` — **not** redirected to HTTPS (see Remaining gaps below) |
+| `http://arada.fun/` | `200` — **not** redirected to HTTPS (see Remaining gaps) |
 | `wss://arada.fun/ws` (game WebSocket) | Connects; server correctly closes unauthenticated traffic with `4000 expected_auth` — proves the upgrade traverses Cloudflare Tunnel → Traefik → gateway intact |
 | `POST https://arada.fun/webhook` (Telegram) | `401` (real webhook-secret check, not a generic 404/405) |
 | `GET https://arada.fun/webhook` | `405` (POST-only, correct) |
-| `POST https://arada.fun/internal/telebirr/ingest`, no auth | `401 missing bearer token` |
-| same, wrong token | `401 invalid bearer token` |
-| same, before this session's fix | `405` (fell through to gateway's catch-all — the route didn't exist) |
-| Control: `POST https://arada.fun/<random-nonexistent-path>` | `405` (gateway's generic fallback — confirms the telebirr 401s above are the real payments service responding, not a coincidence) |
+| Control: `POST https://arada.fun/<random-nonexistent-path>` | `405` (gateway's generic fallback) |
+
+The `payments.arada.fun/internal/telebirr/ingest` auth flow (missing
+token → `401`, wrong token → `401`) was verified live *before* the
+hostname was switched from a path under `arada.fun` — identical backend
+route, identical auth code, so this doesn't need re-proving, only
+re-confirming once the tunnel config lands (see the acceptance report for
+the exact command to re-run then).
 
 ## What changed this session
 
-1. `deploy/docker-compose.yml` (on the server, not this git repo — that
-   file's real, hand-maintained instance lives at
-   `/home/cosmic/jo-bingo/deploy/docker-compose.yml`): added a
-   `traefik.*` label block to the `payments` service, scoped to
-   `PathPrefix(/internal/telebirr)` only — `/metrics` and any other
-   payments route stay unreachable from outside. `payments` container
-   recreated to pick it up.
+1. Added a Traefik route for `payments`, first as a path under `arada.fun`
+   (`PathPrefix(/internal/telebirr)`), verified live, then upgraded to a
+   real dedicated `payments.arada.fun` hostname per explicit direction —
+   the path-based route was removed, not left as a redundant second way in.
 2. `MACRODROID_INGEST_TOKEN`: found set (a real 64-char value) in
    `.env.example` on the server — the *template* file, meant to always be
-   blank and is committed to git. It had never been committed in that
-   state (verified: `git status` showed it as a local, uncommitted
-   modification only), but was one `git add -A` away from leaking a real
-   secret into version control. Moved the value into the real `.env`
-   (gitignored, correct place for it), reverted `.env.example` back to
-   its committed blank line. `payments` recreated again to load it.
+   blank and is committed to git. It had never actually been committed in
+   that state (verified via `git log`), but was one `git add -A` away
+   from leaking a real secret into version control. Moved the value into
+   the real `.env`, reverted `.env.example` to its committed blank line.
 3. Migration `b31c5f70f957` (two-line Bingo win rule, unrelated to
    payments but was pending) applied via the existing one-off `migrate`
-   service — pure schema/data, safe independent of any code deploy.
+   service — pure schema/data, safe independent of the engine-worker code
+   deploy, which stays pending (see `docs/PRODUCTION_ACCESS_MATRIX.md`).
+4. Built the Payment Agent Portal (`services/payments/agent_auth.py`,
+   three new routes, `web/agent`) and the bot's `/portal` command —
+   see `docs/AGENT_DASHBOARD_GUIDE.md`.
+5. Fixed `services/admin/app.py`'s IP-allowlist to trust Cloudflare's own
+   `CF-Connecting-IP` header (unforgeable — set at Cloudflare's edge) once
+   behind a reverse proxy, instead of the raw connection IP, which would
+   have silently become Traefik's own address — this was the blocker that
+   made exposing `admin.arada.fun` safe to do at all.
+6. Created DNS + Traefik routes for `payments.arada.fun`,
+   `agent.arada.fun`, `admin.arada.fun`, `finance.arada.fun`. Tunnel
+   ingress staged, pending root access (see Status table above).
+7. Set `PAYMENTS_PUBLIC_BASE_URL=https://payments.arada.fun` and
+   `AGENT_PORTAL_BASE_URL=https://agent.arada.fun` in the real `.env` —
+   the first was previously unset entirely (Chapa's own webhook callback
+   URL was never configured; this is a pre-existing gap this work
+   incidentally fixed).
 
 ## Remaining gaps (not fixed this session — need a decision or access this session doesn't have)
 
 - **HTTP is not redirected to HTTPS.** `http://arada.fun/` returns `200`
   directly instead of a redirect. This is a Cloudflare zone-level setting
   (Always Use HTTPS / a redirect rule) — fixing it needs Cloudflare
-  dashboard or API access, which this session doesn't have. See the
-  REQUIRED block in the final report.
+  dashboard or API access, which this session doesn't have.
 - **A real, working secret sits in git history**, not just the working
   tree: commit `d6f5c79` ("Encrypt phone numbers at rest") added a real,
   functioning `PHONE_ENCRYPTION_KEY` to `.env.example`, explicitly
   labeled in its own commit message as "a real, working DEV key, not a
   placeholder." Confirmed by hash comparison (never printing either
   value) that **production uses a completely different, separately
-  generated key** — production itself is not compromised. But the
-  checked-in dev key is permanently recoverable from git history by
-  anyone with repo access, and would silently protect zero confidentiality
-  for any real data a local/dev/staging environment ever encrypts with
-  it. Rotating the checked-in value (a new commit) reduces exposure for
-  future clones but doesn't erase history; only a history rewrite
-  (`git filter-repo`/BFG, force-push, everyone re-clones) removes it
-  entirely — a decision for you, not something to do unilaterally.
-- **Admin console has no public route.** Deliberate, per this session's
-  own explicit decision — see `docs/PRODUCTION_ACCESS_MATRIX.md`.
+  generated key** — production itself is not compromised. The checked-in
+  dev key is permanently recoverable from git history by anyone with repo
+  access; rotating it (a new commit) helps future clones but doesn't
+  erase history — only a rewrite (`git filter-repo`/BFG, force-push,
+  everyone re-clones) does that, a decision for you, not something to do
+  unilaterally.
+- **The cloudflared tunnel config edit itself** — see the Status table.

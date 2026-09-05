@@ -1,17 +1,22 @@
 # Admin Dashboard Guide
 
 One console (`services/admin` + `web/admin`), four roles
-(support/ops/finance/superadmin), RBAC-gated per screen — not four
-separate apps. "Admin dashboard," "Finance dashboard," and "Agent
-management" in earlier planning documents all refer to sections of this
-one app, distinguished by what a given role's login can see and do, not
-by separate deployments or URLs. See `docs/PRODUCTION_ACCESS_MATRIX.md`
-for why this stays that way rather than being split into
-`admin.arada.fun`/`finance.arada.fun`/`agent.arada.fun` subdomains.
+(support/ops/finance/superadmin), RBAC-gated per screen — not separate
+apps for admin and finance. "Admin dashboard" and "Finance dashboard" in
+earlier planning documents both refer to sections of this one app,
+distinguished by what a given role's login can see and do, not by
+separate deployments. See `docs/FINANCE_DASHBOARD_GUIDE.md` for the
+finance-specific view, `docs/AGENT_DASHBOARD_GUIDE.md` for the separate
+Agent Portal (a genuinely different app, since agents have no admin-role
+identity at all), and `docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md` for why
+`admin.arada.fun` and `finance.arada.fun` both point at this exact same
+container rather than two deployments.
 
-Access today: `http://127.0.0.1:8001` on the production host (reach it
-via an SSH tunnel — it has no public URL, a deliberate decision, not a
-gap). Frontend served at `/console`.
+Access: `admin.arada.fun` and `finance.arada.fun` (same login, same
+console — the hostname you're told to use just matches your role),
+pending the tunnel-config step in the domain doc's Status table; until
+then, `http://127.0.0.1:8001` on the production host via an SSH tunnel,
+unchanged from before. Frontend served at `/console`.
 
 ## The 14 screens (`web/admin/js/app.js`'s own nav order)
 
@@ -45,13 +50,15 @@ superadmin-only `/audit-log` returned `403` from the real server, not a
 A "Payment Agent" (someone forwarding Telebirr SMS via the private
 Telegram bot) is a row in the `payment_agents` table
 (`telegram_user_id`, `is_active`), not an `admin_users` row and not a
-role. They never log into this console. Their only interaction with the
-system is sending a message to the bot; the bot replies with the parse
-outcome (status/reference/amount), never a dashboard. An admin (with
-`payments:configure`, superadmin-only) manages the agent allowlist
-through the **Payment Agents** screen above — that screen *is* the
-"agent management" surface; there is no separate agent-facing web app to
-document, because none exists.
+role. They never log into this console — they have their own separate
+portal instead (`docs/AGENT_DASHBOARD_GUIDE.md`), authenticated through
+Telegram rather than a password, since this console's own
+username/password/TOTP login has no meaning for an identity that only
+ever exists as a Telegram user. An admin (with `payments:configure`,
+superadmin-only) manages the agent allowlist itself — who's authorized
+at all — through the **Payment Agents** screen above; that's a different
+capability from an agent viewing their own submission history, which is
+what the separate Agent Portal is for.
 
 ## Financial data safety (verified, not assumed)
 

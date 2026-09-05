@@ -13,11 +13,15 @@ required for that specific job.
       account that will receive/send the payments this system tracks.
 - [ ] A charger, kept permanently plugged in.
 - [ ] Stable internet (mobile data or Wi-Fi).
-- [ ] The real ingestion URL: `https://arada.fun/internal/telebirr/ingest`
-      — confirmed live 2026-09-05: reaches the real payments service (not
-      a 404/405 fallback), enforces the bearer token correctly (missing
-      token → 401, wrong token → 401, unconfigured → 503), verified by a
-      real external HTTPS request through Cloudflare + Traefik.
+- [ ] The real ingestion URL: `https://payments.arada.fun/internal/telebirr/ingest`
+      — a dedicated production payment hostname, not a path under the
+      main Mini App domain. The auth behavior (missing token → 401,
+      wrong token → 401, unconfigured → 503) was confirmed live
+      2026-09-05 against the same backend route before this hostname was
+      switched over; see `docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md`'s
+      Status table for whether the tunnel-side DNS routing has finished
+      landing yet — if this URL isn't resolving, that's why, and it's not
+      something to work around on the phone.
 - [ ] The real `MACRODROID_INGEST_TOKEN` value (get this from an admin —
       it is a secret, never write it anywhere other than this one macro's
       configuration). Confirmed configured in production as of 2026-09-05.
@@ -66,7 +70,7 @@ MacroDroid
       → Connectivity
           → HTTP Request
           → Method: POST
-          → URL: https://arada.fun/internal/telebirr/ingest
+          → URL: https://payments.arada.fun/internal/telebirr/ingest
           → Headers (add two):
               Authorization  =  Bearer <MACRODROID_INGEST_TOKEN>
               Content-Type   =  application/json
