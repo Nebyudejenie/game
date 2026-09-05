@@ -13,11 +13,14 @@ required for that specific job.
       account that will receive/send the payments this system tracks.
 - [ ] A charger, kept permanently plugged in.
 - [ ] Stable internet (mobile data or Wi-Fi).
-- [ ] The real ingestion URL: `https://<payments-domain>/internal/telebirr/ingest`
-      (get the real domain from whoever manages deployment — do not guess it).
+- [ ] The real ingestion URL: `https://arada.fun/internal/telebirr/ingest`
+      — confirmed live 2026-09-05: reaches the real payments service (not
+      a 404/405 fallback), enforces the bearer token correctly (missing
+      token → 401, wrong token → 401, unconfigured → 503), verified by a
+      real external HTTPS request through Cloudflare + Traefik.
 - [ ] The real `MACRODROID_INGEST_TOKEN` value (get this from an admin —
       it is a secret, never write it anywhere other than this one macro's
-      configuration).
+      configuration). Confirmed configured in production as of 2026-09-05.
 
 ## Step 1 — Prepare the phone
 
@@ -63,7 +66,7 @@ MacroDroid
       → Connectivity
           → HTTP Request
           → Method: POST
-          → URL: https://<payments-domain>/internal/telebirr/ingest
+          → URL: https://arada.fun/internal/telebirr/ingest
           → Headers (add two):
               Authorization  =  Bearer <MACRODROID_INGEST_TOKEN>
               Content-Type   =  application/json
