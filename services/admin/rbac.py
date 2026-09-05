@@ -78,6 +78,12 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     # other's accounts would mean a compromised lower-privilege account
     # could mint itself a fresh, unaudited-by-anyone-above-it identity.
     "admin_users:manage": frozenset({"superadmin"}),
+    # Editing player-facing bot text (menu button labels, message
+    # templates) is an operational/UX concern, not a financial one -- same
+    # roles as notifications:templates_manage, the closest precedent
+    # (both edit text real players see, neither moves money or grants
+    # access to anyone else's account).
+    "bot_content:manage": frozenset({"ops", "superadmin"}),
 }
 
 

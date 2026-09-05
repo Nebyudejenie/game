@@ -19,7 +19,7 @@ the hostname you're told to use just matches your role). Gated by
 login — verified live, both together. `http://127.0.0.1:8001` on the
 production host via an SSH tunnel still works too, unchanged.
 
-## The 16 screens (`web/admin/js/app.js`'s own nav order)
+## The 17 screens (`web/admin/js/app.js`'s own nav order)
 
 | Screen | Backing endpoint(s) | Visible to |
 |---|---|---|
@@ -35,6 +35,7 @@ production host via an SSH tunnel still works too, unchanged.
 | Rounds | round history/detail | all four roles |
 | Rooms | room config CRUD | all four roles (mutations are superadmin-gated server-side where they affect money — win_patterns, stake, etc.) |
 | Notifications | `services/admin/app.py`'s `/notifications/*` routes — see `docs/NOTIFICATION_CENTER_ADMIN_GUIDE.md` | **ops + superadmin only** (hidden from support/finance in the nav and in `rbac.py`; drafting/viewing/templates/analytics is ops+superadmin, actually sending/scheduling/cancelling a real send is superadmin-only) |
+| Bot Content | `GET /bot-content`, `PUT/DELETE /bot-content/{key}/{language}` | **ops + superadmin only** — see below |
 | Reports | aggregate financial reporting | **finance + superadmin only** (hidden from support/ops in the nav; a direct API call from support/ops still gets a real `403`, verified) |
 | Risk | risk/fraud signals | **ops + finance + superadmin only** |
 | Audit Log | `GET /audit-log`, filterable by `admin_id`/`action` | **superadmin only** |
@@ -95,6 +96,42 @@ An admin can't deactivate or change the role of their **own** account
 through this screen (`CannotModifyOwnAccount`, a `409`) — both would risk
 a superadmin locking themselves out mid-session with no one else able to
 undo it from inside the console.
+
+## Bot Content — editing what the bot says without a deploy
+
+Every player-facing bot string (`services/bot/i18n.py`'s `t()`) ships as
+a file-based default in `services/bot/locales/{am,en,om,ti}.json` — the
+main menu button labels in the reply keyboard
+(`services/bot/keyboards.py::main_menu_keyboard`, e.g. "🎮 ይጫወቱ" / Play)
+are the most visible example, but every one of the ~85 keys is covered
+the same way. The **Bot Content** screen lets ops/superadmin override any
+of them per language, live, with no code deploy:
+
+- Search/browse by key or category (derived from the key's own prefix —
+  `menu.*`, `register.*`, `wallet.*`, etc.).
+- Edit shows all four languages side by side; a value still on its
+  shipped default reads "shipped default," an edited one reads
+  "customized."
+- **Reset to default** removes the override row entirely rather than
+  copying the default text back in — so a later change to the shipped
+  default (a real code deploy) takes effect immediately for anyone who
+  never customized that key, instead of being masked by a stale copy.
+- A key with `{placeholder}` fields (e.g. `register.success`'s `{name}`)
+  shows exactly which ones it needs; saving a value that drops or adds
+  one is rejected with a `422` before it can reach a real player and
+  crash mid-`.format()` — validated by comparing the submitted value's
+  own placeholder set against the shipped default's, not a hardcoded
+  allowlist.
+
+**The live-update path, and its real latency**: the admin API writes
+straight to Postgres (`bot_i18n_overrides`); the bot process (a
+separate, always-running service) polls that table into an in-memory
+cache every `bot_content_sync.POLL_INTERVAL_SECONDS` (30s) and reloads it
+once more on its own startup before handling its first update. `t()`
+itself stays a plain synchronous function with no per-call database
+round-trip — every existing call site across the bot codebase (dozens of
+them) keeps working unchanged. The practical effect: an edit here reaches
+real player conversations within about 30 seconds, not instantly.
 
 ## Financial data safety (verified, not assumed)
 

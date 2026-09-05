@@ -8,6 +8,18 @@ from services.bot import i18n
 LOCALES_DIR = Path(__file__).parent.parent.parent / "services" / "bot" / "locales"
 
 
+@pytest.fixture(autouse=True)
+def _reset_i18n_overrides():
+    """i18n._overrides is deliberately plain module-level, mutable, shared
+    process state (see i18n.py's own comment on why t() can't just await a
+    DB call) -- every test in this file that sets one must not leak it into
+    a sibling test (or a wholly different test file sharing this same
+    pytest process) that assumes the pure file-based default.
+    """
+    yield
+    i18n.set_overrides({})
+
+
 def test_am_and_en_have_matching_key_sets():
     am_keys = set(json.loads((LOCALES_DIR / "am.json").read_text(encoding="utf-8")))
     en_keys = set(json.loads((LOCALES_DIR / "en.json").read_text(encoding="utf-8")))
@@ -60,3 +72,31 @@ def test_all_keys_returns_amharic_key_set():
     keys = i18n.all_keys()
     assert "register.prompt" in keys
     assert "wallet.insufficient" in keys
+
+
+def test_default_template_ignores_any_override():
+    original_default = i18n.default_template("menu.play", "am")
+    i18n.set_overrides({("menu.play", "am"): "Custom Play Label"})
+    # t() now returns the override, but default_template() -- "what ships
+    # in the repo," the baseline a Bot Content admin edit is compared and
+    # reset against -- must stay exactly what it was before the override.
+    assert i18n.default_template("menu.play", "am") == original_default
+    assert i18n.t("menu.play", "am") == "Custom Play Label"
+
+
+def test_override_takes_priority_over_the_shipped_default():
+    default = i18n.default_template("menu.play", "am")
+    i18n.set_overrides({("menu.play", "am"): "Custom Play Label"})
+    assert i18n.t("menu.play", "am") == "Custom Play Label"
+    assert i18n.t("menu.play", "en") == i18n.default_template("menu.play", "en")  # untouched
+    assert default != "Custom Play Label"
+
+
+def test_override_still_formats_placeholders():
+    i18n.set_overrides({("register.success", "en"): "Welcome aboard, {name}!"})
+    assert i18n.t("register.success", "en", name="Nebyu") == "Welcome aboard, Nebyu!"
+
+
+def test_required_placeholders_extracts_named_fields():
+    assert i18n.required_placeholders("Hi {name}, you have {amount} ETB") == frozenset({"name", "amount"})
+    assert i18n.required_placeholders("No placeholders here") == frozenset()

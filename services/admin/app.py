@@ -25,7 +25,7 @@ ADMIN_WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web" / "admin"
 from packages.core.config import get_settings
 from packages.core.db_pool import create_pool
 from packages.core.redis_conn import get_redis
-from services.admin import auth, notification_queries, queries
+from services.admin import auth, bot_content_queries, notification_queries, queries
 from services.admin.auth import AdminSession
 from services.admin.rbac import has_permission
 
@@ -1018,6 +1018,59 @@ async def reset_admin_user_password(
     if not updated:
         raise HTTPException(status_code=404, detail="admin user not found")
     return {"updated": updated}
+
+
+# --- bot content (player-facing bot text overrides, no deploy needed) ----
+
+
+@app.get("/bot-content")
+async def list_bot_content(
+    admin: Annotated[AdminSession, Depends(require("bot_content:manage"))],
+) -> list[dict[str, Any]]:
+    return await bot_content_queries.list_bot_content_admin(app.state.pool)
+
+
+class SetBotContentOverrideRequest(BaseModel):
+    value: str
+
+
+@app.put("/bot-content/{key}/{language}")
+async def set_bot_content_override(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("bot_content:manage"))],
+    key: str,
+    language: str,
+    body: SetBotContentOverrideRequest,
+) -> dict[str, bool]:
+    try:
+        await bot_content_queries.set_bot_content_override_admin(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            key=key,
+            language=language,
+            value=body.value,
+            ip_address=_client_ip(request),
+        )
+    except (bot_content_queries.UnknownBotContentKey, bot_content_queries.InvalidBotContentPlaceholders) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"updated": True}
+
+
+@app.delete("/bot-content/{key}/{language}")
+async def clear_bot_content_override(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("bot_content:manage"))],
+    key: str,
+    language: str,
+) -> dict[str, bool]:
+    cleared = await bot_content_queries.clear_bot_content_override_admin(
+        app.state.pool, admin_id=admin.admin_id, key=key, language=language, ip_address=_client_ip(request)
+    )
+    if not cleared:
+        raise HTTPException(status_code=404, detail="no override set for this key/language")
+    return {"cleared": cleared}
 
 
 # --- reports ---------------------------------------------------------------

@@ -30,7 +30,7 @@ from packages.core.db_pool import create_pool
 from packages.core.logging import configure_logging
 from packages.core.redis_conn import get_redis
 from packages.core.tracing import configure_tracing
-from services.bot import campaign_worker, dedup, notification_relay
+from services.bot import bot_content_sync, campaign_worker, dedup, notification_relay
 from services.bot.handlers import router
 from services.bot.notifier import Notifier
 
@@ -112,9 +112,10 @@ def main() -> None:
     notifier: Notifier | None = None
     relay_task: asyncio.Task[None] | None = None
     campaign_task: asyncio.Task[None] | None = None
+    bot_content_task: asyncio.Task[None] | None = None
 
     async def _on_startup() -> None:
-        nonlocal relay_task, campaign_task
+        nonlocal relay_task, campaign_task, bot_content_task
         assert notifier is not None and pool is not None and redis is not None
         if settings.public_base_url:
             await bot.set_webhook(
@@ -129,12 +130,21 @@ def main() -> None:
         # 429-backed-off outbound pipeline every Telegram message goes
         # through, campaigns reuse it rather than starting a second one.
         campaign_task = asyncio.create_task(campaign_worker.run_forever(pool, redis))
+        # Loaded synchronously once, before serving any update, so the
+        # very first message this process handles already reflects any
+        # admin-set Bot Content overrides rather than a startup window
+        # where they're silently missing -- run_forever() then keeps it
+        # current every POLL_INTERVAL_SECONDS after that.
+        await bot_content_sync.refresh_once(pool)
+        bot_content_task = asyncio.create_task(bot_content_sync.run_forever(pool))
 
     async def _on_shutdown() -> None:
         if relay_task is not None:
             relay_task.cancel()
         if campaign_task is not None:
             campaign_task.cancel()
+        if bot_content_task is not None:
+            bot_content_task.cancel()
         assert notifier is not None and pool is not None and redis is not None
         await notifier.stop()
         if pool is not None:
