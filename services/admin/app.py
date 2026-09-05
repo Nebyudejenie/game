@@ -25,7 +25,7 @@ ADMIN_WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web" / "admin"
 from packages.core.config import get_settings
 from packages.core.db_pool import create_pool
 from packages.core.redis_conn import get_redis
-from services.admin import auth, bot_content_queries, notification_queries, queries
+from services.admin import auth, bonus_queries, bot_content_queries, notification_queries, queries
 from services.admin.auth import AdminSession
 from services.admin.rbac import has_permission
 
@@ -1071,6 +1071,159 @@ async def clear_bot_content_override(
     if not cleared:
         raise HTTPException(status_code=404, detail="no override set for this key/language")
     return {"cleared": cleared}
+
+
+# --- bonuses & referrals -----------------------------------------------
+
+
+class CreateBonusRuleRequest(BaseModel):
+    name: str
+    trigger_type: str
+    reward_type: str
+    reward_amount: Decimal | None = None
+    reward_percentage: Decimal | None = None
+    reward_cap: Decimal | None = None
+    min_qualifying_deposit: Decimal = Decimal("0")
+    wagering_multiplier: Decimal = Decimal("3")
+    expiry_days: int | None = None
+    max_grants_per_user: int = 1
+
+
+@app.post("/bonus-rules")
+async def create_bonus_rule(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("bonuses:manage_rules"))],
+    body: CreateBonusRuleRequest,
+) -> dict[str, int]:
+    try:
+        rule_id = await bonus_queries.create_bonus_rule_admin(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            name=body.name,
+            trigger_type=body.trigger_type,
+            reward_type=body.reward_type,
+            reward_amount=body.reward_amount,
+            reward_percentage=body.reward_percentage,
+            reward_cap=body.reward_cap,
+            min_qualifying_deposit=body.min_qualifying_deposit,
+            wagering_multiplier=body.wagering_multiplier,
+            expiry_days=body.expiry_days,
+            max_grants_per_user=body.max_grants_per_user,
+            ip_address=_client_ip(request),
+        )
+    except bonus_queries.InvalidBonusRule as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"id": rule_id}
+
+
+@app.get("/bonus-rules")
+async def list_bonus_rules(
+    admin: Annotated[AdminSession, Depends(require("bonuses:view"))],
+) -> list[dict[str, Any]]:
+    return await bonus_queries.list_bonus_rules_admin(app.state.pool)
+
+
+class UpdateBonusRuleRequest(BaseModel):
+    changes: dict[str, Any]
+
+
+@app.patch("/bonus-rules/{rule_id}")
+async def update_bonus_rule(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("bonuses:manage_rules"))],
+    rule_id: int,
+    body: UpdateBonusRuleRequest,
+) -> dict[str, bool]:
+    try:
+        updated = await bonus_queries.update_bonus_rule_admin(
+            app.state.pool, admin_id=admin.admin_id, rule_id=rule_id, changes=body.changes,
+            ip_address=_client_ip(request),
+        )
+    except bonus_queries.InvalidBonusRule as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail="bonus rule not found")
+    return {"updated": updated}
+
+
+class GrantManualBonusRequest(BaseModel):
+    user_id: int
+    amount: Decimal
+    wagering_multiplier: Decimal = Decimal("3")
+    expiry_days: int | None = None
+    reason: str
+
+
+@app.post("/bonuses/grant")
+async def grant_manual_bonus(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("bonuses:grant"))],
+    body: GrantManualBonusRequest,
+) -> dict[str, int]:
+    if not body.reason.strip():
+        raise HTTPException(status_code=422, detail="reason is required")
+    if body.amount <= 0:
+        raise HTTPException(status_code=422, detail="amount must be positive")
+    bonus_id = await bonus_queries.grant_manual_bonus_admin(
+        app.state.pool,
+        admin_id=admin.admin_id,
+        user_id=body.user_id,
+        amount=body.amount,
+        wagering_multiplier=body.wagering_multiplier,
+        expiry_days=body.expiry_days,
+        reason=body.reason,
+        ip_address=_client_ip(request),
+    )
+    return {"id": bonus_id}
+
+
+@app.get("/bonuses")
+async def list_bonuses(
+    admin: Annotated[AdminSession, Depends(require("bonuses:view"))],
+    user_id: int | None = None,
+    status: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    return await bonus_queries.list_bonuses_admin(
+        app.state.pool, user_id=user_id, status=status, limit=limit, offset=offset
+    )
+
+
+class RevokeBonusRequest(BaseModel):
+    reason: str
+
+
+@app.post("/bonuses/{bonus_id}/revoke")
+async def revoke_bonus_route(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("bonuses:grant"))],
+    bonus_id: int,
+    body: RevokeBonusRequest,
+) -> dict[str, bool]:
+    if not body.reason.strip():
+        raise HTTPException(status_code=422, detail="reason is required")
+    revoked = await bonus_queries.revoke_bonus_admin(
+        app.state.pool, admin_id=admin.admin_id, bonus_id=bonus_id, reason=body.reason,
+        ip_address=_client_ip(request),
+    )
+    if not revoked:
+        raise HTTPException(status_code=404, detail="active bonus not found")
+    return {"revoked": revoked}
+
+
+@app.get("/bonuses/referral-funnel")
+async def referral_funnel(
+    admin: Annotated[AdminSession, Depends(require("bonuses:view"))],
+) -> dict[str, Any]:
+    return await bonus_queries.referral_funnel_admin(app.state.pool)
+
+
+@app.get("/bonuses/fraud-candidates")
+async def referral_fraud_candidates(
+    admin: Annotated[AdminSession, Depends(require("bonuses:view_fraud_signals"))],
+) -> dict[str, Any]:
+    return await bonus_queries.referral_fraud_candidates_admin(app.state.pool)
 
 
 # --- reports ---------------------------------------------------------------

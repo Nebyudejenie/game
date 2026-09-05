@@ -23,6 +23,7 @@ from redis.asyncio import Redis
 from packages.core import ledger, metrics, rate_limit, responsible_gaming, tracing
 from packages.core.ledger import AsyncpgConnection
 from packages.core.notifications import notify_user
+from packages.core.referrals import maybe_grant_referral_bonus, maybe_grant_welcome_bonus
 from services.payments.provider import PaymentProvider
 
 logger = structlog.get_logger()
@@ -348,6 +349,17 @@ async def _apply_confirmed_status(
                     payment["id"],
                     provider_ref,
                     txn.id,
+                )
+                # Referral/welcome bonus checks, same transaction as the
+                # credit above -- either both commit or neither does.
+                # Both are silent no-ops (never raise) when there's no
+                # referrer, no active rule, or a fraud signal fires; see
+                # packages/core/referrals.py's own docstring.
+                await maybe_grant_referral_bonus(
+                    conn, user_id=payment["user_id"], deposit_amount=payment["amount"]
+                )
+                await maybe_grant_welcome_bonus(
+                    conn, user_id=payment["user_id"], deposit_amount=payment["amount"]
                 )
                 user_id = payment["user_id"]
                 credited_amount = payment["amount"]

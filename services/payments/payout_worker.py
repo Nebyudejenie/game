@@ -53,6 +53,7 @@ from packages.core.db_pool import create_pool
 from packages.core.logging import configure_logging
 from packages.core.notifications import notify_user
 from packages.core.redis_conn import get_redis
+from services.payments.bonus_sweep import sweep_bonus_wagering
 from services.payments.chapa import ChapaProvider
 from services.payments.deposits import poll_pending_deposits, run_provider_reconciliation
 from services.payments.telebirr_reconcile import run_telebirr_reconciliation
@@ -411,6 +412,7 @@ WITHDRAWAL_SWEEP_INTERVAL_SECONDS = 60
 # run_provider_reconciliation()'s own docstring for why it lives here
 # rather than as an external cron job like packages/core/reconcile_job.py.
 PROVIDER_RECONCILE_INTERVAL_SECONDS = 3600
+BONUS_SWEEP_INTERVAL_SECONDS = 60
 METRICS_PORT = 8005
 
 
@@ -432,7 +434,7 @@ async def _run_periodic_sweep(
 
 async def main_async() -> None:
     """Real production entrypoint: the payout stream consumer (this
-    module's own run_forever(), the primary job) alongside four other
+    module's own run_forever(), the primary job) alongside five other
     "safe to run on a timer" payments sweeps that need a periodic invoker
     somewhere -- deposits.py's poll_pending_deposits() (a webhook that
     never arrives), withdrawals.py's sweep_stuck_approved_payouts() (an
@@ -440,8 +442,11 @@ async def main_async() -> None:
     not inside it), deposits.py's run_provider_reconciliation() (spec's
     own hourly Chapa-vs-our-records check, previously built and tested but
     never actually invoked from anywhere -- an architecture audit caught
-    this), and telebirr_reconcile.py's run_telebirr_reconciliation()
-    (the same hourly cadence, CTO directive sections 124-127). All five
+    this), telebirr_reconcile.py's run_telebirr_reconciliation()
+    (the same hourly cadence, CTO directive sections 124-127), and
+    bonus_sweep.py's sweep_bonus_wagering() (the only thing that ever
+    converts a sticky bonus grant into real cash, or expires an unwagered
+    one -- see packages/core/bonuses.py's own module docstring). All six
     share one process/provider rather than separate ones since none of
     them individually justifies its own container, and all are already
     designed to be safe under concurrent, independent invocation.
@@ -488,6 +493,13 @@ async def main_async() -> None:
                 "run_telebirr_reconciliation",
                 PROVIDER_RECONCILE_INTERVAL_SECONDS,
                 lambda: run_telebirr_reconciliation(pool),
+            )
+        ),
+        asyncio.create_task(
+            _run_periodic_sweep(
+                "sweep_bonus_wagering",
+                BONUS_SWEEP_INTERVAL_SECONDS,
+                lambda: sweep_bonus_wagering(pool, redis),
             )
         ),
     ]

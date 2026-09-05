@@ -19,7 +19,7 @@ the hostname you're told to use just matches your role). Gated by
 login — verified live, both together. `http://127.0.0.1:8001` on the
 production host via an SSH tunnel still works too, unchanged.
 
-## The 17 screens (`web/admin/js/app.js`'s own nav order)
+## The 18 screens (`web/admin/js/app.js`'s own nav order)
 
 | Screen | Backing endpoint(s) | Visible to |
 |---|---|---|
@@ -34,6 +34,7 @@ production host via an SSH tunnel still works too, unchanged.
 | Provider Availability | `GET /payment-provider-availability`, toggle | all four roles can view; toggling `telebirr_sms`/`chapa`/`manual` on or off is superadmin-only |
 | Rounds | round history/detail | all four roles |
 | Rooms | room config CRUD | all four roles (mutations are superadmin-gated server-side where they affect money — win_patterns, stake, etc.) |
+| Bonuses & Referrals | `GET/POST /bonus-rules`, `POST /bonuses/grant`, `GET /bonuses`, `POST /bonuses/{id}/revoke`, `GET /bonuses/referral-funnel`, `GET /bonuses/fraud-candidates` | all four roles can view (`bonuses:view`); rule config is ops+superadmin, a manual grant/revoke is finance+superadmin (`users:adjust_balance`'s own shape), fraud signals are ops+finance+superadmin (`risk:view`'s own shape) |
 | Notifications | `services/admin/app.py`'s `/notifications/*` routes — see `docs/NOTIFICATION_CENTER_ADMIN_GUIDE.md` | **ops + superadmin only** (hidden from support/finance in the nav and in `rbac.py`; drafting/viewing/templates/analytics is ops+superadmin, actually sending/scheduling/cancelling a real send is superadmin-only) |
 | Bot Content | `GET /bot-content`, `PUT/DELETE /bot-content/{key}/{language}` | **ops + superadmin only** — see below |
 | Reports | aggregate financial reporting | **finance + superadmin only** (hidden from support/ops in the nav; a direct API call from support/ops still gets a real `403`, verified) |
@@ -96,6 +97,37 @@ An admin can't deactivate or change the role of their **own** account
 through this screen (`CannotModifyOwnAccount`, a `409`) — both would risk
 a superadmin locking themselves out mid-session with no one else able to
 undo it from inside the console.
+
+## Bonuses & Referrals — rule-driven, wallet-integrated, fraud-checked
+
+`users.referred_by` and the bot's own `/start ref_{id}` deep link already
+tracked who invited whom; this is what actually pays a reward. Every
+dollar amount, percentage, minimum deposit, and wagering multiplier is
+set through the **Bonus rules** form — nothing is hardcoded. A grant
+lands in a non-withdrawable `user_bonus` balance (`packages/core/
+ledger.py`'s own `user_bonus` account kind) and only becomes real,
+spendable, withdrawable cash once the recipient wagers real cash equal to
+the rule's own multiplier — a background sweep
+(`services/payments/bonus_sweep.py`, running every 60s inside the
+existing `payout_worker` process, no new deployable service) checks this
+and converts automatically, or expires an unwagered grant past its own
+deadline.
+
+Fraud protection happens **before** a reward is ever paid, not after:
+self-referral is rejected outright, and a referrer/referee pair sharing a
+withdrawal-destination account is blocked from ever generating a reward
+in the first place (the same signal the Risk screen's `payment_methods`
+clustering already surfaces platform-wide, applied narrowly to one pair
+here). A referee can only ever trigger one referral reward, ever,
+enforced by a database constraint, not just application logic. The
+**Fraud signals** section surfaces candidates for a human to review
+(shared payout accounts, unusually high referral bursts) — it never
+auto-blocks anyone, the same on-demand, human-review-first philosophy the
+Risk screen's own two queries already use.
+
+**Announce** on any rule pre-fills a draft in the Notifications screen
+(title/body drawn from the rule's own reward) — reusing the real
+Notification Center, not a second campaign system.
 
 ## Bot Content — editing what the bot says without a deploy
 

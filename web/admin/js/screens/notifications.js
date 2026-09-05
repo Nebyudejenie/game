@@ -132,6 +132,24 @@ export async function render(container) {
   const campaignsListEl = container.querySelector("#campaigns-list");
   const detailEl = container.querySelector("#campaign-detail");
 
+  // Cross-screen glue for the Bonuses & Referrals screen's "Announce this
+  // rule" button (web/admin/js/screens/bonuses.js) -- sessionStorage
+  // rather than a shared JS import, since each screen module is loaded
+  // independently by app.js and neither needs to know the other exists
+  // beyond this one seed.
+  const draftSeed = sessionStorage.getItem("draftCampaignSeed");
+  if (draftSeed) {
+    sessionStorage.removeItem("draftCampaignSeed");
+    try {
+      const { internalName, title, body } = JSON.parse(draftSeed);
+      createForm.querySelector("input[name=internal_name]").value = internalName || "";
+      createForm.querySelector("input[name=title]").value = title || "";
+      createForm.querySelector("textarea[name=body]").value = body || "";
+    } catch {
+      // Malformed seed -- ignore, the form just starts blank as usual.
+    }
+  }
+
   async function loadOverview() {
     overviewEl.innerHTML = `<p class="loading">Loading…</p>`;
     try {

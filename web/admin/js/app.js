@@ -18,6 +18,7 @@ import * as reportsScreen from "./screens/reports.js";
 import * as riskScreen from "./screens/risk.js";
 import * as auditScreen from "./screens/audit.js";
 import * as adminUsersScreen from "./screens/admin_users.js";
+import * as bonusesScreen from "./screens/bonuses.js";
 
 // Order here is the nav order. Each screen owns its own error handling
 // (an inline banner using the real API error detail, e.g. "role 'support'
@@ -35,6 +36,7 @@ const SCREENS = {
   provider_availability: providerAvailabilityScreen,
   rounds: roundsScreen,
   rooms: roomsScreen,
+  bonuses: bonusesScreen,
   notifications: notificationsScreen,
   bot_content: botContentScreen,
   reports: reportsScreen,

@@ -371,7 +371,8 @@ textarea {
 .badge-banned,
 .badge-self_excluded,
 .badge-blocked,
-.badge-rejected {
+.badge-rejected,
+.badge-revoked {
   background: #fde8e6;
   color: var(--danger);
 }
@@ -381,7 +382,8 @@ textarea {
 .badge-done,
 .badge-redeemed,
 .badge-sending,
-.badge-queued {
+.badge-queued,
+.badge-converted {
   background: #dbeafe;
   color: var(--primary);
 }

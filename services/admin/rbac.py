@@ -84,6 +84,19 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     # (both edit text real players see, neither moves money or grants
     # access to anyone else's account).
     "bot_content:manage": frozenset({"ops", "superadmin"}),
+    # A bonus/referral row's existence and status is low-sensitivity --
+    # same breadth as payments:view.
+    "bonuses:view": frozenset({"support", "finance", "ops", "superadmin"}),
+    # Configuring reward amounts/wagering/eligibility is operational
+    # rule-authoring, not itself a money-movement action -- same roles as
+    # notifications:templates_manage/bot_content:manage.
+    "bonuses:manage_rules": frozenset({"ops", "superadmin"}),
+    # A manual, ad-hoc grant directly credits a specific player's wallet
+    # -- exactly users:adjust_balance's own shape and roles.
+    "bonuses:grant": frozenset({"finance", "superadmin"}),
+    # Same investigative audience as risk:view -- this is the referral-
+    # specific extension of that same screen's fraud-signal philosophy.
+    "bonuses:view_fraud_signals": frozenset({"ops", "finance", "superadmin"}),
 }
 
 

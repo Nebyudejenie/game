@@ -39,6 +39,7 @@ from redis.asyncio import Redis
 
 from packages.core import ledger, metrics, rate_limit, tracing
 from packages.core.notifications import notify_user
+from packages.core.referrals import maybe_grant_referral_bonus, maybe_grant_welcome_bonus
 from services.payments.deposits import (
     DailyDepositCapExceeded,
     DepositorBanned,
@@ -227,6 +228,11 @@ async def redeem_evidence(
                     user_id,
                     payment_id,
                 )
+                # Same transaction as the credit above -- see
+                # packages/core/referrals.py's own docstring: silent
+                # no-ops, never raises.
+                await maybe_grant_referral_bonus(conn, user_id=user_id, deposit_amount=amount)
+                await maybe_grant_welcome_bonus(conn, user_id=user_id, deposit_amount=amount)
 
         # Only reachable once the transaction above has actually committed
         # -- same placement deposits.py's own _apply_confirmed_status()

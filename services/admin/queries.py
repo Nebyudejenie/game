@@ -20,6 +20,7 @@ from redis.asyncio import Redis
 from packages.core import bingo, ledger, metrics
 from packages.core.notifications import notify_user
 from packages.core.phone_crypto import decrypt_phone, phone_lookup_hash
+from packages.core.referrals import maybe_grant_referral_bonus, maybe_grant_welcome_bonus
 from services.admin import audit, auth, rbac
 from services.bot.phone import normalize_ethiopian_phone
 from services.engine.refunds import refund_round_in_transaction
@@ -1727,6 +1728,12 @@ async def approve_manual_deposit_admin(
                 reason=reason,
                 ip_address=ip_address,
             )
+            # Same transaction as the credit above -- see
+            # packages/core/referrals.py's own docstring: silent no-ops,
+            # never raises, so a fraud signal or missing rule can never
+            # fail an admin's own approval action.
+            await maybe_grant_referral_bonus(conn, user_id=row["user_id"], deposit_amount=row["amount"])
+            await maybe_grant_welcome_bonus(conn, user_id=row["user_id"], deposit_amount=row["amount"])
             user_id = row["user_id"]
             amount = row["amount"]
         # Only reachable once the transaction above has actually
