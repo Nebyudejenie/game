@@ -31,7 +31,7 @@ from services.bot.registration import (
     ContactMismatch,
     InvalidPhone,
     PhoneAlreadyRegistered,
-    get_registered_user,
+    get_user_and_language,
     register_from_contact,
 )
 from services.payments import agent_auth, availability, deposits, manual, withdrawals
@@ -118,8 +118,11 @@ async def cmd_start(
     if referrer_id is not None:
         await referral.store_pending_referral(redis, telegram_id, referrer_id)
 
-    user = await get_registered_user(pool, telegram_id)
+    user, language = await get_user_and_language(pool, telegram_id)
     if user is None:
+        # A brand new user has no stored `users.language` yet -- the
+        # client's own language_code hint is the only signal available,
+        # same as before this call became the combined helper.
         language = resolve_language(message.from_user.language_code)
         await notifier.send(chat_id, t("welcome.new_user", language))
         await notifier.send(
@@ -127,7 +130,6 @@ async def cmd_start(
         )
         return
 
-    language = await _language_for(pool, telegram_id)
     await _send_refreshed_main_menu(
         notifier, chat_id, t("welcome.back", language, name=user.display_name), language, settings
     )
@@ -194,8 +196,9 @@ async def on_contact(
 @router.message(Command("play"))
 async def cmd_play(message: Message, pool: asyncpg.Pool, notifier: Notifier, settings: Settings) -> None:
     assert message.from_user is not None
-    language = await _language_for(pool, message.from_user.id)
-    if not await _require_registered(message, pool, notifier, language):
+    user, language = await get_user_and_language(pool, message.from_user.id)
+    if user is None:
+        await notifier.send(message.chat.id, t("error.not_registered", language))
         return
     if settings.miniapp_url:
         await _send_refreshed_main_menu(
@@ -211,8 +214,7 @@ async def cmd_play(message: Message, pool: asyncpg.Pool, notifier: Notifier, set
 @router.message(Command("balance"))
 async def cmd_balance(message: Message, pool: asyncpg.Pool, notifier: Notifier) -> None:
     assert message.from_user is not None
-    language = await _language_for(pool, message.from_user.id)
-    user = await get_registered_user(pool, message.from_user.id)
+    user, language = await get_user_and_language(pool, message.from_user.id)
     if user is None:
         await notifier.send(message.chat.id, t("error.not_registered", language))
         return
@@ -243,8 +245,7 @@ async def cmd_balance(message: Message, pool: asyncpg.Pool, notifier: Notifier) 
 @router.message(Command("history"))
 async def cmd_history(message: Message, pool: asyncpg.Pool, notifier: Notifier) -> None:
     assert message.from_user is not None
-    language = await _language_for(pool, message.from_user.id)
-    user = await get_registered_user(pool, message.from_user.id)
+    user, language = await get_user_and_language(pool, message.from_user.id)
     if user is None:
         await notifier.send(message.chat.id, t("error.not_registered", language))
         return
@@ -290,8 +291,7 @@ async def cmd_invite(
     message: Message, pool: asyncpg.Pool, notifier: Notifier, settings: Settings
 ) -> None:
     assert message.from_user is not None
-    language = await _language_for(pool, message.from_user.id)
-    user = await get_registered_user(pool, message.from_user.id)
+    user, language = await get_user_and_language(pool, message.from_user.id)
     if user is None:
         await notifier.send(message.chat.id, t("error.not_registered", language))
         return
@@ -329,8 +329,7 @@ async def cmd_deposit(
     settings: Settings,
 ) -> None:
     assert message.from_user is not None
-    language = await _language_for(pool, message.from_user.id)
-    user = await get_registered_user(pool, message.from_user.id)
+    user, language = await get_user_and_language(pool, message.from_user.id)
     if user is None:
         await notifier.send(message.chat.id, t("error.not_registered", language))
         return
@@ -416,8 +415,7 @@ async def cmd_withdraw(
     settings: Settings,
 ) -> None:
     assert message.from_user is not None
-    language = await _language_for(pool, message.from_user.id)
-    user = await get_registered_user(pool, message.from_user.id)
+    user, language = await get_user_and_language(pool, message.from_user.id)
     if user is None:
         await notifier.send(message.chat.id, t("error.not_registered", language))
         return
@@ -496,8 +494,7 @@ async def cmd_limits(
     message: Message, command: CommandObject, pool: asyncpg.Pool, notifier: Notifier
 ) -> None:
     assert message.from_user is not None
-    language = await _language_for(pool, message.from_user.id)
-    user = await get_registered_user(pool, message.from_user.id)
+    user, language = await get_user_and_language(pool, message.from_user.id)
     if user is None:
         await notifier.send(message.chat.id, t("error.not_registered", language))
         return
@@ -597,8 +594,9 @@ async def cmd_change_username(
     message: Message, command: CommandObject, pool: asyncpg.Pool, notifier: Notifier
 ) -> None:
     assert message.from_user is not None
-    language = await _language_for(pool, message.from_user.id)
-    if not await _require_registered(message, pool, notifier, language):
+    user, language = await get_user_and_language(pool, message.from_user.id)
+    if user is None:
+        await notifier.send(message.chat.id, t("error.not_registered", language))
         return
 
     new_name = (command.args or "").strip()
@@ -628,8 +626,7 @@ async def on_photo(message: Message, pool: asyncpg.Pool, notifier: Notifier) -> 
     attach anything to in the first place.
     """
     assert message.from_user is not None and message.photo is not None
-    language = await _language_for(pool, message.from_user.id)
-    user = await get_registered_user(pool, message.from_user.id)
+    user, language = await get_user_and_language(pool, message.from_user.id)
     if user is None:
         return
 
@@ -730,8 +727,8 @@ async def on_menu_text(message: Message, pool: asyncpg.Pool, redis: Redis, notif
     against the known menu labels for that locale."""
     assert message.from_user is not None
     text = (message.text or "").strip()
-    language = await _language_for(pool, message.from_user.id)
-    registered = await get_registered_user(pool, message.from_user.id) is not None
+    user, language = await get_user_and_language(pool, message.from_user.id)
+    registered = user is not None
 
     mapping = {
         t("menu.play", language): (MenuAction.PLAY, True),
@@ -775,23 +772,11 @@ async def on_unhandled_message(message: Message, pool: asyncpg.Pool, notifier: N
     Registered users get silent drop for unknown text/media; unregistered
     users get the registration prompt."""
     assert message.from_user is not None
-    user = await get_registered_user(pool, message.from_user.id)
+    user, language = await get_user_and_language(pool, message.from_user.id)
     if user is not None:
         return
-    language = await _language_for(pool, message.from_user.id)
     await notifier.send(
         message.chat.id,
         t("register.use_button", language),
         reply_markup=registration_keyboard(language),
     )
-
-
-async def _require_registered(
-    message: Message, pool: asyncpg.Pool, notifier: Notifier, language: str
-) -> bool:
-    assert message.from_user is not None
-    user = await get_registered_user(pool, message.from_user.id)
-    if user is None:
-        await notifier.send(message.chat.id, t("error.not_registered", language))
-        return False
-    return True

@@ -43,6 +43,7 @@ from dataclasses import dataclass
 import asyncpg
 
 from packages.core.phone_crypto import decrypt_phone, encrypt_phone, phone_lookup_hash
+from services.bot.i18n import resolve_language
 from services.bot.phone import normalize_ethiopian_phone
 
 
@@ -216,3 +217,28 @@ async def get_registered_user(pool: asyncpg.Pool, telegram_id: int) -> Registere
     return RegisteredUser(
         row["id"], telegram_id, row["display_name"], decrypt_phone(bytes(row["phone_e164_encrypted"])), is_new=False
     )
+
+
+async def get_user_and_language(pool: asyncpg.Pool, telegram_id: int) -> tuple[RegisteredUser | None, str]:
+    """Combines get_registered_user() with the bot's own per-command
+    `_language_for()` lookup into the single query both were always
+    reading (the same `users` row, by the same telegram_id) -- a Telegram
+    architecture audit (bot command latency diagnosis) found nearly every
+    registered-user command in services/bot/handlers.py calling both back
+    to back, doubling a FAST-class command's own DB round trips for no
+    reason: the row `_language_for()` fetches is the exact row this
+    function already reads to build a RegisteredUser. Every caller that
+    needs both values together should use this instead of the two
+    separate calls.
+    """
+    row = await pool.fetchrow(
+        "SELECT id, display_name, phone_e164_encrypted, language FROM users WHERE telegram_id = $1",
+        telegram_id,
+    )
+    language = resolve_language(row["language"] if row else None)
+    if row is None or row["phone_e164_encrypted"] is None:
+        return None, language
+    user = RegisteredUser(
+        row["id"], telegram_id, row["display_name"], decrypt_phone(bytes(row["phone_e164_encrypted"])), is_new=False
+    )
+    return user, language
