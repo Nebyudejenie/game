@@ -1703,22 +1703,45 @@ async function boot() {
   const hasInitData = Boolean(initData && initData.trim());
   if (!hasInitData) {
     // Show an explicit auth-failure shell so the player never sees a
-    // featureless black screen if Telegram did not provide initData.
-    // A fresh element, not el("boot-shell") -- no such id exists in
+    // featureless black screen if Telegram did not provide initData. A
+    // fresh element, not el("boot-shell") -- no such id exists in
     // index.html, so that lookup returned null and threw on the next
-    // line, silently reproducing the exact blank screen this was
-    // meant to fix.
+    // line, silently reproducing the exact blank screen this was meant
+    // to fix.
+    //
+    // Launch-readiness audit finding: this branch is reached both by a
+    // genuine Telegram auth glitch (stale initData) and by simply opening
+    // the Mini App's URL directly in a plain browser -- the far more
+    // common case once the app is reachable outside a single Telegram
+    // client (spec section 5). The old copy here (error.generic +
+    // connection.connect_failed, "Unable to connect to the game server.
+    // Tap to retry.") is only true for the first case; showing it for the
+    // second tells a player their network/server is broken when nothing
+    // is, and offering a reload as the fix is actively misleading -- it
+    // reloads into this exact same dead end, since the real fix (open
+    // the bot's menu button inside Telegram) isn't something a reload
+    // can do. No retry action is shown for this specific cause; a
+    // stale/expired initData still surfaces via the "connection.expired"
+    // banner in ws.js, unchanged, which does have a real fix (reopen).
+    //
+    // A real-browser test (tests/integration/test_miniapp_e2e.py) caught
+    // that wrapping the styled ".boot-shell" (position: fixed) inside an
+    // unstyled outer "#boot-shell" div left that outer div with zero
+    // height -- a position:fixed child contributes nothing to its
+    // parent's in-flow box. It still rendered correctly for a sighted
+    // human (the fixed child paints over the whole viewport regardless of
+    // its parent's own box), but any code checking the outer element's
+    // own visibility -- a test's wait_for_selector, or assistive tech --
+    // sees a hidden, zero-size element. Styling id="boot-shell" directly,
+    // with no separate wrapper, avoids the mismatch entirely.
     const shell = document.createElement("div");
     shell.id = "boot-shell";
+    shell.className = "boot-shell";
     shell.innerHTML = `
-      <div class="boot-shell">
-        <div class="boot-shell-title">${t("error.generic")}</div>
-        <div class="boot-shell-body">${t("connection.connect_failed")}</div>
-        <button class="boot-shell-action" data-action="retry">${t("connection.retry")}</button>
-      </div>
+      <div class="boot-shell-title">${t("error.not_in_telegram_title")}</div>
+      <div class="boot-shell-body">${t("error.not_in_telegram_body")}</div>
     `;
     document.body.appendChild(shell);
-    makeKeyboardActivatable(shell, () => window.location.reload());
     hideSplash();
     return;
   }

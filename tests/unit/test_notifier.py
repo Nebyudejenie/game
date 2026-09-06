@@ -148,3 +148,80 @@ async def test_multiple_messages_are_all_eventually_sent():
         assert bot.send_message.call_count == 10
     finally:
         await notifier.stop()
+
+
+# --- priority lanes: a bulk/campaign send must never delay an
+# interactive reply or a transactional notification queued after it -----
+
+
+async def test_high_priority_message_is_sent_before_earlier_queued_low_priority_ones():
+    call_order: list[int] = []
+
+    async def fake_send(chat_id: int, text: str, **kwargs: object) -> None:
+        call_order.append(chat_id)
+
+    bot = AsyncMock()
+    bot.send_message.side_effect = fake_send
+    notifier = Notifier(bot)
+    try:
+        # Queue 5 low-priority (campaign-style) sends *before* starting the
+        # worker, so they're all genuinely sitting in the queue first --
+        # this proves priority order, not just accidental scheduling luck.
+        for chat_id in range(100, 105):
+            await notifier.send(chat_id, "bulk broadcast", priority="low")
+        # A player's own interactive reply, queued last.
+        await notifier.send(1, "your balance is 50.00 ETB", priority="high")
+
+        notifier.start()
+        await asyncio.sleep(0.3)
+
+        assert bot.send_message.call_count == 6
+        # The high-priority message must be the *first* one actually
+        # sent, despite being enqueued after all five low-priority ones --
+        # this is the real, measurable fix for a busy campaign broadcast
+        # otherwise delaying a player's own command reply behind it.
+        assert call_order[0] == 1
+        assert set(call_order[1:]) == {100, 101, 102, 103, 104}
+    finally:
+        await notifier.stop()
+
+
+async def test_low_priority_messages_still_get_sent_with_no_high_priority_traffic():
+    # The other direction: a lane with nothing in the other one must not
+    # starve -- LOW_PRIORITY_POLL_SECONDS bounds how long a low-priority-
+    # only message waits, it never blocks forever.
+    bot = AsyncMock()
+    notifier = Notifier(bot)
+    notifier.start()
+    try:
+        for chat_id in range(5):
+            await notifier.send(chat_id, "bulk broadcast", priority="low")
+        await asyncio.sleep(0.5)
+        assert bot.send_message.call_count == 5
+    finally:
+        await notifier.stop()
+
+
+async def test_a_backed_off_high_priority_chat_does_not_block_low_priority_traffic():
+    # A 429 backoff on one specific chat (in the high lane) must not stall
+    # unrelated low-priority sends behind it either -- the requeue-to-own-
+    # lane fix (_queue_for()) is what keeps this working after adding a
+    # second lane.
+    call_order: list[int] = []
+
+    async def fake_send(chat_id: int, text: str, **kwargs: object) -> None:
+        call_order.append(chat_id)
+        if chat_id == 1 and call_order.count(1) == 1:
+            raise _retry_after(5)
+
+    bot = AsyncMock()
+    bot.send_message.side_effect = fake_send
+    notifier = Notifier(bot)
+    notifier.start()
+    try:
+        await notifier.send(1, "will be rate limited", priority="high")
+        await notifier.send(999, "unrelated bulk send", priority="low")
+        await asyncio.sleep(0.3)
+        assert 999 in call_order
+    finally:
+        await notifier.stop()

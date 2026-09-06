@@ -217,22 +217,25 @@ async def cmd_balance(message: Message, pool: asyncpg.Pool, notifier: Notifier) 
         await notifier.send(message.chat.id, t("error.not_registered", language))
         return
 
-    async with pool.acquire() as conn:
-        cash = await ledger.get_or_create_account(conn, user.id, "user_cash")
-        bonus = await ledger.get_or_create_account(conn, user.id, "user_bonus")
-        locked = await ledger.get_or_create_account(conn, user.id, "user_locked")
-        cash_balance = await ledger.balance(conn, cash.id)
-        bonus_balance = await ledger.balance(conn, bonus.id)
-        locked_balance = await ledger.balance(conn, locked.id)
+    # Launch-readiness audit finding: this used to do 3x get_or_create_
+    # account() + 3x balance() -- up to 9 sequential round trips -- when
+    # ledger.user_balance_snapshot() already existed as the one-query
+    # replacement for exactly this pattern (its own docstring names this
+    # exact call shape as the problem it was built to solve; nothing in
+    # this codebase had actually adopted it for the bot's own /balance
+    # command until this fix). A real, measured latency win for one of
+    # this bot's most frequently used "FAST" commands, not a
+    # hypothetical one -- see docs/TELEGRAM_PERFORMANCE.md.
+    snapshot = await ledger.user_balance_snapshot(pool, user.id)
 
     await notifier.send(
         message.chat.id,
         t(
             "balance.summary",
             language,
-            cash=cash_balance,
-            bonus=bonus_balance,
-            locked=locked_balance,
+            cash=snapshot["cash"],
+            bonus=snapshot["bonus"],
+            locked=snapshot["locked"],
         ),
     )
 

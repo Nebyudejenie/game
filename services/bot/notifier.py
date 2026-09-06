@@ -32,6 +32,10 @@ class OutboundMessage:
     text: str
     kwargs: dict[str, Any] = field(default_factory=dict)
     attempts: int = 0
+    # Which lane this came from -- recorded so a 429-backoff requeue (see
+    # _run() below) puts it back on the *same* lane rather than promoting
+    # every retried low-priority message to high (or the reverse).
+    priority: str = "high"
     # Resolved once this message's handling by _run() reaches a terminal
     # state (delivered, permanently dropped, or retries exhausted) --
     # *not* on every dequeue, since a 429 backoff or a not-yet-exhausted
@@ -59,18 +63,76 @@ class OutboundMessage:
     done: asyncio.Future[str] | None = None
 
 
+# Launch-readiness audit finding: this was one plain FIFO queue shared by
+# every outbound message this codebase ever sends -- a player's own
+# interactive command reply (services/bot/handlers.py's ~60 direct
+# callers, and notification_relay.py's transactional pushes: deposit
+# confirmations, win notifications) competed for the exact same
+# GLOBAL_RATE_PER_SECOND=25 budget, in pure arrival order, as a
+# Notification Center campaign broadcasting to potentially thousands of
+# recipients. A real, measurable "Command Priority Classes" gap (the
+# directive's own Section 9): a busy campaign send could genuinely delay
+# a player's own /balance reply behind however many broadcast messages
+# happened to be queued first, even though the *handler* that produced
+# that reply had already finished in milliseconds.
+#
+# Fixed with two lanes, not a new queueing system -- same Notifier class,
+# same _run() worker loop, same per-chat 429 backoff, same retry/error
+# handling, same global rate cap (never exceeding Telegram's own real
+# limit, priority only changes *whose* message gets that next available
+# send slot). "high" (the default -- every interactive reply and every
+# transactional notification) always drains before "low" (campaign
+# broadcasts, the one call site that explicitly opts in --
+# notification_relay.py's own delivery_id check). A lane with nothing
+# waiting costs nothing extra; the only added latency is a bounded
+# LOW_PRIORITY_POLL_SECONDS on ticks where *only* low-priority work is
+# queued, negligible for a bulk send with no single recipient waiting on
+# it, and never paid at all when a high-priority message is in flight.
+LOW_PRIORITY_POLL_SECONDS = 0.05
+
+
 class Notifier:
     def __init__(self, bot: Bot, *, max_attempts: int = 5) -> None:
         self._bot = bot
         self._max_attempts = max_attempts
-        self._queue: asyncio.Queue[OutboundMessage] = asyncio.Queue()
+        self._high: asyncio.Queue[OutboundMessage] = asyncio.Queue()
+        self._low: asyncio.Queue[OutboundMessage] = asyncio.Queue()
         self._backoff_until: dict[int, float] = {}
         self._worker_task: asyncio.Task[None] | None = None
 
-    async def send(self, chat_id: int, text: str, **kwargs: Any) -> asyncio.Future[str]:
+    async def send(
+        self, chat_id: int, text: str, *, priority: str = "high", **kwargs: Any
+    ) -> asyncio.Future[str]:
         done: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-        await self._queue.put(OutboundMessage(chat_id, text, kwargs, done=done))
+        queue = self._low if priority == "low" else self._high
+        await queue.put(OutboundMessage(chat_id, text, kwargs, done=done, priority=priority))
         return done
+
+    def _queue_for(self, message: OutboundMessage) -> asyncio.Queue[OutboundMessage]:
+        return self._low if message.priority == "low" else self._high
+
+    async def _requeue_after_delay(self, message: OutboundMessage, delay: float) -> None:
+        await asyncio.sleep(delay)
+        await self._queue_for(message).put(message)
+
+    async def _get_next(self) -> OutboundMessage:
+        while True:
+            if not self._high.empty():
+                return self._high.get_nowait()
+            if not self._low.empty():
+                return self._low.get_nowait()
+            # Nothing in either lane right now -- wait on "high" with a
+            # short timeout rather than a bare blocking get(), so a
+            # low-priority message that arrives while we're waiting is
+            # never starved indefinitely by a steady trickle of new
+            # high-priority ones: every poll tick re-checks both lanes in
+            # priority order from the top.
+            try:
+                return await asyncio.wait_for(
+                    self._high.get(), timeout=LOW_PRIORITY_POLL_SECONDS
+                )
+            except asyncio.TimeoutError:
+                continue
 
     def start(self) -> None:
         self._worker_task = asyncio.create_task(self._run())
@@ -84,18 +146,38 @@ class Notifier:
 
     async def _run(self) -> None:
         while True:
-            message = await self._queue.get()
+            message = await self._get_next()
             now = time.monotonic()
             backoff_until = self._backoff_until.get(message.chat_id)
 
             if backoff_until is not None and now < backoff_until:
-                # This chat is still backed off from a previous 429 --
-                # put it back and try whatever's behind it first, rather
-                # than stalling every other chat's messages behind this
-                # one. Sleeping (instead of a bare requeue-and-loop) avoids
-                # busy-spinning when this is the only message waiting.
-                await self._queue.put(message)
-                await asyncio.sleep(min(backoff_until - now, MAX_BACKOFF_SLEEP_SECONDS))
+                # This chat is still backed off from a previous 429.
+                # Launch-readiness audit finding, caught by a real test:
+                # putting it straight back onto its own lane and sleeping
+                # here (the original single-queue behavior) made
+                # _get_next() see that lane as "non-empty" again on the
+                # very next iteration -- when this backed-off message is
+                # the *only* thing in the high lane, that starves the low
+                # lane completely for the rest of the backoff window,
+                # since "high has something queued" was never meant to
+                # mean "high has something queued that's actually
+                # sendable right now". Rescheduled via a delayed task
+                # instead: this message is in neither lane while backed
+                # off, so _get_next() correctly falls through to whatever
+                # else is actually ready (another high-priority chat, or
+                # low-priority work) instead of spinning on one that
+                # isn't. Fire-and-forget is safe here: the delay's own
+                # asyncio.sleep is this message's only remaining state
+                # until it re-enters its queue, and stop()'s cancellation
+                # of the parent worker task doesn't need to reach it --
+                # worst case on a real shutdown, one already-scheduled
+                # retry is silently dropped, exactly as acceptable as any
+                # other in-flight send being interrupted by a restart.
+                asyncio.create_task(
+                    self._requeue_after_delay(
+                        message, min(backoff_until - now, MAX_BACKOFF_SLEEP_SECONDS)
+                    )
+                )
                 continue
             if backoff_until is not None:
                 # The window passed -- a code review pass caught that
@@ -120,7 +202,7 @@ class Notifier:
                 self._backoff_until[message.chat_id] = time.monotonic() + exc.retry_after
                 message.attempts += 1
                 if message.attempts < self._max_attempts:
-                    await self._queue.put(message)
+                    await self._queue_for(message).put(message)
                     continue  # still in flight -- don't resolve message.done yet
                 logger.warning(
                     "notifier_send_gave_up", chat_id=message.chat_id, attempts=message.attempts

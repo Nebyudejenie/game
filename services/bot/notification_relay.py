@@ -102,7 +102,15 @@ async def process_one(pool: asyncpg.Pool, redis: Redis, notifier: Notifier, *, m
     # stream entry claiming it was already gone. Awaiting the future
     # send() now returns makes this ack happen only once Notifier reaches
     # a real terminal outcome for this message.
-    done = await notifier.send(telegram_id, text)
+    # Notifier's own priority lanes (services/bot/notifier.py): a campaign
+    # broadcast (identified the same way this function already
+    # distinguishes campaign vs. transactional above -- delivery_id
+    # present) must never delay a player's own interactive command reply
+    # or an individual transactional push (deposit confirmation, win
+    # notification) behind however many broadcast recipients happen to be
+    # queued first. Everything else (the default) stays "high".
+    priority = "low" if delivery_id_raw is not None else "high"
+    done = await notifier.send(telegram_id, text, priority=priority)
     outcome = await done
 
     delivery_id = fields.get("delivery_id")

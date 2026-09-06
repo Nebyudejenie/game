@@ -1346,3 +1346,49 @@ async def test_multi_card_session_loss_reports_the_full_amount_not_one_card(
     finally:
         await engine.stop()
         await asyncio.wait_for(task, timeout=15)
+
+
+async def test_opening_directly_in_a_plain_browser_shows_an_accurate_message_not_a_generic_one(
+    gateway_server, browser
+):
+    """Universal-compatibility audit finding (directive section 5): opening
+    the Mini App's own URL directly in a plain browser -- no
+    window.Telegram at all -- used to show "Unable to connect to the game
+    server. Tap to retry.", which is simply false here (nothing about the
+    network or the backend is broken) and whose only action reloads into
+    the exact same dead end. This is the one real, reachable case that
+    exercises boot()'s `!hasInitData` branch without any Telegram stub.
+    """
+    page = await browser.new_page(viewport={"width": 390, "height": 780})
+    console_errors: list[str] = []
+    page.on("pageerror", lambda exc: console_errors.append(str(exc)))
+
+    # No window.Telegram stub at all -- but the real SDK's own <script>
+    # tag would otherwise try to fetch telegram.org over the network from
+    # this sandbox and add flakiness/latency unrelated to what this test
+    # verifies. It has nothing to overwrite here (there is no stub), so
+    # blocking it only removes that network dependency, not the app's own
+    # no-initData handling.
+    async def block_real_sdk(route):
+        await route.abort()
+
+    await page.route(TELEGRAM_SDK_URL, block_real_sdk)
+
+    http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+    await page.goto(http_base + "/")
+
+    await page.wait_for_selector("#boot-shell", timeout=10000)
+    title = await page.text_content(".boot-shell-title")
+    body = await page.text_content(".boot-shell-body")
+    # boot() defaults to "am" when there's no Telegram user object to read
+    # a language_code from at all -- so the real, full i18n resolution for
+    # this exact no-Telegram case lands on the Amharic copy, not English.
+    assert title == "ከቴሌግራም ይክፈቱ"
+    assert "ቴሌግራም" in (body or "")
+    # The old, inaccurate copy must not be present in any form.
+    assert "መገናኘት አልተቻለም" not in (body or "")
+
+    assert console_errors == [], f"JS errors on the no-initData boot path: {console_errors}"
+
+    await page.screenshot(path="/tmp/miniapp-not-in-telegram.png")
+    await page.close()

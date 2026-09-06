@@ -143,6 +143,8 @@
   "connection.expired": "የእርስዎ ክፍለ ጊዜ አልቋል። እባክዎ ይህን መተግበሪያ ዘግተው እንደገና ይክፈቱት።",
   "connection.connect_failed": "ከጨዋታ አገልጋዩ ጋር መገናኘት አልተቻለም። እንደገና ለመሞከር ይንኩ።",
   "connection.retry": "እንደገና ይሞክሩ",
+  "error.not_in_telegram_title": "ከቴሌግራም ይክፈቱ",
+  "error.not_in_telegram_body": "ጆ ቢንጎ የቴሌግራም ሚኒ መተግበሪያ ነው። እባክዎ ከቦቱ ምናሌ ቁልፍ ውስጥ ይክፈቱት እንጂ በቀጥታ በድር አሳሽ ውስጥ አይክፈቱ።",
 
   "error.generic": "የሆነ ስህተት ተፈጥሯል። እባክዎ እንደገና ይሞክሩ።",
   "error.room_unavailable": "ይህ ክፍል አሁን አይገኝም።",
