@@ -137,6 +137,109 @@ notification_campaign_deliveries_total = Counter(
     ["outcome"],
 )
 
+# --- bot / Telegram (command latency diagnosis pass) --------------------
+#
+# Every one of these is populated from a single choke point each, the same
+# discipline as gateway_command_ack_seconds above:
+#   - telegram_updates_received_total/telegram_updates_deduplicated_total:
+#     services/bot/app.py's own _dedup_middleware, which every update of
+#     every type already passes through (spec section 5's dedup gate).
+#   - telegram_commands_total/_success_total/_error_total/_latency_seconds:
+#     services/bot/perf.py's perf_middleware, an inner middleware on the
+#     message observer -- runs only once routing has matched a specific
+#     handler, labeled by that handler's own function name (cmd_balance,
+#     on_menu_text, ...) so a label always names a real function in
+#     handlers.py, never an invented category.
+#   - telegram_db_duration_seconds: asyncpg's own Connection.add_query_logger
+#     hook (asyncpg >= 0.29), attached once per physical connection via
+#     create_pool()'s `init` callback -- not a wrapper around every
+#     pool.fetchrow()/execute() call site, so no handler code changes at
+#     all were needed to get real per-query timing.
+#   - telegram_redis_duration_seconds: a single Redis.execute_command()
+#     override (services/bot/perf.py's _TimedRedis) -- every redis-py
+#     command funnels through that one method.
+#   - telegram_api_duration_seconds: services/bot/notifier.py's own
+#     Notifier._run(), the sole call site of bot.send_message() in this
+#     codebase.
+# Both the DB and Redis histograms are labeled by the same "handler" name
+# as the command metrics, via a single contextvars.ContextVar
+# (services/bot/perf.py's _current_command) set for the duration of each
+# handler's own execution -- correctly isolated per concurrent update
+# since aiogram processes each webhook delivery in its own asyncio task,
+# and contextvars snapshot per-task.
+telegram_updates_received_total = Counter(
+    "telegram_updates_received_total", "Telegram updates delivered to the webhook, before dedup"
+)
+
+telegram_updates_deduplicated_total = Counter(
+    "telegram_updates_deduplicated_total",
+    "Updates dropped by dedup.py as an already-seen update_id (retried delivery, not a new event)",
+)
+
+telegram_commands_total = Counter(
+    "telegram_commands_total", "Bot handler invocations, by handler function name", ["handler"]
+)
+
+telegram_command_success_total = Counter(
+    "telegram_command_success_total",
+    "Bot handler invocations that returned without raising",
+    ["handler"],
+)
+
+telegram_command_error_total = Counter(
+    "telegram_command_error_total", "Bot handler invocations that raised", ["handler"]
+)
+
+_LATENCY_BUCKETS = (0.01, 0.025, 0.05, 0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 3.0, 5.0, 8.0)
+
+telegram_command_latency_seconds = Histogram(
+    "telegram_command_latency_seconds",
+    "Wall-clock time from the start of handler execution to its completion, by handler name -- "
+    "the 'total command latency' figure engineering targets (P50/P95/P99) are measured against",
+    ["handler"],
+    buckets=_LATENCY_BUCKETS,
+)
+
+telegram_dispatch_delay_seconds = Histogram(
+    "telegram_dispatch_delay_seconds",
+    "Time from _dedup_middleware (immediately after webhook receipt) to the matched handler "
+    "actually starting -- routing/filter-check overhead, not network delay",
+    buckets=_LATENCY_BUCKETS,
+)
+
+telegram_db_duration_seconds = Histogram(
+    "telegram_db_duration_seconds",
+    "Time spent inside individual DB queries while handling one command, by handler name",
+    ["handler"],
+    buckets=_LATENCY_BUCKETS,
+)
+
+telegram_redis_duration_seconds = Histogram(
+    "telegram_redis_duration_seconds",
+    "Time spent inside individual Redis commands while handling one command, by handler name",
+    ["handler"],
+    buckets=_LATENCY_BUCKETS,
+)
+
+telegram_api_duration_seconds = Histogram(
+    "telegram_api_duration_seconds",
+    "Time spent inside a single bot.send_message() call (Notifier's own outbound send, "
+    "excluding queueing/backoff wait time) -- isolates Telegram's own response time from "
+    "this application's processing time",
+    buckets=_LATENCY_BUCKETS,
+)
+
+telegram_webhook_pending_updates = Gauge(
+    "telegram_webhook_pending_updates",
+    "Telegram's own reported pending_update_count from the last getWebhookInfo poll",
+)
+
+telegram_webhook_last_error_unixtime = Gauge(
+    "telegram_webhook_last_error_unixtime",
+    "Unix timestamp of Telegram's own last_error_date from the last getWebhookInfo poll, "
+    "0 if none reported",
+)
+
 # --- reconcile_job -----------------------------------------------------
 
 # A one-shot batch job (packages/core/reconcile_job.py), not a scraped

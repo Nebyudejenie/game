@@ -25,7 +25,14 @@ ADMIN_WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web" / "admin"
 from packages.core.config import get_settings
 from packages.core.db_pool import create_pool
 from packages.core.redis_conn import get_redis
-from services.admin import auth, bonus_queries, bot_content_queries, notification_queries, queries
+from services.admin import (
+    auth,
+    bonus_queries,
+    bot_content_queries,
+    notification_queries,
+    queries,
+    telegram_diagnostics,
+)
 from services.admin.auth import AdminSession
 from services.admin.rbac import has_permission
 
@@ -1325,6 +1332,46 @@ async def risk_repeat_pairings(
     return await queries.repeat_room_pairings(
         app.state.pool, min_shared_rounds=min_shared_rounds, since_days=since_days
     )
+
+
+# --- telegram ------------------------------------------------------------
+
+
+@app.get("/telegram/webhook-health")
+async def telegram_webhook_health(
+    admin: Annotated[AdminSession, Depends(require("telegram:view_health"))],
+) -> dict[str, Any]:
+    """A real, live getWebhookInfo() call (services/admin/telegram_
+    diagnostics.py), not a cached value -- Section 41/42's "TELEGRAM
+    HEALTH" / one-click diagnostic ask. 503s with a clear reason rather
+    than a raw exception when no bot token is configured at all (a
+    perfectly valid state in a dev/staging environment), the same
+    "explain what's actually true" discipline every other empty-config
+    gate in this codebase already follows (e.g. payments/availability.py).
+    """
+    settings = get_settings()
+    if not settings.telegram_bot_token:
+        raise HTTPException(status_code=503, detail="telegram_bot_token is not configured")
+    try:
+        health = await telegram_diagnostics.get_webhook_health(settings.telegram_bot_token)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"getWebhookInfo failed: {exc}") from None
+    return {
+        "url": health.url,
+        "pending_update_count": health.pending_update_count,
+        "last_error_date": health.last_error_date.isoformat() if health.last_error_date else None,
+        "last_error_message": health.last_error_message,
+        "last_synchronization_error_date": (
+            health.last_synchronization_error_date.isoformat()
+            if health.last_synchronization_error_date
+            else None
+        ),
+        "ip_address": health.ip_address,
+        "max_connections": health.max_connections,
+        "status": health.status,
+        "warning_threshold": telegram_diagnostics.PENDING_UPDATES_WARNING_THRESHOLD,
+        "critical_threshold": telegram_diagnostics.PENDING_UPDATES_CRITICAL_THRESHOLD,
+    }
 
 
 # --- audit log ---------------------------------------------------------

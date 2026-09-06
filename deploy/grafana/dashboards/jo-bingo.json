@@ -161,6 +161,111 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 11,
+      "title": "Telegram updates/sec (received vs deduplicated)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(rate(telegram_updates_received_total[1m]))", "legendFormat": "received/sec", "refId": "A" },
+        { "expr": "sum(rate(telegram_updates_deduplicated_total[1m]))", "legendFormat": "deduplicated/sec", "refId": "B" }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Telegram webhook pending updates",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 50 },
+              { "color": "red", "value": 200 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        { "expr": "sum(telegram_webhook_pending_updates)", "legendFormat": "pending", "refId": "A" }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Telegram command latency (p50/p95/p99), by handler",
+      "description": "Engineering targets (spec section 9): FAST commands p50<300ms/p95<800ms/p99<1500ms; NORMAL commands p95<1500ms. This panel is the source of truth for whether a real deployment meets them -- see docs/TELEGRAM_PERFORMANCE.md.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 38 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(telegram_command_latency_seconds_bucket[5m])) by (le, handler))",
+          "legendFormat": "p50 {{handler}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(telegram_command_latency_seconds_bucket[5m])) by (le, handler))",
+          "legendFormat": "p95 {{handler}}",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(telegram_command_latency_seconds_bucket[5m])) by (le, handler))",
+          "legendFormat": "p99 {{handler}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "Telegram command error rate, by handler",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 38 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } },
+      "targets": [
+        {
+          "expr": "sum(rate(telegram_command_error_total[15m])) by (handler) / sum(rate(telegram_commands_total[15m])) by (handler)",
+          "legendFormat": "{{handler}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "title": "Telegram command latency breakdown: dispatch vs DB vs Redis vs Telegram API",
+      "description": "Where the milliseconds actually go, decomposed. Dispatch delay is dedup + routing overhead only (see perf.py); DB/Redis are per-handler; Telegram API time is Notifier's own send_message() calls, shared across every command.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 46 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(telegram_dispatch_delay_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95 dispatch delay",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(telegram_db_duration_seconds_bucket[5m])) by (le, handler))",
+          "legendFormat": "p95 db {{handler}}",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(telegram_redis_duration_seconds_bucket[5m])) by (le, handler))",
+          "legendFormat": "p95 redis {{handler}}",
+          "refId": "C"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(telegram_api_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95 telegram api",
+          "refId": "D"
+        }
+      ]
     }
   ]
 }

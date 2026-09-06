@@ -68,9 +68,17 @@ SOCKET_TIMEOUT_SECONDS = 10.0
 MAX_CONNECTIONS = 200
 
 
-def get_redis(*, decode_responses: bool = True) -> Redis:
+def get_redis(*, decode_responses: bool = True, redis_class: type[Redis] = Redis) -> Redis:
+    """`redis_class`, when given, must be a Redis subclass -- every
+    existing caller passes none and gets the exact plain Redis client this
+    always returned. services/bot/app.py is the one caller that passes its
+    own subclass (services/bot/perf.py's _TimedRedis), which overrides
+    only execute_command() to record real per-call latency
+    (packages/core/metrics.py's telegram_redis_duration_seconds) with no
+    change to any call site anywhere in this codebase.
+    """
     settings = get_settings()
-    return Redis.from_url(
+    return redis_class.from_url(
         settings.redis_url,
         decode_responses=decode_responses,
         socket_connect_timeout=SOCKET_TIMEOUT_SECONDS,

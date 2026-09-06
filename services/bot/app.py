@@ -13,6 +13,7 @@ guarantee, applied to inbound instead of outbound).
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Awaitable, Callable
 
 import asyncpg
@@ -28,9 +29,10 @@ from redis.asyncio import Redis
 from packages.core.config import Settings, get_settings
 from packages.core.db_pool import create_pool
 from packages.core.logging import configure_logging
+from packages.core.metrics import telegram_updates_deduplicated_total, telegram_updates_received_total
 from packages.core.redis_conn import get_redis
 from packages.core.tracing import configure_tracing
-from services.bot import bot_content_sync, campaign_worker, dedup, notification_relay
+from services.bot import bot_content_sync, campaign_worker, dedup, notification_relay, perf
 from services.bot.handlers import router
 from services.bot.notifier import Notifier
 
@@ -44,8 +46,18 @@ async def _dedup_middleware(
     data: dict[str, Any],
 ) -> Any:
     assert isinstance(event, Update)
+    # Stashed here, the earliest point this process sees the update (right
+    # after the webhook handler's own instant ack -- see this module's
+    # docstring), so perf.perf_middleware can later report dispatch delay
+    # (dedup + routing/filter-check overhead) separately from handler
+    # execution time. Every update of every type passes through this outer
+    # middleware, so telegram_updates_received_total counts genuinely all
+    # of them, not just message-type updates.
+    data[perf.RECEIVED_AT_KEY] = time.monotonic()
+    telegram_updates_received_total.inc()
     redis: Redis = data["redis"]
     if not await dedup.claim_update(redis, event.update_id):
+        telegram_updates_deduplicated_total.inc()
         return None
     return await handler(event, data)
 
@@ -53,6 +65,11 @@ async def _dedup_middleware(
 def build_dispatcher(pool: asyncpg.Pool, redis: Redis, notifier: Notifier, settings: Settings) -> Dispatcher:
     dp = Dispatcher()
     dp.update.outer_middleware(_dedup_middleware)
+    # An inner middleware (not outer_middleware) -- runs only once routing
+    # has matched one specific handler, so it can label every metric by
+    # that handler's own real function name (see perf.py's own docstring
+    # for exactly how it recovers that name from aiogram's internals).
+    dp.message.middleware(perf.perf_middleware)
     dp.include_router(router)
     dp["pool"] = pool
     dp["redis"] = redis
@@ -154,8 +171,31 @@ def main() -> None:
 
     async def _build() -> web.Application:
         nonlocal pool, redis, notifier
-        pool = await create_pool(dsn=settings.database_url, min_size=2, max_size=10)
-        redis = get_redis()
+        pool = await create_pool(
+            dsn=settings.database_url,
+            # Bot command latency diagnosis pass, real finding (docs/
+            # TELEGRAM_PERFORMANCE.md): a burst of concurrent commands
+            # bigger than min_size forces asyncpg to open that many new
+            # physical Postgres connections at once -- measured directly,
+            # isolated from any bot/handler code, at ~1.8s to establish
+            # ~45 simultaneous new connections in this environment,
+            # against ~22ms for the same 50 concurrent queries once the
+            # pool is already warm. min_size=2 meant almost any real
+            # concurrent burst (a busy minute, not even a spike) paid
+            # this tax repeatedly. Raised modestly, not to max_size's own
+            # value -- a handful of always-open idle connections is a
+            # negligible addition to Postgres's total connection budget
+            # across every other service's own pool (gateway/engine/
+            # payments/admin each already run their own, separately
+            # sized), and this bot process is the one most likely to see
+            # frequent small-to-medium concurrent bursts (a busy minute
+            # of real Telegram traffic) rather than the sustained heavy
+            # concurrency the engine/gateway pools are sized for.
+            min_size=5,
+            max_size=10,
+            init=perf.init_connection_for_query_timing,
+        )
+        redis = get_redis(redis_class=perf.TimedRedis)
         notifier = Notifier(bot)
         dp = build_dispatcher(pool, redis, notifier, settings)
         dp.startup.register(_on_startup)

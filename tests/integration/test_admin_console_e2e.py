@@ -387,3 +387,53 @@ async def test_admin_console_payment_agent_create_and_deactivate_over_a_real_bro
 
     assert page_errors == [], f"JS errors: {page_errors}"
     await page.close()
+
+
+async def test_admin_console_telegram_health_screen_shows_live_webhook_status(
+    admin_server, pool, browser, monkeypatch
+):
+    from aiogram import Bot
+    from aiogram.types import WebhookInfo
+
+    from packages.core.config import get_settings
+
+    # Same reasoning as test_telegram_diagnostics_admin.py: conftest.py's
+    # shared TELEGRAM_BOT_TOKEN default doesn't match Telegram's real
+    # token shape, so aiogram.Bot's own construction-time validation
+    # would reject it before ever reaching get_webhook_info() -- a
+    # well-formed fake token plus a patched get_webhook_info() avoids any
+    # real network call while still exercising the genuine code path.
+    monkeypatch.setattr(get_settings(), "telegram_bot_token", "123456:FAKE-TEST-TOKEN")
+
+    async def fake_get_webhook_info(self: Bot) -> WebhookInfo:
+        return WebhookInfo(
+            url="https://bot.test/webhook",
+            has_custom_certificate=False,
+            pending_update_count=7,
+            ip_address="203.0.113.1",
+            last_error_date=None,
+            last_error_message=None,
+            last_synchronization_error_date=None,
+            max_connections=40,
+            allowed_updates=None,
+        )
+
+    monkeypatch.setattr(Bot, "get_webhook_info", fake_get_webhook_info)
+
+    admin_id, username, password, totp_secret = await create_test_admin(pool, role="ops")
+    page = await browser.new_page(viewport={"width": 1280, "height": 900})
+    page_errors: list[str] = []
+    page.on("pageerror", lambda exc: page_errors.append(str(exc)))
+
+    await _login(page, admin_server, username, password, totp_secret)
+    await page.wait_for_selector(".stat-grid", timeout=10000)
+
+    await page.click('.nav-btn[data-screen="telegram_health"]')
+    await page.wait_for_selector(".badge-healthy", timeout=10000)
+
+    stat_values = await page.eval_on_selector_all(".stat-value", "els => els.map(e => e.textContent)")
+    assert any("7" in v for v in stat_values), stat_values
+    assert "https://bot.test/webhook" in await page.text_content(".stat-grid")
+
+    assert page_errors == [], f"JS errors: {page_errors}"
+    await page.close()

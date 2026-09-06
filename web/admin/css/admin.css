@@ -371,7 +371,8 @@ textarea {
 }
 
 .badge-active,
-.badge-available {
+.badge-available,
+.badge-healthy {
   background: #dcfce7;
   color: var(--success);
 }
@@ -379,7 +380,8 @@ textarea {
 .badge-review,
 .badge-limited,
 .badge-disputed,
-.badge-expired {
+.badge-expired,
+.badge-warning {
   background: #fef3c7;
   color: var(--warn);
 }
@@ -388,7 +390,8 @@ textarea {
 .badge-self_excluded,
 .badge-blocked,
 .badge-rejected,
-.badge-revoked {
+.badge-revoked,
+.badge-critical {
   background: #fde8e6;
   color: var(--danger);
 }

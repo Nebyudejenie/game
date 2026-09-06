@@ -105,6 +105,13 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     # Same investigative audience as risk:view -- this is the referral-
     # specific extension of that same screen's fraud-signal philosophy.
     "bonuses:view_fraud_signals": frozenset({"ops", "finance", "superadmin"}),
+    # Same breadth as dashboard:view -- "is the bot reachable right now" is
+    # informational operational status every role benefits from seeing
+    # (support triaging a "the bot isn't replying" ticket needs this just
+    # as much as ops does), and a getWebhookInfo() call is a read-only,
+    # side-effect-free GET against Telegram's own API, not a control lever
+    # that needs narrowing the way an actual configuration change would.
+    "telegram:view_health": frozenset({"support", "finance", "ops", "superadmin"}),
 }
 
 

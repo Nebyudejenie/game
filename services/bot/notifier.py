@@ -19,6 +19,8 @@ import structlog
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 
+from packages.core.metrics import telegram_api_duration_seconds
+
 logger = structlog.get_logger()
 
 GLOBAL_RATE_PER_SECOND = 25.0
@@ -196,6 +198,7 @@ class Notifier:
                 del self._backoff_until[message.chat_id]
 
             outcome = "delivered"
+            api_call_start = time.monotonic()
             try:
                 await self._bot.send_message(message.chat_id, message.text, **message.kwargs)
             except TelegramRetryAfter as exc:
@@ -227,6 +230,16 @@ class Notifier:
                 outcome = "failed"
             else:
                 await asyncio.sleep(MIN_INTERVAL_SECONDS)
+            finally:
+                # Every branch above represents a real response from
+                # Telegram's own API (or, for the bare Exception case, a
+                # local/network failure attempting to reach it) -- timed
+                # here, once per actual attempt, including a still-
+                # retrying 429 (that `continue` above still runs this
+                # finally first), so telegram_api_duration_seconds
+                # measures Telegram's own response time specifically,
+                # separate from this queue's own pacing/backoff waits.
+                telegram_api_duration_seconds.observe(time.monotonic() - api_call_start)
 
             # Reached only on a terminal outcome (delivered, permanently
             # dropped, or retries exhausted) -- never on a requeue above.

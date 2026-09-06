@@ -33,7 +33,18 @@ own call sites use beyond `dsn`/`min_size`/`max_size` today).
 
 from __future__ import annotations
 
+from typing import Protocol
+
 import asyncpg
+
+
+class _InitCallback(Protocol):
+    # Mirrors asyncpg-stubs' own (private, stub-only) _InitCallback shape
+    # exactly -- a positional-only parameter -- rather than importing that
+    # underscore-prefixed name directly, since asyncpg-stubs is a stub-only
+    # package with no guarantee its private symbols exist as real,
+    # importable objects at runtime.
+    async def __call__(self, con: asyncpg.Connection[asyncpg.Record], /) -> None: ...
 
 # Matches packages/core/redis_conn.py's own SOCKET_TIMEOUT_SECONDS -- same
 # order of magnitude, same reasoning: long enough that a real acquire
@@ -48,7 +59,21 @@ class _BoundedPool(asyncpg.Pool):
         return super().acquire(timeout=ACQUIRE_TIMEOUT_SECONDS if timeout is None else timeout)
 
 
-async def create_pool(dsn: str, *, min_size: int, max_size: int) -> asyncpg.Pool:
+async def create_pool(
+    dsn: str,
+    *,
+    min_size: int,
+    max_size: int,
+    init: _InitCallback | None = None,
+) -> asyncpg.Pool:
+    """`init`, when given, is asyncpg's own "prepare a connection right
+    after it's created" hook -- passed straight through, default None
+    (identical behavior to every caller before this parameter existed).
+    services/bot/app.py is the one caller that uses it, to attach
+    Connection.add_query_logger() for real per-query latency
+    instrumentation (packages/core/metrics.py's telegram_db_duration_seconds)
+    without changing a single call site in services/bot/handlers.py.
+    """
     pool = _BoundedPool(
         dsn,
         min_size=min_size,
@@ -57,7 +82,7 @@ async def create_pool(dsn: str, *, min_size: int, max_size: int) -> asyncpg.Pool
         max_inactive_connection_lifetime=300.0,
         connect=None,
         setup=None,
-        init=None,
+        init=init,
         reset=None,
         loop=None,
         connection_class=asyncpg.Connection,

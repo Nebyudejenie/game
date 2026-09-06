@@ -6,11 +6,15 @@ rejected with the correct re-prompt, and a duplicate update_id is
 processed exactly once.
 """
 
+import asyncio
 import itertools
 import random
+import statistics
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import pytest
 import pytest_asyncio
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
@@ -419,6 +423,52 @@ async def test_balance_reflects_real_ledger_state(pool, conn, bot_ctx):
 
     assert len(session.sent) == 1
     assert "75.00" in session.sent[0].text
+
+
+async def test_balance_command_increments_real_per_command_metrics(pool, conn, bot_ctx):
+    """Telegram command latency diagnosis pass: proves perf.perf_middleware
+    is actually wired into the real dispatcher end to end -- feeding a
+    genuine Update through it (not calling perf_middleware directly, that's
+    tests/unit/test_perf.py's job) and checking the same metrics a real
+    Prometheus scrape of the bot's own /metrics endpoint would report.
+    """
+    from packages.core import metrics
+    from tests.integration.conftest import fund_user
+
+    dp, bot, session = bot_ctx
+    telegram_id = next_telegram_id()
+    await dp.feed_update(
+        bot, make_contact_update(telegram_id, contact_user_id=telegram_id, phone=unique_phone())
+    )
+    await _settle()
+    user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+    await fund_user(conn, user_row["id"], Decimal("10.00"))
+
+    commands_before = metrics.telegram_commands_total.labels(handler="cmd_balance")._value.get()
+    success_before = metrics.telegram_command_success_total.labels(handler="cmd_balance")._value.get()
+    latency_sum_before = metrics.telegram_command_latency_seconds.labels(handler="cmd_balance")._sum.get()
+    api_sum_before = metrics.telegram_api_duration_seconds._sum.get()
+
+    session.sent.clear()
+    await dp.feed_update(bot, make_text_update(telegram_id, "/balance"))
+    await _settle()
+
+    assert len(session.sent) == 1
+    assert metrics.telegram_commands_total.labels(handler="cmd_balance")._value.get() == commands_before + 1
+    assert (
+        metrics.telegram_command_success_total.labels(handler="cmd_balance")._value.get()
+        == success_before + 1
+    )
+    # A real handler execution always takes *some* measurable time (at
+    # minimum, the ledger.user_balance_snapshot() query) -- the sum only
+    # ever moves forward.
+    assert metrics.telegram_command_latency_seconds.labels(handler="cmd_balance")._sum.get() > latency_sum_before
+    # This test's own bot_ctx uses a FakeSession (no real network), but
+    # Notifier._run() still times its own await self._bot.send_message()
+    # call around that fake response -- proving the instrumentation added
+    # to notifier.py fires for every real code path through Notifier, not
+    # only when a genuine Telegram API round trip is involved.
+    assert metrics.telegram_api_duration_seconds._sum.get() > api_sum_before
 
 
 async def _register(dp, bot, session) -> int:
@@ -1512,3 +1562,102 @@ async def test_portal_command_ignored_for_an_unregistered_sender(pool, bot_ctx):
     # a portal link handed to someone not in payment_agents.
     assert len(session.sent) == 1
     assert "https://agent.test/login?token=" not in session.sent[0].text
+
+
+@pytest.mark.load
+async def test_15_concurrent_balance_commands_all_succeed_with_measured_latency(pool, conn, bot_ctx):
+    """A real, modest concurrency measurement -- not the parent directive's
+    own 500/1000-concurrent figures, deliberately: this exact shared dev
+    database was independently found, mid-way through this same pass's own
+    regression testing, to already carry 5,379 accumulated room rows from
+    this session's cumulative testing (a real, live instance of the same
+    class of incident DECISIONS.md already documents once). A genuine
+    500-1000 concurrent Telegram-update load test belongs in a dedicated,
+    disposable environment, not layered onto a database already showing
+    that exact failure mode.
+
+    A first draft of this test used 50 concurrent commands and caused a
+    real, self-inflicted regression: it forced the session-scoped `pool`
+    fixture (shared by every other test file in this same run, several of
+    which -- gateway_server, admin_server, payments_server -- hold their
+    own separately-sized pools concurrently) to open up to 50 new
+    physical Postgres connections all at once, and the combined total
+    across every session-scoped pool active at that moment exceeded this
+    Postgres instance's own real max_connections=100 ceiling
+    (`TooManyConnectionsError: sorry, too many clients already`),
+    cascading into unrelated test failures across the whole suite. 15
+    concurrent real users through the real dispatcher is still enough to
+    prove no crash, no lost reply, and no cross-request state corruption
+    under real concurrency, and to produce a genuine (not estimated)
+    latency distribution for /balance specifically, without risking the
+    same shared-connection-budget exhaustion.
+    """
+    from packages.core import metrics
+    from tests.integration.conftest import fund_user
+
+    dp, bot, session = bot_ctx
+    concurrency = 15
+    telegram_ids = [next_telegram_id() for _ in range(concurrency)]
+
+    for telegram_id in telegram_ids:
+        await dp.feed_update(
+            bot, make_contact_update(telegram_id, contact_user_id=telegram_id, phone=unique_phone())
+        )
+    await _settle(messages=concurrency)
+    for telegram_id in telegram_ids:
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        await fund_user(conn, user_row["id"], Decimal("10.00"))
+
+    session.sent.clear()
+    latencies_ms: list[float] = []
+
+    async def one_balance_call(telegram_id: int) -> None:
+        start = time.perf_counter()
+        await dp.feed_update(bot, make_text_update(telegram_id, "/balance"))
+        latencies_ms.append((time.perf_counter() - start) * 1000)
+
+    started = time.monotonic()
+    await asyncio.gather(*(one_balance_call(tid) for tid in telegram_ids))
+    wall_clock_elapsed = time.monotonic() - started
+    await _settle(messages=concurrency)
+
+    # Every single concurrent /balance call got its own reply -- no lost
+    # message, no cross-request state bleeding one user's balance into
+    # another's under real concurrent dispatch.
+    assert len(session.sent) == concurrency
+    for message in session.sent:
+        assert "10.00" in message.text
+
+    latencies_ms.sort()
+    p50 = statistics.median(latencies_ms)
+    p95 = latencies_ms[int(len(latencies_ms) * 0.95) - 1]
+    p99 = latencies_ms[-1]
+    print(
+        f"\n[{concurrency}-concurrent /balance] wall_clock={wall_clock_elapsed:.3f}s "
+        f"p50={p50:.1f}ms p95={p95:.1f}ms p99={p99:.1f}ms"
+    )
+
+    # A sanity bound, not the parent directive's own FAST-class target.
+    # A related but separate finding (isolated with a bare asyncpg pool,
+    # no bot code involved at all -- see docs/TELEGRAM_PERFORMANCE.md)
+    # measured that this kind of p50/p99 can be dominated by cold
+    # Postgres *connection establishment*, not query execution or
+    # handler logic: a pre-warmed pool already sized to 50 connections
+    # answered 50 concurrent queries in ~22-25ms, while the same pool
+    # cold needed ~1.8s to open that many new physical connections at
+    # once. That finding is what drove raising the bot's own real pool
+    # (services/bot/app.py) from min_size=2 to min_size=5. This specific
+    # test's own 15-way concurrency intentionally stays well under any
+    # single session-scoped pool's warm capacity (see this test's own
+    # docstring for why a higher figure caused a real, self-inflicted
+    # regression), so it is not itself a connection-establishment
+    # benchmark -- just a sanity bound confirming no crash or pathological
+    # slowdown under real concurrent dispatch. Not a network round trip
+    # to Telegram either way (FakeSession has none), so this number isn't
+    # directly comparable to a real deployment's own webhook-to-reply
+    # figure.
+    assert p99 < 5000, f"a /balance call took {p99:.0f}ms under {concurrency}-way concurrency"
+
+    assert (
+        metrics.telegram_commands_total.labels(handler="cmd_balance")._value.get() >= concurrency
+    )
