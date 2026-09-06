@@ -9,6 +9,10 @@ import { voiceCaller } from "./voice.js";
 const tg = window.Telegram && window.Telegram.WebApp;
 
 let winPatterns = ["row", "col", "diag"];
+// Real, admin-configured per-room value from the server's own state_sync
+// (rooms.min_winning_lines) -- 2 here is only the pre-sync placeholder,
+// exactly like winPatterns' own default above, never a hardcoded rule.
+let minWinningLines = 2;
 let countdownTimer = null;
 
 // --- screen management --------------------------------------------------
@@ -230,6 +234,7 @@ function enterRoom(roomId) {
 ws.on("state_sync", (msg) => {
   setState({ round: msg });
   winPatterns = msg.win_patterns || winPatterns;
+  minWinningLines = msg.min_winning_lines || minWinningLines;
 
   if (msg.status === "voided" || msg.status === "done") {
     showScreen("rooms");
@@ -693,7 +698,7 @@ function pushRecentCall(msg) {
 function updateBingoButtons(calledSet) {
   const state = getState();
   for (const gc of gameCards) {
-    const complete = gc.instance.hasCompletePattern(calledSet, winPatterns);
+    const complete = gc.instance.hasCompletePattern(calledSet, winPatterns, minWinningLines);
     gc.btn.disabled = !complete || gc.claimed;
     if (state.autoMark && complete && !gc.claimed && state.round && state.round.round_id) {
       gc.claimed = true;

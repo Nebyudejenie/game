@@ -628,6 +628,7 @@ class CreateRoomRequest(BaseModel):
     call_interval_ms: int = 4000
     result_seconds: int = 10
     win_patterns: list[str] = ["row", "col", "diag"]
+    min_winning_lines: int = 2
 
 
 @app.post("/rooms")
@@ -636,21 +637,25 @@ async def create_room(
     admin: Annotated[AdminSession, Depends(require("rooms:manage"))],
     body: CreateRoomRequest,
 ) -> dict[str, int]:
-    room_id = await queries.create_room_admin(
-        app.state.pool,
-        admin_id=admin.admin_id,
-        code=body.code,
-        stake=Decimal(body.stake),
-        house_cut_bps=body.house_cut_bps,
-        min_players=body.min_players,
-        max_players=body.max_players,
-        max_cards_per_player=body.max_cards_per_player,
-        lobby_seconds=body.lobby_seconds,
-        call_interval_ms=body.call_interval_ms,
-        result_seconds=body.result_seconds,
-        win_patterns=body.win_patterns,
-        ip_address=_client_ip(request),
-    )
+    try:
+        room_id = await queries.create_room_admin(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            code=body.code,
+            stake=Decimal(body.stake),
+            house_cut_bps=body.house_cut_bps,
+            min_players=body.min_players,
+            max_players=body.max_players,
+            max_cards_per_player=body.max_cards_per_player,
+            lobby_seconds=body.lobby_seconds,
+            call_interval_ms=body.call_interval_ms,
+            result_seconds=body.result_seconds,
+            win_patterns=body.win_patterns,
+            min_winning_lines=body.min_winning_lines,
+            ip_address=_client_ip(request),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"room_id": room_id}
 
 

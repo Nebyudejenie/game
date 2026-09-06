@@ -58,6 +58,7 @@ class RoomConfig:
     win_patterns: list[str]
     max_cards_per_player: int
     no_player_next_round_delay_seconds: int
+    min_winning_lines: int
 
 
 @dataclass(frozen=True)
@@ -70,7 +71,7 @@ class RoundEntryState:
 class PendingWinner:
     user_id: int
     card_no: int
-    pattern: str  # every completed line's name, comma-joined (>= MIN_WINNING_LINES of them)
+    pattern: str  # every completed line's name, comma-joined (>= the room's own min_winning_lines)
     call_index: int
 
 
@@ -106,6 +107,7 @@ async def load_room_config(pool: asyncpg.Pool, room_id: int) -> RoomConfig:
         win_patterns=list(win_patterns),
         max_cards_per_player=row["max_cards_per_player"],
         no_player_next_round_delay_seconds=row["no_player_next_round_delay_seconds"],
+        min_winning_lines=row["min_winning_lines"],
     )
 
 
@@ -528,13 +530,25 @@ class RoundEngine:
                     return ClaimResult(False, "round_not_running")
 
                 grid = self._card_pool[entry.card_no]
+                # Inlined rather than calling has_won() a second time on
+                # top of this: both ultimately reduce to the exact same
+                # comparison, but has_won() would recompute winning_
+                # patterns() (a full grid re-scan) a second time for no
+                # benefit, and this call site needs the real pattern list
+                # (won) regardless, not just the boolean verdict.
+                # self._room.min_winning_lines (not bingo.MIN_WINNING_LINES)
+                # is what makes this respect the room's own configured
+                # rule -- see that module constant's own comment on why a
+                # hardcoded reference here would silently drift out of
+                # sync with a per-room configurable value.
                 won = bingo.winning_patterns(grid, self._called, self._room.win_patterns)
-                valid = len(won) >= bingo.MIN_WINNING_LINES
+                valid = len(won) >= self._room.min_winning_lines
                 if not valid:
                     # Lock out only a claim with zero real progress (a
                     # clearly bogus/spam attempt) -- a claim with at least
-                    # one genuine complete line just hasn't reached
-                    # MIN_WINNING_LINES yet, and locking the card out here
+                    # one genuine complete line just hasn't reached the
+                    # room's own required min_winning_lines yet, and
+                    # locking the card out here
                     # would strand a player who is honestly one line away
                     # from a real win for the rest of the round, over one
                     # early tap.
@@ -892,7 +906,10 @@ class RoundEngine:
             if (user_id, card_no) in self._auto_claimed or (user_id, card_no) in self._locked_out:
                 continue
             grid = self._card_pool[entry.card_no]
-            if bingo.has_won(grid, self._called, self._room.win_patterns):
+            if bingo.has_won(
+                grid, self._called, self._room.win_patterns,
+                min_winning_lines=self._room.min_winning_lines,
+            ):
                 self._auto_claimed.add((user_id, card_no))
                 try:
                     await self.claim(user_id, card_no, source="auto")

@@ -4,6 +4,62 @@ import { renderError, toast } from "../ui.js";
 export const label = "Rooms";
 
 const WIN_PATTERNS = ["row", "col", "diag"];
+const PATTERN_LABELS = { row: "row", col: "column", diag: "diagonal" };
+const MIN_WINNING_LINES_MIN = 1;
+const MIN_WINNING_LINES_MAX = 4; // matches the DB CHECK constraint exactly
+
+// Shared by the create form and every room's edit form, so an admin sees
+// exactly the same plain-language statement of the rule in both places,
+// worded the same way this exact combination would be described to a
+// player -- never left to infer from raw checkbox/number state alone.
+function describeWinningCondition(minLines, patterns) {
+  const lineWord = minLines === 1 ? "line" : "lines";
+  if (patterns.length === 0) {
+    return `${minLines} completed ${lineWord} required -- but no line types are enabled below, so this room can never actually be won. Enable at least one.`;
+  }
+  const shapes = patterns.map((p) => PATTERN_LABELS[p] || p).join(", ");
+  return `${minLines} completed ${lineWord}, in any combination of: ${shapes}.`;
+}
+
+function winningConditionPanelHtml(minLines, checkedPatterns) {
+  return `
+    <label>Required winning lines
+      <input
+        type="number" name="min_winning_lines" value="${minLines}"
+        min="${MIN_WINNING_LINES_MIN}" max="${MIN_WINNING_LINES_MAX}" required
+      />
+    </label>
+    <div class="action-row">
+      ${WIN_PATTERNS.map((p) => `
+        <label style="flex-direction:row; align-items:center; gap:0.35rem;">
+          <input type="checkbox" name="win_patterns" value="${p}" ${checkedPatterns.includes(p) ? "checked" : ""} /> ${PATTERN_LABELS[p]}
+        </label>
+      `).join("")}
+    </div>
+    <p class="winning-condition-preview">
+      <strong>Winning condition:</strong> <span class="winning-condition-text"></span>
+    </p>
+  `;
+}
+
+// Wires a form's own min_winning_lines input + win_patterns checkboxes to
+// keep their shared preview text live -- called once per form right
+// after its HTML is inserted, for both create and edit.
+function wireWinningConditionPreview(form) {
+  const preview = form.querySelector(".winning-condition-text");
+  function update() {
+    const minLines = Number(form.querySelector('[name="min_winning_lines"]').value) || 1;
+    const patterns = Array.from(form.querySelectorAll('[name="win_patterns"]:checked')).map(
+      (el) => el.value
+    );
+    preview.textContent = describeWinningCondition(minLines, patterns);
+  }
+  form.querySelector('[name="min_winning_lines"]').addEventListener("input", update);
+  for (const box of form.querySelectorAll('[name="win_patterns"]')) {
+    box.addEventListener("change", update);
+  }
+  update();
+}
 
 export async function render(container) {
   container.innerHTML = `
@@ -23,13 +79,7 @@ export async function render(container) {
         <label>Call interval (ms) <input type="number" name="call_interval_ms" value="4000" /></label>
         <label>Result seconds <input type="number" name="result_seconds" value="10" /></label>
       </div>
-      <div class="action-row">
-        ${WIN_PATTERNS.map((p) => `
-          <label style="flex-direction:row; align-items:center; gap:0.35rem;">
-            <input type="checkbox" name="win_patterns" value="${p}" checked /> ${p}
-          </label>
-        `).join("")}
-      </div>
+      ${winningConditionPanelHtml(2, WIN_PATTERNS)}
       <div class="action-row">
         <button type="submit" class="btn">Create room</button>
       </div>
@@ -38,6 +88,7 @@ export async function render(container) {
 
   const listEl = container.querySelector("#rooms-list");
   const createForm = container.querySelector("#create-room-form");
+  wireWinningConditionPreview(createForm);
 
   async function reload() {
     listEl.innerHTML = `<p class="loading">Loading…</p>`;
@@ -65,7 +116,7 @@ export async function render(container) {
         <thead>
           <tr>
             <th>ID</th><th>Code</th><th>Stake</th><th>House cut</th><th>Players</th><th>Cards/player</th>
-            <th>Lobby (s)</th><th>Call (ms)</th><th>Active</th><th></th>
+            <th>Lobby (s)</th><th>Call (ms)</th><th>Winning condition</th><th>Active</th><th></th>
           </tr>
         </thead>
         <tbody>
@@ -75,6 +126,9 @@ export async function render(container) {
               <td>${r.house_cut_bps / 100}%</td><td>${r.min_players}–${r.max_players}</td>
               <td>${r.max_cards_per_player}</td>
               <td>${r.lobby_seconds}</td><td>${r.call_interval_ms}</td>
+              <td title="${escapeHtml(describeWinningCondition(r.min_winning_lines, r.win_patterns))}">
+                ${r.min_winning_lines} completed ${r.min_winning_lines === 1 ? "line" : "lines"}
+              </td>
               <td>${r.is_active ? "yes" : "no"}</td>
               <td>
                 <button class="btn btn-secondary btn-sm edit-room-btn">Edit</button>
@@ -112,23 +166,19 @@ export async function render(container) {
           <label>Call interval (ms) <input type="number" name="call_interval_ms" value="${room.call_interval_ms}" /></label>
           <label>Result seconds <input type="number" name="result_seconds" value="${room.result_seconds}" /></label>
         </div>
-        <div class="action-row">
-          ${WIN_PATTERNS.map((p) => `
-            <label style="flex-direction:row; align-items:center; gap:0.35rem;">
-              <input type="checkbox" name="win_patterns" value="${p}" ${room.win_patterns.includes(p) ? "checked" : ""} /> ${p}
-            </label>
-          `).join("")}
-        </div>
+        ${winningConditionPanelHtml(room.min_winning_lines, room.win_patterns)}
         <div class="action-row">
           <button type="submit" class="btn">Save changes</button>
           <button type="button" class="btn btn-secondary" id="cancel-edit-btn">Cancel</button>
         </div>
       </form>
     `;
+    const editForm = panel.querySelector("#edit-room-form");
+    wireWinningConditionPreview(editForm);
     panel.querySelector("#cancel-edit-btn").addEventListener("click", () => {
       panel.innerHTML = "";
     });
-    panel.querySelector("#edit-room-form").addEventListener("submit", (event) => {
+    editForm.addEventListener("submit", (event) => {
       event.preventDefault();
       saveRoomEdit(roomId, room, event.target);
     });
@@ -229,6 +279,7 @@ export async function render(container) {
       call_interval_ms: Number(data.get("call_interval_ms")),
       result_seconds: Number(data.get("result_seconds")),
       win_patterns: winPatterns,
+      min_winning_lines: Number(data.get("min_winning_lines")),
     };
     // Only the fields that actually changed -- an admin who just wants to
     // bump one number shouldn't generate an audit-log entry claiming
@@ -291,10 +342,16 @@ export async function render(container) {
           call_interval_ms: Number(data.get("call_interval_ms")),
           result_seconds: Number(data.get("result_seconds")),
           win_patterns: winPatterns,
+          min_winning_lines: Number(data.get("min_winning_lines")),
         },
       });
       toast("Room created.");
       createForm.reset();
+      // form.reset() doesn't reliably re-fire input/change on every
+      // browser, which would otherwise leave the winning-condition
+      // preview showing the just-submitted values instead of the
+      // restored defaults.
+      createForm.querySelector('[name="min_winning_lines"]').dispatchEvent(new Event("input"));
       reload();
     } catch (err) {
       toast(err.detail || err.message, true);

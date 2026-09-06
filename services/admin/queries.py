@@ -775,7 +775,7 @@ async def list_rooms(pool: asyncpg.Pool) -> list[dict[str, Any]]:
     rows = await pool.fetch(
         "SELECT id, code, stake, house_cut_bps, min_players, max_players, "
         "max_cards_per_player, lobby_seconds, call_interval_ms, result_seconds, "
-        "win_patterns, is_active FROM rooms ORDER BY stake"
+        "win_patterns, min_winning_lines, is_active FROM rooms ORDER BY stake"
     )
     out = []
     for r in rows:
@@ -783,6 +783,17 @@ async def list_rooms(pool: asyncpg.Pool) -> list[dict[str, Any]]:
         d["win_patterns"] = _parse_jsonb(d["win_patterns"])
         out.append(d)
     return out
+
+
+MIN_WINNING_LINES_RANGE = range(1, 5)  # 1-4 inclusive; matches the DB CHECK constraint exactly
+
+
+def _validate_min_winning_lines(value: int) -> None:
+    if value not in MIN_WINNING_LINES_RANGE:
+        raise ValueError(
+            f"min_winning_lines must be between {MIN_WINNING_LINES_RANGE.start} and "
+            f"{MIN_WINNING_LINES_RANGE.stop - 1}, got {value}"
+        )
 
 
 async def create_room_admin(
@@ -799,8 +810,15 @@ async def create_room_admin(
     call_interval_ms: int,
     result_seconds: int,
     win_patterns: list[str],
+    min_winning_lines: int = 2,
     ip_address: str | None,
 ) -> int:
+    # Validated here, before ever reaching the database, so an admin gets
+    # a clean 422 (ValueError -> HTTPException, the same mapping every
+    # other admin-console validation error already uses) instead of a raw
+    # constraint-violation error -- the DB CHECK stays too, as the real,
+    # unconditional backstop for any caller that skips this function.
+    _validate_min_winning_lines(min_winning_lines)
     async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
@@ -808,8 +826,8 @@ async def create_room_admin(
                 INSERT INTO rooms
                     (code, stake, house_cut_bps, min_players, max_players,
                      max_cards_per_player, lobby_seconds, call_interval_ms,
-                     result_seconds, win_patterns)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                     result_seconds, win_patterns, min_winning_lines)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 RETURNING id
                 """,
                 code,
@@ -822,6 +840,7 @@ async def create_room_admin(
                 call_interval_ms,
                 result_seconds,
                 json.dumps(win_patterns),
+                min_winning_lines,
             )
             assert row is not None
             await audit.record(
@@ -846,6 +865,7 @@ _UPDATABLE_ROOM_FIELDS = {
     "call_interval_ms",
     "result_seconds",
     "win_patterns",
+    "min_winning_lines",
     "is_active",
 }
 
@@ -878,17 +898,29 @@ async def update_room_admin(
     reason: str | None,
     ip_address: str | None,
 ) -> bool:
-    """Edits room config -- spec section 26: this only ever affects rounds
-    created after the change. Live/future rounds each snapshot their own
-    stake/house_cut_bps/etc. at creation time (rounds.stake, not rooms.stake),
-    so a config edit can never retroactively alter a round already in
-    progress.
+    """Edits room config -- spec section 26: this can never retroactively
+    alter a round already in progress (each round snapshots its own
+    stake/house_cut_bps/etc. at creation time into rounds.stake, not
+    rooms.stake). More precisely than "affects rounds created after the
+    change" might suggest: RoundEngine loads its own RoomConfig exactly
+    once, when it first claims a room (services/engine/round_engine.py::
+    RoundEngine.__init__ / load_room_config()), and keeps using that same
+    snapshot for every round it runs afterward until the engine itself is
+    re-claimed (a restart, or the room's lock changing hands) -- an edit
+    here does not retroactively reach a round already running, but it
+    also doesn't reach the *next* round in an already-live engine's own
+    continuous lifecycle either. It takes effect the next time this room
+    is claimed. This is the same lifecycle every other room field
+    (win_patterns included) already has; min_winning_lines follows it
+    identically rather than inventing a separate hot-reload path.
     """
     unknown = set(changes) - _UPDATABLE_ROOM_FIELDS
     if unknown:
         raise ValueError(f"not an editable room field: {unknown}")
     if not changes:
         return False
+    if "min_winning_lines" in changes:
+        _validate_min_winning_lines(changes["min_winning_lines"])
 
     async with pool.acquire() as conn:
         async with conn.transaction():

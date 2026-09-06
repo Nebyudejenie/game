@@ -292,6 +292,89 @@ async def test_claim_after_the_tie_window_has_already_settled_is_rejected(
         await asyncio.wait_for(task, timeout=15)
 
 
+async def test_room_configured_for_one_winning_line_accepts_a_single_line(
+    pool, redis, card_pool, conn
+):
+    """Proves per-room min_winning_lines configurability reaches the real
+    production claim() path end to end, not just packages/core/bingo.py's
+    own pure has_won() function in isolation. A room explicitly configured
+    for 1 (the classic single-line game, still a supported configuration
+    per the admin-facing rule this pass adds) must accept a claim after
+    exactly one completed line -- the same card would be correctly
+    rejected under this room's own sibling test's default (2 lines).
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, call_interval_ms=15, min_winning_lines=1
+    )
+    room = await load_room_config(pool, room_id)
+    assert room.min_winning_lines == 1
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        winner = await create_funded_user(conn)
+        other = await create_funded_user(conn)
+        assert (await engine.join(winner, 1, auto_mark=False)).ok
+        assert (await engine.join(other, 2, auto_mark=False)).ok
+        await wait_until(lambda: engine.status == "running", timeout=5)
+
+        # Constructed directly rather than awaited via natural draw
+        # progression, the same established reasoning as this file's
+        # other min_winning_lines tests: deterministic and immediate,
+        # not racing a background number-caller for an exact draw count.
+        winning_grid = card_pool[1]
+        engine._called = {winning_grid[0][c] for c in range(5)}  # noqa: SLF001
+        assert len(bingo.winning_patterns(winning_grid, engine._called, room.win_patterns)) == 1  # noqa: SLF001
+
+        result = await engine.claim(winner, 1)
+        assert result.ok is True  # rejected under the default 2-line rule; accepted here
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
+async def test_room_configured_for_three_winning_lines_rejects_two_lines(
+    pool, redis, card_pool, conn
+):
+    """The other direction: a room requiring *more* than the default must
+    reject a claim that would have won under the default 2-line rule.
+
+    Constructs engine._called directly (the same established white-box
+    technique test_concurrent_claims_two_players_only_one_holds_a_valid_
+    pattern above already switched to, for the identical reason): waiting
+    on natural draw progression for "exactly 2 lines, no more" risks the
+    round exhausting all 75 calls (nobody can win under this room's own
+    3-line rule from just joining) before that exact state is ever
+    observed, leaving the original entries stale once a fresh round
+    starts -- reproduced directly (a real not_in_round instead of
+    no_pattern) before this fix.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, call_interval_ms=15, min_winning_lines=3
+    )
+    room = await load_room_config(pool, room_id)
+    assert room.min_winning_lines == 3
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        winner = await create_funded_user(conn)
+        other = await create_funded_user(conn)
+        assert (await engine.join(winner, 1, auto_mark=False)).ok
+        assert (await engine.join(other, 2, auto_mark=False)).ok
+        await wait_until(lambda: engine.status == "running", timeout=5)
+
+        winning_grid = card_pool[1]
+        engine._called = {winning_grid[0][c] for c in range(5)} | {  # noqa: SLF001
+            winning_grid[1][c] for c in range(5)
+        }
+        assert len(bingo.winning_patterns(winning_grid, engine._called, room.win_patterns)) == 2  # noqa: SLF001
+
+        result = await engine.claim(winner, 1)
+        assert result == ClaimResult(False, "no_pattern")  # a real win under the default rule
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
 async def test_a_valid_claim_stops_the_round_immediately_no_further_calls(pool, redis, card_pool, conn):
     """Real-money fairness requirement, not just UX polish: once a player's
     "Bingo" is valid, the round must freeze right there -- calling even one

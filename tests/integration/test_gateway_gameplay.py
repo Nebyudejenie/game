@@ -380,6 +380,42 @@ async def test_a_zero_player_room_still_appears_live_in_the_room_list(
         await asyncio.wait_for(task, timeout=15)
 
 
+async def test_state_sync_reports_the_rooms_real_configured_winning_condition(
+    gateway_server, pool, redis, card_pool, conn
+):
+    """Backend/frontend consistency for the new per-room min_winning_lines
+    rule (item 12 of this feature's own test checklist): a real client
+    joining a room configured for something other than the product
+    default must receive that room's *actual* value over the wire, not
+    the old hardcoded assumption -- this is exactly the payload web/
+    miniapp/js/app.v6.js's own state_sync handler reads into
+    minWinningLines, which render/card.js's hasCompletePattern() then
+    uses instead of its own former hardcoded constant.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, min_winning_lines=3, is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    assert room.min_winning_lines == 3
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        telegram_id = next_telegram_id()
+        async with websockets.connect(gateway_server) as ws:
+            await ws.send(json.dumps({"t": "auth", "init_data": build_init_data(telegram_id)}))
+            await ws.recv()  # authed
+
+            await ws.send(json.dumps({"t": "join", "room_id": room_id}))
+            state = json.loads(await ws.recv())
+            assert state["t"] == "state_sync"
+            assert state["room_id"] == room_id
+            assert state["min_winning_lines"] == 3
+            assert state["win_patterns"] == room.win_patterns
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
 async def test_a_malformed_claim_is_rejected_gracefully_not_crashed(gateway_server, pool, redis):
     # Launch-readiness audit gap: no existing test sent a genuinely
     # malformed claim frame over the real WS path. connection.py's

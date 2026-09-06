@@ -146,16 +146,21 @@ export function createCard(container) {
     }
   }
 
-  // A single completed line is never enough -- must match packages/core/
-  // bingo.py's MIN_WINNING_LINES exactly (currently 2), or this button
-  // would enable itself a line early/late relative to what the server
-  // actually accepts. This only gates the button/optimistic auto-claim;
+  // A single completed line is never enough -- must match this room's
+  // own real required count (packages/core/bingo.py's has_won(), product
+  // default 2) exactly, or this button would enable itself a line
+  // early/late relative to what the server actually accepts. This only
+  // gates the button/optimistic auto-claim;
   // the server re-validates every claim independently regardless (see
   // ws.on("claim_result") in app.v6.js), so a mismatch here is a UX bug,
-  // never a financial one.
-  const MIN_WINNING_LINES = 2;
-
-  function hasCompletePattern(calledSet, patterns) {
+  // never a financial one. Was a hardcoded module constant (2) -- now a
+  // real parameter sourced from the room's own state_sync payload
+  // (rooms.min_winning_lines, admin-configurable per room), so this
+  // never drifts out of sync with whatever the backend actually
+  // requires for this specific room. Defaults to 2 only for a caller
+  // that genuinely has no value yet (e.g. before the first state_sync
+  // arrives) -- never a silent, permanent assumption.
+  function hasCompletePattern(calledSet, patterns, minWinningLines = 2) {
     if (!currentGrid) return false;
     const marked = (r, c) => currentGrid[r][c] === 0 || calledSet.has(currentGrid[r][c]);
     let completedLines = 0;
@@ -174,7 +179,7 @@ export function createCard(container) {
       if ([0, 1, 2, 3, 4].every((i) => marked(i, i))) completedLines++;
       if ([0, 1, 2, 3, 4].every((i) => marked(i, 4 - i))) completedLines++;
     }
-    return completedLines >= MIN_WINNING_LINES;
+    return completedLines >= minWinningLines;
   }
 
   // tabindex="0" + role="button" + a keydown handler -- the same

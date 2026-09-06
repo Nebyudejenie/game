@@ -233,7 +233,8 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
     # ordering constraint to preserve here.
     room_row, round_row, card_pool_size = await asyncio.gather(
         pool.fetchrow(
-            "SELECT stake, win_patterns, max_players, max_cards_per_player FROM rooms WHERE id = $1",
+            "SELECT stake, win_patterns, min_winning_lines, max_players, max_cards_per_player "
+            "FROM rooms WHERE id = $1",
             room_id,
         ),
         pool.fetchrow(
@@ -371,6 +372,7 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
         "players": players,
         "stake": str(stake),
         "win_patterns": win_patterns,
+        "min_winning_lines": room_row["min_winning_lines"],
         "your_card": your_card,
         "your_card_grid": your_card_grid,
         "auto_mark": auto_mark,

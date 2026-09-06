@@ -191,6 +191,39 @@ def test_has_won_respects_enabled_filter_even_with_two_lines_physically_marked()
     assert bingo.has_won(grid, called, ["col"]) is False
 
 
+# --- min_winning_lines: per-room configurable, not a fixed global ------
+
+
+def test_has_won_defaults_to_two_lines_when_not_specified():
+    # Backward compatibility: every existing caller (this whole file's own
+    # tests included) that doesn't pass min_winning_lines explicitly must
+    # keep seeing the exact same behavior as before this became
+    # configurable -- the product default, not a silent change.
+    grid = make_grid()
+    one_row = {grid[0][c] for c in range(5)}
+    two_rows = {grid[r][c] for r in (0, 1) for c in range(5)}
+    assert bingo.has_won(grid, one_row, ALL_KINDS) is False
+    assert bingo.has_won(grid, two_rows, ALL_KINDS) is True
+
+
+def test_has_won_with_min_winning_lines_1_a_single_line_wins():
+    grid = make_grid()
+    one_row = {grid[0][c] for c in range(5)}
+    assert bingo.has_won(grid, one_row, ALL_KINDS, min_winning_lines=1) is True
+
+
+def test_has_won_with_min_winning_lines_3_two_lines_is_not_enough():
+    grid = make_grid()
+    two_rows = {grid[r][c] for r in (0, 1) for c in range(5)}
+    assert bingo.has_won(grid, two_rows, ALL_KINDS, min_winning_lines=3) is False
+
+
+def test_has_won_with_min_winning_lines_3_three_lines_wins():
+    grid = make_grid()
+    three_rows = {grid[r][c] for r in (0, 1, 2) for c in range(5)}
+    assert bingo.has_won(grid, three_rows, ALL_KINDS, min_winning_lines=3) is True
+
+
 def test_letter_for_and_label():
     assert bingo.letter_for(1) == "B"
     assert bingo.letter_for(15) == "B"

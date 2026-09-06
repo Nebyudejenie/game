@@ -789,6 +789,120 @@ async def test_max_cards_per_player_settable_at_creation_and_via_update(pool):
     assert row["max_cards_per_player"] == 2
 
 
+async def test_min_winning_lines_settable_at_creation_and_via_update(pool):
+    admin_id, *_ = await create_test_admin(pool)
+    room_id = await queries.create_room_admin(
+        pool,
+        admin_id=admin_id,
+        code=f"admin-test-{room_id_suffix()}",
+        stake=Decimal("10.00"),
+        house_cut_bps=2000,
+        min_players=2,
+        max_players=100,
+        lobby_seconds=30,
+        call_interval_ms=4000,
+        result_seconds=10,
+        win_patterns=["row", "col", "diag"],
+        min_winning_lines=3,
+        ip_address="127.0.0.1",
+    )
+    row = await pool.fetchrow("SELECT min_winning_lines FROM rooms WHERE id = $1", room_id)
+    assert row["min_winning_lines"] == 3
+
+    rooms = await queries.list_rooms(pool)
+    listed = next(r for r in rooms if r["id"] == room_id)
+    assert listed["min_winning_lines"] == 3
+
+    updated = await queries.update_room_admin(
+        pool,
+        admin_id=admin_id,
+        room_id=room_id,
+        changes={"min_winning_lines": 1},
+        reason="switching this room to the classic single-line game",
+        ip_address="127.0.0.1",
+    )
+    assert updated is True
+    row = await pool.fetchrow("SELECT min_winning_lines FROM rooms WHERE id = $1", room_id)
+    assert row["min_winning_lines"] == 1
+
+
+async def test_create_room_admin_defaults_min_winning_lines_to_two(pool):
+    # The product default this whole feature is built around -- a caller
+    # (like the admin console's own create-room form, before an operator
+    # touches the new field) that doesn't specify it must get the exact
+    # same rule every room has always run under.
+    admin_id, *_ = await create_test_admin(pool)
+    room_id = await queries.create_room_admin(
+        pool,
+        admin_id=admin_id,
+        code=f"admin-test-{room_id_suffix()}",
+        stake=Decimal("10.00"),
+        house_cut_bps=2000,
+        min_players=2,
+        max_players=100,
+        lobby_seconds=30,
+        call_interval_ms=4000,
+        result_seconds=10,
+        win_patterns=["row"],
+        ip_address="127.0.0.1",
+    )
+    row = await pool.fetchrow("SELECT min_winning_lines FROM rooms WHERE id = $1", room_id)
+    assert row["min_winning_lines"] == 2
+
+
+@pytest.mark.parametrize("bad_value", [0, -1, 5, 100])
+async def test_create_room_admin_rejects_invalid_min_winning_lines(pool, bad_value):
+    admin_id, *_ = await create_test_admin(pool)
+    with pytest.raises(ValueError, match="min_winning_lines"):
+        await queries.create_room_admin(
+            pool,
+            admin_id=admin_id,
+            code=f"admin-test-{room_id_suffix()}",
+            stake=Decimal("10.00"),
+            house_cut_bps=2000,
+            min_players=2,
+            max_players=100,
+            lobby_seconds=30,
+            call_interval_ms=4000,
+            result_seconds=10,
+            win_patterns=["row"],
+            min_winning_lines=bad_value,
+            ip_address="127.0.0.1",
+        )
+
+
+@pytest.mark.parametrize("bad_value", [0, -1, 5])
+async def test_update_room_admin_rejects_invalid_min_winning_lines(pool, bad_value):
+    admin_id, *_ = await create_test_admin(pool)
+    room_id = await queries.create_room_admin(
+        pool,
+        admin_id=admin_id,
+        code=f"admin-test-{room_id_suffix()}",
+        stake=Decimal("10.00"),
+        house_cut_bps=2000,
+        min_players=2,
+        max_players=100,
+        lobby_seconds=30,
+        call_interval_ms=4000,
+        result_seconds=10,
+        win_patterns=["row"],
+        ip_address="127.0.0.1",
+    )
+    with pytest.raises(ValueError, match="min_winning_lines"):
+        await queries.update_room_admin(
+            pool,
+            admin_id=admin_id,
+            room_id=room_id,
+            changes={"min_winning_lines": bad_value},
+            reason="trying an invalid value",
+            ip_address="127.0.0.1",
+        )
+    # Rejected before ever reaching the database -- the room's real value
+    # must be completely untouched, not partially applied.
+    row = await pool.fetchrow("SELECT min_winning_lines FROM rooms WHERE id = $1", room_id)
+    assert row["min_winning_lines"] == 2
+
+
 async def test_update_room_rejects_unknown_field(pool):
     admin_id, *_ = await create_test_admin(pool)
     room_id = await queries.create_room_admin(

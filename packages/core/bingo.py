@@ -130,11 +130,20 @@ def _all_patterns() -> list[Pattern]:
 _ALL_PATTERNS = _all_patterns()
 
 # Product rule: a single completed line is never enough -- a card only wins
-# once it holds this many simultaneously-complete lines (any mix of rows,
-# columns, and diagonals). The one and only threshold check lives in
-# has_won() below; every caller (round_engine.py's manual claim() and its
-# auto-mark scan) must go through it rather than re-testing len(...) itself,
-# so the real-money win rule can never drift out of sync between the two.
+# once it holds at least this many simultaneously-complete lines (any mix of
+# rows, columns, and diagonals). This is now a per-room configurable value
+# (rooms.min_winning_lines, RoomConfig.min_winning_lines, the same jsonb-
+# config-column-and-RoomConfig-field shape rooms.win_patterns already
+# established), not a fixed global -- kept here only as has_won()'s default
+# for callers (pure unit tests in particular) that don't need per-room
+# configurability. Every *production* caller must pass the room's own real
+# configured value explicitly; see round_engine.py's two call sites. The one
+# and only threshold check lives in has_won() below; every caller (round_
+# engine.py's manual claim() and its auto-mark scan) must go through it (or
+# reference the exact same self._room.min_winning_lines value, for claim()'s
+# own performance-motivated inline check -- see its own comment) rather than
+# re-testing len(...) against a stale/hardcoded number itself, so the
+# real-money win rule can never drift out of sync between call sites.
 MIN_WINNING_LINES = 2
 
 
@@ -156,10 +165,18 @@ def winning_patterns(
     return won
 
 
-def has_won(grid: Grid, called: set[int], enabled: list[str]) -> bool:
-    """The real win verdict: at least MIN_WINNING_LINES complete lines, in
-    any combination (e.g. two rows, or one row and one diagonal)."""
-    return len(winning_patterns(grid, called, enabled)) >= MIN_WINNING_LINES
+def has_won(
+    grid: Grid,
+    called: set[int],
+    enabled: list[str],
+    min_winning_lines: int = MIN_WINNING_LINES,
+) -> bool:
+    """The real win verdict: at least min_winning_lines complete lines, in
+    any combination (e.g. two rows, or one row and one diagonal). Defaults
+    to the classic MIN_WINNING_LINES=2 for callers that don't pass a
+    room's own configured value (this module's own unit tests); real game
+    code always passes the room's real value explicitly."""
+    return len(winning_patterns(grid, called, enabled)) >= min_winning_lines
 
 
 def _hmac_stream(server_seed: bytes, client_seed: str) -> "_ByteStream":
