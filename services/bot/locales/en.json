@@ -86,6 +86,7 @@
   "notify.withdrawal_rejected": "Your {amount} ETB withdrawal was rejected: {reason}. The funds have been returned to your balance.",
   "notify.manual_deposit_rejected": "Your manual deposit of {amount} ETB was rejected: {reason}. No funds were added to your balance.",
   "notify.you_won": "Congratulations! You won {amount} ETB.",
+  "notify.room_emergency_stopped": "This game was stopped by the operator for safety/technical reasons. Your stake of {amount} ETB has been refunded to your wallet. Reference: {reference}",
   "wallet.insufficient": "Insufficient balance. Please deposit.",
 
   "manual_deposit.receipt_received": "Receipt received and attached to your pending deposit.",

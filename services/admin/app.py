@@ -682,6 +682,57 @@ async def update_room(
     return {"updated": updated}
 
 
+@app.get("/rooms/{room_id}/stop-preview")
+async def room_stop_preview(
+    admin: Annotated[AdminSession, Depends(require("rooms:emergency_stop"))],
+    room_id: int,
+) -> dict[str, Any]:
+    """What the admin console's confirmation dialog shows before an
+    operator commits to POST /rooms/{room_id}/stop -- real current round/
+    player/staked-amount data, not a guess (Section 6's own "must display
+    real financial consequence" requirement).
+    """
+    preview = await queries.get_room_stop_preview_admin(app.state.pool, room_id)
+    if preview is None:
+        raise HTTPException(status_code=404, detail="room not found")
+    return preview
+
+
+class StopRoomRequest(BaseModel):
+    reason: str
+    confirmation: str
+
+
+@app.post("/rooms/{room_id}/stop")
+async def stop_room(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("rooms:emergency_stop"))],
+    room_id: int,
+    body: StopRoomRequest,
+) -> dict[str, Any]:
+    """Emergency single-room stop: halts an active round (real refund via
+    the existing ledger-backed primitive, never a raw balance edit),
+    deactivates the room so it can't be immediately re-claimed, and
+    audits the whole action atomically. See services/admin/queries.py::
+    stop_room_admin() for the full safety reasoning and
+    docs/EMERGENCY_ROOM_STOP.md for the complete design/test record.
+    """
+    _require_reason(body.reason)
+    try:
+        result = await queries.stop_room_admin(
+            app.state.pool,
+            app.state.redis,
+            admin_id=admin.admin_id,
+            room_id=room_id,
+            reason=body.reason,
+            confirmation=body.confirmation,
+            ip_address=_client_ip(request),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return result
+
+
 # --- manual payment configuration (payments:configure -- superadmin only,
 # see rbac.py's own comment on why this is narrower than payments:approve) --
 

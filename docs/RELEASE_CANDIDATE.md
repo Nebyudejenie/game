@@ -60,21 +60,28 @@ environment, never committed.
 
 ```
 pytest tests/ -q
-1169 passed, 51 deselected, in 458.53s (0:07:38)
+1184 passed, 52 deselected, in 474.07s (0:07:54)
 EXIT=0
 ```
 
 Zero failures — the final confirmation run of this pass, including every
 test added during it (the ledger-reconciliation sweep, the Bingo
 acceptance-audit gap-fills, the zero-player-room test, the malformed-
-claim test, the Notification Center Redis-outage test, and the
-`run_active_rooms()` claim-cap test). The first fully clean full-suite
-run in this engagement's entire history. See `docs/PRODUCTION_READINESS.md`'s
-"Full regression suite" section for the complete run-by-run history that
-led here, including three real bugs found and fixed (a test-data-hygiene
-issue in `test_worker.py`, a wall-clock-time-dependent boundary bug in
-two Ethiopian-calendar-day tests, and a real test regression exposed by
-this pass's own `run_active_rooms()` hardening — see `DECISIONS.md`).
+claim test, the Notification Center Redis-outage test, the
+`run_active_rooms()` claim-cap test, `_serve_commands()`'s Redis-
+resilience test, and the 13 unit/integration/e2e tests for the new
+emergency single-room stop feature). The first fully clean full-suite
+run in this engagement's entire history, held across every subsequent
+addition, not just once. See `docs/PRODUCTION_READINESS.md`'s "Full
+regression suite" section for the complete run-by-run history, and
+`DECISIONS.md` for the real bugs found and fixed along the way — three
+test-only issues (a test-data-hygiene issue in `test_worker.py`, a wall-
+clock-time-dependent boundary bug in two Ethiopian-calendar-day tests,
+and a real test regression exposed by `run_active_rooms()`'s own
+hardening) plus one genuine, previously-shipped production gap (the
+`POST /rounds/{id}/void` admin action had no guard against racing a
+live engine's own settlement — a real double-payment risk, closed by
+this pass's new settlement guard in `round_engine.py`).
 
 ## Security results
 
@@ -118,6 +125,14 @@ service if the new ledger-reconciliation sweep needs to be pulled.
 
 ## Changes in this pass (relative to base commit `baeef84`)
 
+- Built the emergency single-room stop feature (`POST /rooms/{id}/stop`,
+  superadmin-only): halts an active round immediately, refunds through
+  the existing ledger-backed primitive, deactivates the room. Found and
+  fixed a real, previously-shipped gap while building it: the existing
+  `POST /rounds/{id}/void` action had no guard against a live engine
+  concurrently settling the same round — a genuine double-payment risk,
+  closed with a Postgres row-lock guard shared by both actions. Full
+  design and 16-scenario test record in `docs/EMERGENCY_ROOM_STOP.md`.
 - Fixed the `test_worker.py` connection-exhaustion flake at its true
   root cause (test-data hygiene, not a redis-py bug).
 - Fixed 2 wall-clock-time-dependent test bugs in

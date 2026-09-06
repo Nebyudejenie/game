@@ -10865,6 +10865,71 @@ as fact.
 
 ---
 
+## 2026-09-06 — Emergency single-room stop, and a real gap it uncovered in the already-shipped round-void action
+
+Built the requested "stop one active, money-bearing room immediately"
+admin action, after first tracing round_engine.py's real state machine
+end to end rather than assuming how it worked. Two real findings came
+out of that trace, one expected and one not.
+
+**Expected**: `RoundEngine.stop()` (the pre-existing cooperative
+mechanism) never reached an *active* round's number-calling loop at
+all — `_run_running()`'s own loop checked only `self._status` and the
+room lock, never `self._stop_requested`. `stop()` only ever took effect
+between rounds. This confirmed and deepened an earlier pass's own
+weaker "not instant" framing into "cannot interrupt an active round at
+all, cooperatively or otherwise."
+
+**Unexpected, and more serious**: `self._status` (`idle`/`lobby`/
+`running`/`settling`) turns out to be a *pure in-memory* attribute —
+`_set_status()` never writes to Postgres. The database's own
+`rounds.status` only changes at four explicit sites (lobby/running/
+done/voided); "settling" never appears in the database at all. This
+matters because the *already-shipped* `POST /rounds/{id}/void` admin
+action (`rounds:void`, ops+superadmin, live since before this session)
+directly flips `rounds.status` to `voided` and refunds — with **no
+lock, no check, nothing** guarding against a live engine's own
+`_settle_with_winners()` concurrently crediting a winner for the exact
+same round moments later. Two independent transactions, no shared
+guard, a real double-payment (refunded AND paid) possible in principle
+since the feature shipped, not something this session's new work
+introduced.
+
+Root-caused, not patched around: added the identical `SELECT ... FOR
+UPDATE` + terminal-status check `refund_round_in_transaction()` already
+used, to the *start* of `_settle_with_winners()`'s own transaction —
+making "an admin voids/stops this round" and "the engine settles this
+round" mutually exclusive via a real Postgres row lock, for both the
+pre-existing void action and the new stop action alike. Verified with a
+real, repeated (10x clean) concurrency test that races a genuine
+determined-winner settlement against a concurrent admin stop and
+asserts the *ledger balances* land in exactly one of the two valid
+terminal states, never a mix.
+
+Also closed a second-order bug found while building the fix: without
+also resetting the engine's own in-memory state (`self._status`, round
+id, etc.) after either guard fires, the engine would be left believing
+it's still mid-round with a round that no longer exists in the
+database, which `run_forever()`'s own outer loop would then try to act
+on — confirmed by reasoning through `_run_lobby()`'s stale-deadline
+behavior, not by hitting it live in a test, and fixed pre-emptively by
+calling `_reset_to_idle()` on every new abort path.
+
+The stop feature itself needed no new schema at all — it reuses
+`rounds.status = 'voided'` (the same terminal value every other refund
+path already produces) and `rooms.is_active` (the same flag `PATCH
+/rooms/{id}` already toggles). See `docs/EMERGENCY_ROOM_STOP.md` for the
+full design and the 16-scenario test record.
+
+Lesson worth keeping: tracing a system's *actual* current behavior
+end-to-end before building a fix, rather than trusting what a docstring
+or an earlier session's own notes claimed, is what surfaced the
+already-shipped gap. The new feature's own safety net (the settlement
+guard) turned out to matter more for a *different*, already-live
+feature than for the one it was built to support.
+
+---
+
 ## 2026-09-06 — `run_active_rooms()` hardened against unbounded claims; the hardening itself broke a test, which was the right test to break
 
 A follow-up forensic pass refused to accept the 560-stale-rooms finding

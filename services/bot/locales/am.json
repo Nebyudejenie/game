@@ -86,6 +86,7 @@
   "notify.withdrawal_rejected": "የ{amount} ብር ወጪዎ ውድቅ ተደርጓል፦ {reason}። ገንዘቡ ወደ ቀሪ ሂሳብዎ ተመልሷል።",
   "notify.manual_deposit_rejected": "የ{amount} ብር በእጅ ገቢዎ ውድቅ ተደርጓል፦ {reason}። ገንዘብ ወደ ቀሪ ሂሳብዎ አልታከለም።",
   "notify.you_won": "እንኳን ደስ አለዎት! {amount} ብር አሸንፈዋል።",
+  "notify.room_emergency_stopped": "ይህ ጨዋታ በአስተዳዳሪው በደህንነት/በቴክኒካል ምክንያት ቆሟል። የ{amount} ብር ውርርድዎ ወደ ቀሪ ሂሳብዎ ተመልሷል። ማጣቀሻ፦ {reference}",
   "wallet.insufficient": "በቂ ቀሪ ሂሳብ የለዎትም። እባክዎ ያስገቡ።",
 
   "manual_deposit.receipt_received": "ደረሰኝ ደርሷል እና ከቆየው ገቢዎ ጋር ተያይዟል።",

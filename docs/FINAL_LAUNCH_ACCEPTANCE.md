@@ -21,7 +21,7 @@ is re-derived from them, not the other way around.
 
 | # | Area | Status | Evidence / Blocker reference |
 |---|---|---|---|
-| 1 | Bingo engine (core rules) | PASS | Real, no stubs; 16-scenario acceptance audit closed 13/16 items with passing tests, 3 remaining scoped as P2 follow-up (`LAUNCH_BLOCKERS.md` LB-A4). |
+| 1 | Bingo engine (core rules) | PASS | Real, no stubs; 16-scenario acceptance audit closed 13/16 items with passing tests, 3 remaining scoped as P2 follow-up (`LAUNCH_BLOCKERS.md` LB-A4). A real, previously-shipped double-payment risk (the round-void admin action had no guard against a concurrent live settlement) was found and closed this pass with a Postgres row-lock guard — see `docs/EMERGENCY_ROOM_STOP.md`. |
 | 2 | Two-line win condition | PASS | `MIN_WINNING_LINES = 2` confirmed as the actual running logic both claim paths use; the one historical flake tied to this was a test-timing artifact, root-caused and fixed, not an engine bug. |
 | 3 | Wallet / balances | PASS | Double-entry ledger, DB-enforced sum-to-zero and non-negative-balance constraints; adversarial concurrency/replay tests pass; confirmed no balance mutation anywhere bypasses `ledger.post()` (LB-A5). |
 | 4 | Ledger integrity | PASS | Real-time reconciliation now scheduled (LB-A1, this pass), alertable, read-only by design (never silently "fixes" a mismatch — proven by a real seeded-mismatch test). |

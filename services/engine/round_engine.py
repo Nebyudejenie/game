@@ -752,6 +752,7 @@ class RoundEngine:
 
     async def _run_running(self) -> None:
         exhausted = False
+        stopped_externally = False
         for idx in range(75):
             if self._status != "running" or not self._lock.is_held():
                 break
@@ -761,7 +762,9 @@ class RoundEngine:
                 await asyncio.sleep(target - now)
             if self._status != "running" or not self._lock.is_held():
                 break
-            await self._call_next_number()
+            if not await self._call_next_number():
+                stopped_externally = True
+                break
             if self._status != "running":
                 break
         else:
@@ -770,6 +773,22 @@ class RoundEngine:
         if self._settlement_task is not None:
             task, self._settlement_task = self._settlement_task, None
             await task
+            return
+
+        if stopped_externally:
+            # Something outside this engine (an admin's emergency stop)
+            # already voided this round and refunded its entrants in the
+            # database -- confirmed by _call_next_number()'s own guard
+            # returning False. This engine's own self._status/round_id
+            # are now stale relative to that; resetting to idle is what
+            # lets run_forever()'s outer loop safely move on (to a fresh
+            # round, or to a real exit if the room was also deactivated)
+            # instead of _run_lobby() being called next with leftover
+            # state from a round that no longer exists in any live sense.
+            logger.info(
+                "run_running_stopped_externally", room_id=self._room.id, round_id=self._round_id
+            )
+            self._reset_to_idle()
             return
 
         if exhausted and self._status == "running":
@@ -806,7 +825,22 @@ class RoundEngine:
         # because the lock is gone, and services/engine/recovery.py voids
         # and refunds this round the next time an engine worker starts.
 
-    async def _call_next_number(self) -> None:
+    async def _call_next_number(self) -> bool:
+        """Returns False if this round has been stopped out from under
+        this engine by something external (an admin's emergency stop is
+        the only real producer of this today) -- detected by piggy-
+        backing on this method's own already-existing per-call UPDATE
+        (no extra round trip): it only actually writes call_index when
+        the row's status is still 'running' at that exact moment,
+        RETURNING confirms whether it did. A plain, unconditional UPDATE
+        here would silently keep advancing a round's call_index after an
+        admin had already voided it -- harmless to the ledger (the
+        refund already happened, and _settle_with_winners()'s own new
+        FOR UPDATE guard is what actually prevents a double-payment
+        regardless of this check), but confusing for any player still
+        watching a "voided" room's screen keep calling numbers as if
+        nothing happened.
+        """
         round_id = self._round_id
         assert round_id is not None
 
@@ -815,9 +849,19 @@ class RoundEngine:
         self._called.add(number)
         metrics.engine_calls_total.inc()
 
-        await self._pool.execute(
-            "UPDATE rounds SET call_index = $1 WHERE id = $2", self._call_index, round_id
+        row = await self._pool.fetchrow(
+            "UPDATE rounds SET call_index = $1 WHERE id = $2 AND status = 'running' "
+            "RETURNING id",
+            self._call_index,
+            round_id,
         )
+        if row is None:
+            logger.info(
+                "call_next_number_stopped_round_no_longer_running",
+                room_id=self._room.id,
+                round_id=round_id,
+            )
+            return False
         await self._publish_room(
             {
                 "t": "call",
@@ -885,6 +929,7 @@ class RoundEngine:
                         user_id=user_id,
                         card_no=card_no,
                     )
+        return True
 
     async def _finalize_after_window(self, deadline: float) -> None:
         remaining = deadline - time.monotonic()
@@ -910,6 +955,48 @@ class RoundEngine:
 
         async with self._pool.acquire() as conn:
             async with conn.transaction():
+                # Launch-readiness audit finding: this transaction used to
+                # go straight to crediting winners with no check that the
+                # round is still actually settleable. refund_round_in_
+                # transaction() (the admin void/emergency-stop path) can
+                # run concurrently against the same round_id from a
+                # completely different process (the admin console, not
+                # this engine) -- without a shared lock, both paths could
+                # commit independently: this one paying out a "winner"
+                # for a round the admin console had *already* refunded
+                # everyone out of moments earlier, a real double-payment
+                # (refunded AND paid) that no application-level check in
+                # either code path alone would ever catch, since neither
+                # one currently looks at what the other already did.
+                # FOR UPDATE serializes the two against Postgres's own
+                # row lock: whichever transaction reaches this row first
+                # commits its terminal state, and the second one to
+                # arrive -- refund_round_in_transaction() already does
+                # exactly this same check -- sees that terminal status
+                # and backs off instead of proceeding. This makes "stop
+                # room" and "settle this round" mutually exclusive by
+                # construction, not by hoping the timing never overlaps.
+                round_row = await conn.fetchrow(
+                    "SELECT status FROM rounds WHERE id = $1 FOR UPDATE", round_id
+                )
+                if round_row is None or round_row["status"] in refunds.TERMINAL_STATUSES:
+                    logger.warning(
+                        "settlement_aborted_round_already_terminal",
+                        room_id=self._room.id,
+                        round_id=round_id,
+                        actual_status=round_row["status"] if round_row else None,
+                    )
+                    # Whoever changed this row (an admin's emergency stop,
+                    # almost certainly) already published its own player-
+                    # facing notification and handled the refund -- this
+                    # engine's only remaining job is to stop believing
+                    # it's still mid-settlement so run_forever()'s own
+                    # loop can move on cleanly (to idle, and from there
+                    # either a fresh round or a real exit if the room was
+                    # also deactivated) instead of sitting stuck at
+                    # "settling" forever with nothing left to advance it.
+                    self._reset_to_idle()
+                    return
                 pot_account = await ledger.get_or_create_account(conn, None, "pot_escrow")
                 house_account = await ledger.get_or_create_account(conn, None, "house_revenue")
 

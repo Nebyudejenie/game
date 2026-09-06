@@ -31,6 +31,14 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     "rounds:void": frozenset({"ops", "superadmin"}),
     "rooms:view": frozenset({"support", "finance", "ops", "superadmin"}),
     "rooms:manage": frozenset({"ops", "superadmin"}),
+    # Narrower than rooms:manage and rounds:void on purpose: this
+    # immediately halts an active, money-bearing round platform-wide for
+    # one room and deactivates it in the same action -- a bigger single
+    # blast radius than either existing permission covers on its own
+    # (rooms:manage never touches an in-flight round's money; rounds:void
+    # never also deactivates the room). Matches payments:configure's own
+    # "single highest-leverage lever" reasoning -- superadmin-only.
+    "rooms:emergency_stop": frozenset({"superadmin"}),
     "reports:view": frozenset({"finance", "superadmin"}),
     "audit:view": frozenset({"superadmin"}),
     "payments:view": frozenset({"support", "finance", "ops", "superadmin"}),

@@ -8,6 +8,7 @@ console included (spec section 26/34: "no hidden god mode").
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -23,7 +24,7 @@ from packages.core.phone_crypto import decrypt_phone, phone_lookup_hash
 from packages.core.referrals import maybe_grant_referral_bonus, maybe_grant_welcome_bonus
 from services.admin import audit, auth, rbac
 from services.bot.phone import normalize_ethiopian_phone
-from services.engine.refunds import refund_round_in_transaction
+from services.engine.refunds import TERMINAL_STATUSES, refund_round_in_transaction
 from services.payments.withdrawals import enqueue_payout
 
 
@@ -579,6 +580,195 @@ async def void_round_admin(
         if refunded_count:
             metrics.ledger_transactions_total.labels(kind="refund").inc(refunded_count)
     return bool(refunded_count)
+
+
+# The literal confirmation an admin must type/send back before this
+# actually executes -- same shape as packages.core.responsible_gaming
+# .SELF_EXCLUDE_CONFIRMATION_TOKEN, which this codebase already uses for
+# exactly this reasoning: a real financial/game-integrity action must not
+# be triggerable by a single accidental click or an automated retry with
+# no human confirmation in the loop.
+STOP_ROOM_CONFIRMATION_TOKEN = "STOP"
+
+
+async def get_room_stop_preview_admin(pool: asyncpg.Pool, room_id: int) -> dict[str, Any] | None:
+    """Everything the admin console's confirmation dialog needs to show
+    before an operator commits to stopping a room -- current round,
+    player count, and real staked amount, not a guess. Returns None if
+    the room doesn't exist.
+    """
+    room = await pool.fetchrow("SELECT id, code, is_active FROM rooms WHERE id = $1", room_id)
+    if room is None:
+        return None
+
+    round_row = await pool.fetchrow(
+        "SELECT id, status, pot, seq FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1",
+        room_id,
+    )
+    has_active_round = round_row is not None and round_row["status"] not in TERMINAL_STATUSES
+    player_count = 0
+    if has_active_round:
+        assert round_row is not None
+        player_count = await pool.fetchval(
+            "SELECT count(*) FROM round_entries WHERE round_id = $1", round_row["id"]
+        )
+
+    return {
+        "room_id": room["id"],
+        "room_code": room["code"],
+        "room_is_active": room["is_active"],
+        "current_round_id": round_row["id"] if round_row else None,
+        "current_round_status": round_row["status"] if round_row else None,
+        "has_stoppable_round": has_active_round,
+        "players": player_count,
+        "staked_amount": str(round_row["pot"]) if has_active_round and round_row else "0.00",
+    }
+
+
+async def stop_room_admin(
+    pool: asyncpg.Pool,
+    redis: Redis,
+    *,
+    admin_id: int,
+    room_id: int,
+    reason: str,
+    confirmation: str,
+    ip_address: str | None,
+) -> dict[str, Any]:
+    """The emergency single-room stop. Reuses the exact same financial
+    primitive void_round_admin() above already relies on
+    (refund_round_in_transaction()) rather than inventing a second
+    refund code path -- the only genuinely new things here are: finding
+    the room's *current* round rather than requiring the caller to
+    already know its id, bundling rooms.is_active=false into the same
+    transaction (so the room can't be re-claimed and start a fresh round
+    right after), and a stricter, explicit confirmation token on top of
+    the reason (this stops an entire room, not one already-decided
+    round -- a real product-owner reasoning captured in DECISIONS.md
+    when this action was scoped).
+
+    Safe against every race this needs to be safe against by
+    construction, not by hoping the timing works out: refund_round_in_
+    transaction() already does its own `SELECT ... FOR UPDATE` before
+    touching the round, and RoundEngine._settle_with_winners() (services/
+    engine/round_engine.py) now does the identical FOR UPDATE + terminal-
+    status check before ever crediting a winner -- whichever transaction
+    (this one, or the engine's own settlement) reaches the row first
+    commits the round's real terminal outcome; the other one sees that
+    and safely no-ops. A second call for an already-stopped room is
+    exactly this same no-op path, not a special case.
+    """
+    if confirmation.strip().upper() != STOP_ROOM_CONFIRMATION_TOKEN:
+        raise ValueError(
+            f"confirmation must be exactly {STOP_ROOM_CONFIRMATION_TOKEN!r} to stop a room"
+        )
+    if not reason.strip():
+        raise ValueError("reason is required")
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            room = await conn.fetchrow(
+                "SELECT id, code, is_active FROM rooms WHERE id = $1 FOR UPDATE", room_id
+            )
+            if room is None:
+                raise ValueError(f"no such room: {room_id}")
+
+            round_row = await conn.fetchrow(
+                "SELECT id, status FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1",
+                room_id,
+            )
+            refunded_user_ids: list[int] = []
+            refunded_count = 0
+            stopped_round_id: int | None = None
+            if round_row is not None:
+                stopped_round_id = round_row["id"]
+                # Read who's actually in it *before* refunding -- the
+                # refund doesn't delete round_entries (nothing in this
+                # codebase ever deletes a player's entry, per the "no
+                # deleting player entries" rule this action must respect
+                # too), but reading it up front here keeps this query
+                # right next to the action it's informing, not scattered.
+                refunded_user_ids = [
+                    r["user_id"]
+                    for r in await conn.fetch(
+                        "SELECT DISTINCT user_id FROM round_entries WHERE round_id = $1",
+                        round_row["id"],
+                    )
+                ]
+                refunded_count = await refund_round_in_transaction(
+                    conn, round_row["id"], reason=f"admin_emergency_stop: {reason}"
+                )
+
+            await conn.execute("UPDATE rooms SET is_active = false WHERE id = $1", room_id)
+
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="rooms.emergency_stop",
+                target_type="room",
+                target_id=str(room_id),
+                before={
+                    "room_is_active": room["is_active"],
+                    "round_id": stopped_round_id,
+                    "round_status": round_row["status"] if round_row else None,
+                },
+                after={
+                    "room_is_active": False,
+                    "round_id": stopped_round_id,
+                    "refunded_entrants": refunded_count,
+                },
+                reason=reason,
+                ip_address=ip_address,
+            )
+
+        # Only reachable once the transaction above has actually
+        # committed -- same reasoning void_round_admin() already
+        # documents for its own identical metrics-after-commit placement.
+        if refunded_count:
+            metrics.ledger_transactions_total.labels(kind="refund").inc(refunded_count)
+
+    # Player-facing notification, deliberately sent only after the
+    # transaction above has committed for real -- "never promise a
+    # refund before the ledger confirms it" applies here exactly as much
+    # as it does to any other financial message this codebase sends.
+    if stopped_round_id is not None and refunded_user_ids:
+        room_stake = await pool.fetchval("SELECT stake FROM rooms WHERE id = $1", room_id)
+        await asyncio.gather(
+            *(
+                ledger.publish_balance_update(pool, redis, user_id)
+                for user_id in refunded_user_ids
+            )
+        )
+        await asyncio.gather(
+            *(
+                notify_user(
+                    pool,
+                    redis,
+                    user_id=user_id,
+                    key="notify.room_emergency_stopped",
+                    amount=str(room_stake),
+                    reference=f"room-stop-{stopped_round_id}",
+                )
+                for user_id in refunded_user_ids
+            )
+        )
+        await redis.publish(
+            f"room:{room_id}",
+            json.dumps(
+                {
+                    "t": "round_voided",
+                    "round_id": stopped_round_id,
+                    "reason": "admin_emergency_stop",
+                }
+            ),
+        )
+
+    return {
+        "room_id": room_id,
+        "stopped_round_id": stopped_round_id,
+        "refunded_entrants": refunded_count,
+        "room_deactivated": True,
+    }
 
 
 async def list_rooms(pool: asyncpg.Pool) -> list[dict[str, Any]]:

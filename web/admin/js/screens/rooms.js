@@ -79,6 +79,7 @@ export async function render(container) {
               <td>
                 <button class="btn btn-secondary btn-sm edit-room-btn">Edit</button>
                 <button class="btn btn-secondary btn-sm toggle-active-btn">${r.is_active ? "Deactivate" : "Activate"}</button>
+                <button class="btn btn-danger btn-sm stop-room-btn">Stop room</button>
               </td>
             </tr>
           `).join("")}
@@ -91,6 +92,7 @@ export async function render(container) {
       const isActive = row.querySelector(".toggle-active-btn").textContent.trim() === "Deactivate";
       row.querySelector(".toggle-active-btn").addEventListener("click", () => toggleActive(roomId, isActive));
       row.querySelector(".edit-room-btn").addEventListener("click", () => openEditForm(roomId));
+      row.querySelector(".stop-room-btn").addEventListener("click", () => openStopRoomPanel(roomId));
     }
   }
 
@@ -129,6 +131,84 @@ export async function render(container) {
     panel.querySelector("#edit-room-form").addEventListener("submit", (event) => {
       event.preventDefault();
       saveRoomEdit(roomId, room, event.target);
+    });
+  }
+
+  async function openStopRoomPanel(roomId) {
+    const room = roomsById.get(roomId);
+    const panel = listEl.querySelector("#room-edit-panel");
+    panel.innerHTML = `<p class="loading">Loading current room state…</p>`;
+    let preview;
+    try {
+      preview = await api(`/rooms/${roomId}/stop-preview`);
+    } catch (err) {
+      renderError(panel, err);
+      return;
+    }
+
+    // Real financial consequence, not a guess -- shown before the admin
+    // can commit to anything. An idle room with nothing staked gets a
+    // plainly different message than an active, money-bearing round.
+    const consequence = preview.has_stoppable_round
+      ? `This will immediately end round #${preview.current_round_id} and refund ` +
+        `${preview.staked_amount} ETB in staked funds to ${preview.players} player(s). ` +
+        `The room will also be deactivated so it cannot restart automatically.`
+      : `This room has no active round right now -- nothing to refund. ` +
+        `The room will be deactivated so it cannot start a new round.`;
+
+    panel.innerHTML = `
+      <form id="stop-room-form" class="detail-panel">
+        <h2>Stop room #${roomId} (${escapeHtml(preview.room_code)})</h2>
+        <div class="detail-grid">
+          <div>Current round: <strong>${preview.current_round_id ?? "none"}</strong></div>
+          <div>Current state: <strong>${escapeHtml(preview.current_round_status ?? "idle")}</strong></div>
+          <div>Players: <strong>${preview.players}</strong></div>
+          <div>Staked: <strong>${preview.staked_amount} ETB</strong></div>
+        </div>
+        <p class="warning-text">${escapeHtml(consequence)}</p>
+        <label>Reason (required)
+          <input type="text" name="reason" required placeholder="e.g. suspected exploit, safety incident" />
+        </label>
+        <label>Type STOP to confirm
+          <input type="text" name="confirmation" required placeholder="STOP" autocomplete="off" />
+        </label>
+        <div class="action-row">
+          <button type="button" class="btn btn-secondary" id="cancel-stop-btn">Cancel</button>
+          <button type="submit" class="btn btn-danger">STOP ROOM</button>
+        </div>
+      </form>
+    `;
+    panel.querySelector("#cancel-stop-btn").addEventListener("click", () => {
+      panel.innerHTML = "";
+    });
+    panel.querySelector("#stop-room-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = new FormData(event.target);
+      const reason = String(data.get("reason") || "").trim();
+      const confirmation = String(data.get("confirmation") || "").trim();
+      if (!reason) {
+        toast("A reason is required.", true);
+        return;
+      }
+      if (confirmation.toUpperCase() !== "STOP") {
+        toast('Type "STOP" exactly to confirm.', true);
+        return;
+      }
+      try {
+        const result = await api(`/rooms/${roomId}/stop`, {
+          method: "POST",
+          body: { reason, confirmation },
+        });
+        toast(
+          result.stopped_round_id
+            ? `Room stopped. Round #${result.stopped_round_id} refunded (${result.refunded_entrants} player(s)).`
+            : "Room stopped. No active round to refund."
+        );
+        panel.innerHTML = "";
+        reload();
+      } catch (err) {
+        toast(err.detail || err.message, true);
+      }
     });
   }
 
