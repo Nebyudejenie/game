@@ -41,7 +41,7 @@ when, to whom" already exist and are already used this way in
 | New deposits (any rail) | `payment_provider_availability` toggle (admin console → Provider Availability, superadmin, `payments:configure`) | Immediate for new attempts | Doesn't affect in-flight Telebirr SMS ingestion, which keeps accumulating evidence safely even while redemption is off. |
 | Telebirr specifically | Same toggle, `telebirr_sms` | Immediate | Currently OFF by default pending the real controlled test — see `docs/FINAL_HUMAN_ACTIONS.md` item 9. |
 | Withdrawals | Same toggle mechanism, withdrawal rail | Immediate for new requests | Already-approved payouts already in flight through the worker are not retroactively stopped. |
-| A specific Bingo room | `PATCH /rooms/{id}` with `{"is_active": false}` (`rooms:manage`) | **Partial, not immediate** — `RoundEngine` never reads `is_active` itself; only `EngineWorker.run_active_rooms()`'s *next room claim* consults it. Setting this stops the room from being *re-claimed* after its current engine naturally stops (crash, restart, or the round reaching a terminal state and the worker cycling) — it does **not** halt an in-flight round immediately. | **Real gap, not a launch blocker**: there is no single-room "stop this round right now" admin action today. To force an immediate stop: restart the `engine` container (stops every room's engine at once, not just one) after setting `is_active=false` for the target room so it doesn't get re-claimed on restart. Flagged here rather than silently assumed to be instant. |
+| A specific Bingo room | `PATCH /rooms/{id}` with `{"is_active": false}` (`rooms:manage`) | **Partial, not immediate** — `RoundEngine` never reads `is_active` itself; only `EngineWorker.run_active_rooms()`'s *next room claim* consults it. Setting this stops the room from being *re-claimed* after its current engine naturally stops — it does **not** halt an in-flight round. **Confirmed by direct code read, not assumed**: even calling the engine's own `stop()` cooperative mechanism directly would not help either — `_run_running()`'s active number-calling loop (`round_engine.py:753-768`) checks `self._status` and the room lock on every iteration, but never checks `self._stop_requested` at all. `stop()` only takes effect between rounds (it's what the outer `run_forever()` loop checks), never mid-round. | **Real, confirmed gap, not a launch blocker**: no mechanism in this codebase — cooperative or otherwise, short of restarting the whole `engine` container — can halt one specific in-flight round immediately. See "Single-Room Emergency Stop — design" below for what would actually need to change, not built this pass. |
 | All Bingo activity | Restart the `engine` container | Immediate, but stops every room, not one | Every in-flight round's state is Postgres-durable — `recover_orphaned_rounds()` handles the restart cleanly, refunding rather than losing anything mid-round. |
 | A specific bonus rule | Deactivate the rule (Bonuses & Referrals screen, `bonuses:manage_rules`) | Immediate for new grants | Existing grants already posted to the ledger are unaffected — correct, since they're already-settled real transactions. |
 | Promotions broadly | No single global switch — deactivate each active rule individually | N/A | There is no "pause all promotions" button; this is a real, minor gap, not urgent given bonus rules are few and individually toggleable. |
@@ -55,15 +55,46 @@ Every kill switch that goes through the admin console is automatically
 audited (`admin_audit_log`, append-only, DB-trigger-enforced no
 UPDATE/DELETE) — no emergency action taken this way is silent.
 
-## The one real gap worth fixing before it's needed
+## Single-Room Emergency Stop — design (not built this pass)
 
-**No immediate single-room stop.** If a specific room needs to halt
-*right now* (a discovered exploit, a runaway bug affecting one room's
-state), the only lever that's actually instant affects *every* room at
-once (restarting the `engine` container). This is a real, scoped,
-buildable improvement (an admin action that signals one `RoundEngine`'s
-existing `stop()` cooperative mechanism directly, the same one
-`EngineWorker.shutdown()` already uses per-engine) — flagged here as a
-finding from this audit, not built during it, since this pass is in
-launch-verification mode, not feature-building mode. If launch operators
-consider this a real near-term risk, it's a small, well-scoped follow-up.
+**Confirmed gap**: if a specific room needs to halt *right now* (a
+discovered exploit, a runaway bug affecting one room's state), the only
+lever that's actually instant affects *every* room at once (restarting
+the `engine` container). The existing `stop()` cooperative mechanism —
+correct and sufficient for "don't start another round after this one" —
+does not reach into an *active* round's own number-calling loop at all
+(see the table row above). A real fix needs `_run_running()` (and,
+for completeness, `_run_lobby()`'s already-checked path) to observe a
+new, per-room "abort now" signal mid-loop, then safely void and refund
+the in-flight round through the *existing*, already-tested
+`refunds.py::refund_round(pool, round_id, reason=...)` — never a raw
+database flag flip, per this design's own non-negotiable rule.
+
+**Why this isn't built in this pass**: `round_engine.py` is the single
+highest-stakes file in this codebase (real player money, the core game
+loop). Adding a new interrupt path to its active-round loop, correctly
+handling every phase (lobby/running/settling) and proving real refund
+correctness under real concurrency, deserves the same dedicated,
+unhurried test discipline every other change to this file has received
+all session — not a rushed addition at the tail of an already very large
+pass. Rushing it here would be the same mistake this whole engagement has
+repeatedly refused to make elsewhere (see `DECISIONS.md`'s own many
+examples of slowing down for exactly this file).
+
+**Requirements for the real implementation** (from the directive that
+requested it):
+
+| Requirement | How it should work |
+|---|---|
+| Reason required | New endpoint's request body requires a non-empty `reason: str` — mirrors `refund_round()`'s own existing `reason` parameter, which already flows into the refund's ledger memo. |
+| Confirmation required | Mirror the existing `/limits selfexclude confirm` pattern (`packages/core/responsible_gaming.py::SELF_EXCLUDE_CONFIRMATION_TOKEN`) — require a literal confirmation token in the request, not just a non-empty reason, so this can't be triggered by an automated retry or a careless client. |
+| Authorization required | A new, narrowly-scoped permission (e.g. `rooms:emergency_stop`), superadmin-only or ops+superadmin at most — following `payments:configure`'s own "single highest-leverage lever" precedent, not the broader `rooms:manage`. |
+| Audit event | `audit.record()`, the same mechanism every other admin mutation in this codebase already uses — no exception for this one. |
+| Player handling | Every player in the aborted round sees a real, explained state transition (matching the existing "why did this happen" UX pattern already used for underfilled-lobby voids), not a silent disconnect. |
+| Financial handling | Route through `refunds.py::refund_round()` unchanged — idempotent, ledger-backed, already tested. Never a new, parallel refund code path. |
+| Room isolation | The new abort signal must be scoped to exactly one `RoundEngine` instance (a per-engine flag, not a process-wide one) — confirmed straightforward given `EngineWorker` already holds `self._engines: dict[int, RoundEngine]` keyed by room id. |
+| Never an unsafe DB-only flag | The fix must live in the engine's own loop condition, not a cron/poller that flips `rooms.is_active` and hopes the engine notices — that's exactly today's *existing*, confirmed-too-slow gap, not a fix for it. |
+
+This is real, scoped, and buildable — just not rushed. Recommended as the
+first item of follow-up work once the actual launch blockers
+(`docs/LAUNCH_BLOCKERS.md`) are cleared.
