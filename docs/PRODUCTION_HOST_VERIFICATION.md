@@ -12,6 +12,14 @@ incident ticket, wherever this team already keeps operational records).
 Each row: the command, what a healthy result looks like, what a bad
 result means, and the fix.
 
+**Evidence to capture, for every single row below, no exceptions**: the
+complete real stdout/stderr of the command as actually run, with a
+timestamp — not a paraphrase, not "looked fine," not a memory of having
+run it. Paste it into this file's own "Last confirmed" table at the
+bottom (or an incident ticket, whichever this team already uses) next to
+the row it verifies. A row with no captured evidence has not been
+verified, regardless of what anyone recalls.
+
 ## 1. Host identity and reachability
 
 | Command | Expected | Failure meaning | Remediation |

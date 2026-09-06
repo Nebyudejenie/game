@@ -6,6 +6,7 @@ import asyncio
 from decimal import Decimal
 
 import pytest
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from services.engine import commands
 from services.engine.commands import CommandTimeout
@@ -30,6 +31,58 @@ async def test_join_command_reaches_the_owning_engine(pool, redis, card_pool, co
         await wait_until(lambda: engine.is_lock_held(), timeout=5)
         p1 = await create_funded_user(conn)
 
+        result = await commands.send_command(redis, room_id, "join", p1, {"card_no": 5})
+        assert result.ok is True
+        assert engine.player_count() == 1
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
+class _RedisFailsXreadOnce:
+    """Wraps a real Redis client but makes the first xread() call raise a
+    connection error, then delegates every call (including subsequent
+    xread()s) to the real client -- simulates one transient Redis blip
+    during _serve_commands()'s own polling loop.
+    """
+
+    def __init__(self, real_redis):
+        self._real = real_redis
+        self._xread_calls = 0
+
+    async def xread(self, *args, **kwargs):
+        self._xread_calls += 1
+        if self._xread_calls == 1:
+            raise RedisConnectionError("simulated transient Redis blip")
+        return await self._real.xread(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+async def test_serve_commands_survives_one_transient_redis_error(pool, redis, card_pool, conn):
+    """Launch-readiness audit finding: _serve_commands() previously had no
+    exception handling of its own around its xread() call -- unlike every
+    periodic sweep elsewhere in this codebase, an uncaught Redis error here
+    didn't just skip one tick, it permanently killed the task for the rest
+    of this engine's lifetime (this loop is started once per run_forever()
+    call, not once per round), silently disabling every player command for
+    the room until the whole engine cycled. Proves the fix: one transient
+    error is logged and retried, not fatal -- a command sent shortly after
+    still reaches the engine.
+    """
+    room_id = await create_room(conn, stake=Decimal("10.00"), min_players=2)
+    room = await load_room_config(pool, room_id)
+    flaky_redis = _RedisFailsXreadOnce(redis)
+    engine = RoundEngine(pool, flaky_redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        await wait_until(lambda: engine.is_lock_held(), timeout=5)
+        p1 = await create_funded_user(conn)
+
+        # The real redis client (not the flaky wrapper) is what actually
+        # sends the command onto the stream -- send_command() only needs
+        # xadd/pubsub, which _RedisFailsXreadOnce proxies unchanged.
         result = await commands.send_command(redis, room_id, "join", p1, {"card_no": 5})
         assert result.ok is True
         assert engine.player_count() == 1

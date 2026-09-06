@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 import asyncpg
+import redis.exceptions
 import structlog
 from redis.asyncio import Redis
 
@@ -1094,9 +1095,45 @@ class RoundEngine:
 
     async def _serve_commands(self) -> None:
         stream = commands.stream_key(self._room.id)
-        last_id = "$"  # only entries added from this moment on
+        # Resolved to a real, concrete stream id exactly once, up front --
+        # deliberately NOT the special "$" sentinel re-used on every loop
+        # iteration. "$" means "only entries added after *this exact call*
+        # resolves it", so retrying a failed read with "$" again would
+        # silently skip anything added during the retry's own backoff
+        # window. A one-off xrevrange() peek converts "start from now"
+        # into a fixed id before the loop ever begins; every iteration
+        # after that (success or error-retry alike) advances from a real
+        # id, never re-resolving "now" a second time.
+        tail = await self._redis.xrevrange(stream, count=1)
+        last_id: str
+        if tail:
+            resolved_id, _fields = tail[0]
+            assert resolved_id is not None
+            last_id = resolved_id if isinstance(resolved_id, str) else resolved_id.decode()
+        else:
+            last_id = "0"
         while True:
-            response = await self._redis.xread({stream: last_id}, block=1000, count=20)
+            try:
+                response = await self._redis.xread({stream: last_id}, block=1000, count=20)
+            except redis.exceptions.RedisError:
+                # A launch-readiness audit found this loop had no defense
+                # of its own against a transient Redis error -- unlike
+                # every periodic sweep elsewhere in this codebase (payout
+                # worker's _run_periodic_sweep, campaign_worker's
+                # run_forever), an uncaught exception here doesn't just
+                # skip one tick, it permanently kills this task for the
+                # entire remaining lifetime of this engine (this method is
+                # only ever started once per run_forever() call, not once
+                # per round) -- silently disabling join/claim/drop_card/
+                # set_auto for this room until the whole engine cycles.
+                # Log and retry after a short backoff instead, the same
+                # "one bad tick must not kill the loop" principle applied
+                # everywhere else Redis is polled on a timer. Retrying
+                # with the same last_id (not "$") is exactly what makes
+                # this safe -- see the comment above.
+                logger.warning("serve_commands_redis_error_retrying", room_id=self._room.id)
+                await asyncio.sleep(1.0)
+                continue
             if not response:
                 continue
             # Plain xread() (no consumer group) always returns this shape;

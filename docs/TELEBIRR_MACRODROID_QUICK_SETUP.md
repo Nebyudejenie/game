@@ -115,6 +115,48 @@ own verification. Sending anything less will fail.
 | HTTP 503 | The server isn't configured to accept ingestion right now. | Tell an admin — this is a server-side configuration issue, not something fixable on the phone. |
 | No response / timeout | Network issue on the phone, or the server is unreachable. | Check the phone's own internet connection first; if that's fine, tell whoever manages deployment the server may be down. |
 
+## Retry on a failed request
+
+If the HTTP Request action fails (no response, a timeout, or a non-200
+your own network caused rather than the server rejecting the content),
+the SMS itself is **not lost** — it stays in the phone's normal SMS
+inbox like any other message; only the *forward-to-server* step failed.
+MacroDroid's HTTP Request action has its own retry/timeout settings
+(exact wording varies by MacroDroid version — look for "Timeout" and any
+retry-count option in the action's own advanced settings when building
+Step 2) — enable a short retry there if available. Whether or not an
+automatic retry is configured, treat a "No response / timeout" result
+(see the table above) as something to physically check on, not silently
+ignore: if the server was briefly unreachable, the specific SMS that
+failed may need a manual re-trigger (MacroDroid can usually re-run a
+macro against a stored/older SMS, or the message can be manually
+forwarded through the same macro once — check MacroDroid's own
+documentation for "re-run macro" / "test with existing message" if this
+comes up).
+
+## Reboot survival
+
+After any phone restart (a real reboot, not just screen lock/unlock),
+explicitly verify the macro is still armed **before** trusting the phone
+again — don't assume it:
+
+1. Reboot the phone.
+2. Open MacroDroid and confirm the macro's own toggle (Step 2's last
+   line) is still **ON**. If MacroDroid failed to auto-start at all
+   (rare, but possible if the Autostart/Auto-launch permission from Step
+   1.7 didn't take effect), the toggle may show ON but nothing will
+   actually fire — open the app itself at least once after every reboot
+   to be sure it's genuinely running, not just configured to.
+3. Send one real or test-format SMS and confirm the macro fires
+   (Step 3's own test procedure) — this is the only way to be certain
+   the phone is actually working again after a reboot, not an assumption
+   from the toggle state alone.
+
+Add this check to whatever routine covers "what to do after this phone
+loses power or restarts" — a phone that silently stopped forwarding SMS
+after a reboot is indistinguishable from a working one until someone
+checks.
+
 ## Ongoing care
 
 - Keep the phone charging at all times.
@@ -122,6 +164,7 @@ own verification. Sending anything less will fail.
   prompts affecting MacroDroid.
 - After any Android system update, re-check Step 1.6/1.7 (OS updates
   sometimes silently re-enable battery restrictions).
+- After any reboot, walk the "Reboot survival" checklist above.
 - If the phone will be replaced or the SIM moved to a new device, repeat
   this entire guide on the new phone before decommissioning the old one.
 - If the phone is lost or the token may have leaked, **stop** — do not

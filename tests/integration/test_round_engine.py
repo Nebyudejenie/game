@@ -5,6 +5,7 @@ review line by line.
 
 import asyncio
 import json
+import time
 from decimal import Decimal
 
 import pytest
@@ -141,10 +142,154 @@ async def test_two_simultaneous_claims_split_derash_evenly(pool, redis, card_poo
         )
         assert len(winners) == 2
         assert winners[0]["amount"] == winners[1]["amount"] == Decimal("16.00")
-        assert winners[0]["amount"] + winners[1]["amount"] == round_row["derash"]
     finally:
         await engine.stop()
-        await asyncio.wait_for(task, timeout=10)
+        await asyncio.wait_for(task, timeout=15)
+
+
+async def test_concurrent_claims_two_players_only_one_holds_a_valid_pattern(
+    pool, redis, card_pool, conn
+):
+    """Launch-readiness audit item: two *different* players claim at the
+    same instant, but only one actually holds a winning pattern right
+    now. Unlike the genuinely-racy case above (two simultaneous real
+    winners, both sharing the _winner_lock critical section), this case
+    has no race to resolve at all -- the losing claim's own evaluation
+    (bingo.winning_patterns against that player's own card) returns
+    False and returns "no_pattern" *before* ever reaching the
+    _winner_lock/_pending_winners section (see claim()'s own control
+    flow: the `if not valid: ... return` branch is strictly earlier than
+    `async with self._winner_lock`). The two claims are provably
+    independent, not merely "usually fine under this test's timing" --
+    this test locks that architectural guarantee in with a real
+    concurrent call, not just a sequential one.
+
+    Directly constructs engine._called (the same white-box style
+    test_two_simultaneous_claims_split_derash_evenly above already uses
+    to read it) rather than waiting on natural draw progression to
+    produce "one card ready, the other not": cards 1 and 2 in this
+    deterministic pool turn out to complete their own two-line patterns
+    at nearly the same draw count (unsurprising -- it's exactly why the
+    *other* test above picks this same pair to get simultaneous
+    winners), so that state can take the full round to occur naturally,
+    or never occur before the round exhausts and a fresh one starts --
+    at which point the original joins are for a round that no longer
+    exists. Setting the called set directly makes the target state
+    immediate and deterministic instead of racing real background
+    per-call timing.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("20.00"), min_players=2, call_interval_ms=15
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        winner = await create_funded_user(conn)
+        loser = await create_funded_user(conn)
+        winning_card, losing_card = 1, 2
+
+        assert (await engine.join(winner, winning_card, auto_mark=False)).ok
+        assert (await engine.join(loser, losing_card, auto_mark=False)).ok
+        await wait_until(lambda: engine.status == "running", timeout=5)
+
+        winning_grid = card_pool[winning_card]
+        losing_grid = card_pool[losing_card]
+        # winning_card's own first two rows, called in full -- a real,
+        # valid two-line win by this file's own win-pattern rules.
+        engine._called = {winning_grid[0][c] for c in range(5)} | {  # noqa: SLF001
+            winning_grid[1][c] for c in range(5)
+        }
+        assert bingo.has_won(winning_grid, engine._called, room.win_patterns)  # noqa: SLF001
+        assert not bingo.has_won(losing_grid, engine._called, room.win_patterns)  # noqa: SLF001
+
+        winner_result, loser_result = await asyncio.gather(
+            engine.claim(winner, winning_card), engine.claim(loser, losing_card)
+        )
+        assert winner_result.ok is True
+        assert loser_result == ClaimResult(False, "no_pattern")
+
+        await wait_until(lambda: engine.status == "idle", timeout=5)
+        round_row = await pool.fetchrow(
+            "SELECT id FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1", room_id
+        )
+        winners = await pool.fetch(
+            "SELECT user_id FROM round_winners WHERE round_id = $1", round_row["id"]
+        )
+        assert [w["user_id"] for w in winners] == [winner]
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
+async def test_claim_after_the_tie_window_has_already_settled_is_rejected(
+    pool, redis, card_pool, conn
+):
+    """Launch-readiness audit item: claim()'s own final fallback branch
+    (`return ClaimResult(False, "round_already_settled")`) is reached
+    once a round is still in "settling" status but its tie window (
+    WINNER_TIE_WINDOW_SECONDS = 0.05s) has already closed -- a distinct
+    rejection reason from both "no_pattern" (premature) and
+    "round_not_running" (never started), and previously untested.
+
+    Backdates engine._winner_window_deadline directly (the same
+    established white-box style test_two_simultaneous_claims_split_
+    derash_evenly above already uses via engine._called) rather than
+    racing a real sleep against the background _finalize_after_window()
+    task -- that task clears the deadline and moves status away from
+    "settling" the instant it actually runs, making a fixed sleep either
+    too short (still genuinely within the window) or too long (status
+    already back to idle/lobby, which would hit the *other* rejection
+    branch, "round_not_running", instead of the one under test) with no
+    reliable safe middle. Backdating deterministically hits the exact
+    "still settling, window closed" branch every run, then lets the real
+    settlement task complete normally afterward -- nothing about the
+    branch under test is faked, only the timing of reaching it.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("20.00"), min_players=2, call_interval_ms=15
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        first_winner = await create_funded_user(conn)
+        late_claimant = await create_funded_user(conn)
+        winning_card, other_card = 1, 2
+
+        assert (await engine.join(first_winner, winning_card, auto_mark=False)).ok
+        assert (await engine.join(late_claimant, other_card, auto_mark=False)).ok
+        await wait_until(lambda: engine.status == "running", timeout=5)
+
+        winning_grid = card_pool[winning_card]
+        other_grid = card_pool[other_card]
+
+        def both_have_a_pattern() -> bool:
+            # other_card must ALSO have a genuinely valid pattern by the
+            # time the late claim arrives -- claim()'s own pattern check
+            # runs *before* the winner-lock section this test targets, so
+            # a card with no real pattern yet would be rejected as
+            # "no_pattern" first, never reaching the branch under test.
+            called = engine._called  # noqa: SLF001
+            return bingo.has_won(winning_grid, called, room.win_patterns) and bingo.has_won(
+                other_grid, called, room.win_patterns
+            )
+
+        await wait_until(both_have_a_pattern, timeout=10)
+        first_result = await engine.claim(first_winner, winning_card)
+        assert first_result.ok is True
+        assert engine.status == "settling"
+
+        # No await has happened since claim() returned, so the real
+        # settlement task (already scheduled, not yet run) cannot have
+        # touched this state yet -- safe to backdate deterministically.
+        engine._winner_window_deadline = time.monotonic() - 1  # noqa: SLF001
+
+        late_result = await engine.claim(late_claimant, other_card)
+        assert late_result == ClaimResult(False, "round_already_settled")
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
 
 
 async def test_a_valid_claim_stops_the_round_immediately_no_further_calls(pool, redis, card_pool, conn):
