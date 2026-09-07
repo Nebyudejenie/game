@@ -1,5 +1,6 @@
 import { getToken, clearToken, getRole, clearRole, api, ApiError } from "./api.js";
 import { renderError } from "./ui.js";
+import { initGlobalSearch } from "./global_search.js";
 import * as loginScreen from "./screens/login.js";
 import * as dashboardScreen from "./screens/dashboard.js";
 import * as usersScreen from "./screens/users.js";
@@ -139,6 +140,8 @@ function showLogin() {
 }
 
 window.addEventListener("admin:unauthorized", showLogin);
+
+initGlobalSearch(showScreen);
 
 if (getToken()) {
   showApp();

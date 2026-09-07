@@ -32,6 +32,8 @@ from services.admin import (
     command_registry_queries,
     notification_queries,
     queries,
+    search_queries,
+    system_health,
     telegram_diagnostics,
 )
 from services.admin.auth import AdminSession
@@ -216,6 +218,41 @@ async def logout(
 @app.get("/dashboard")
 async def dashboard(admin: Annotated[AdminSession, Depends(require("dashboard:view"))]) -> dict[str, Any]:
     return await queries.dashboard_summary(app.state.pool)
+
+
+@app.get("/system-health")
+async def system_health_check(
+    admin: Annotated[AdminSession, Depends(require("dashboard:view"))],
+) -> list[dict[str, str]]:
+    """Same permission as the dashboard itself -- this is the top status
+    bar the dashboard renders, not a separate, more sensitive capability.
+    Every check here is a real, live probe (services/admin/system_health
+    .py's own docstring lists exactly what is and isn't covered) -- never
+    a cached or decorative value.
+    """
+    settings = get_settings()
+    checks = await system_health.run_all_checks(
+        app.state.pool, app.state.redis, bot_token=settings.telegram_bot_token
+    )
+    return [{"name": c.name, "status": c.status, "why": c.why} for c in checks]
+
+
+# --- global search -------------------------------------------------------
+
+
+@app.get("/search")
+async def global_search(
+    admin: Annotated[AdminSession, Depends(current_admin)], q: str
+) -> dict[str, list[dict[str, Any]]]:
+    """No specific permission dependency -- every authenticated admin can
+    call this endpoint, but search_queries.global_search() only includes
+    a category (users, payments, audit, ...) if admin.role already holds
+    that category's own existing view permission, so what's returned is
+    already exactly what that role could see by visiting each underlying
+    screen directly. Never a broader result set than the role's real
+    access.
+    """
+    return await search_queries.global_search(app.state.pool, query=q, role=admin.role)
 
 
 # --- users -------------------------------------------------------------

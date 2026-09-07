@@ -1,11 +1,15 @@
-import { api } from "../api.js";
+import { api, escapeHtml } from "../api.js";
 
 export const label = "Dashboard";
+
+const HEALTH_BADGE = { green: "active", amber: "review", red: "banned", unknown: "expired" };
+const HEALTH_LABEL = { database: "Database", redis: "Redis", telegram: "Telegram", bingo: "Bingo" };
 
 export async function render(container) {
   const data = await api("/dashboard");
   container.innerHTML = `
     <h1>Dashboard</h1>
+    <div id="system-health-row"><p class="loading">Checking system health…</p></div>
     <div class="stat-grid">
       <div class="stat-card">
         <div class="stat-label">Active rounds</div>
@@ -33,4 +37,20 @@ export async function render(container) {
       </div>
     </div>
   `;
+
+  const healthEl = container.querySelector("#system-health-row");
+  try {
+    const checks = await api("/system-health");
+    healthEl.innerHTML = `
+      <div class="detail-grid" style="margin-bottom:1rem">
+        ${checks.map((c) => `
+          <div title="${escapeHtml(c.why)}">
+            <span class="badge badge-${HEALTH_BADGE[c.status] || "expired"}">${HEALTH_LABEL[c.name] || escapeHtml(c.name)}</span>
+          </div>
+        `).join("")}
+      </div>
+    `;
+  } catch {
+    healthEl.innerHTML = `<p class="empty">System health check unavailable.</p>`;
+  }
 }

@@ -59,6 +59,29 @@ async def test_admin_console_login_and_dashboard_load(admin_server, pool, browse
     await page.close()
 
 
+async def test_admin_console_dashboard_shows_real_system_health_badges(admin_server, pool, browser):
+    admin_id, username, password, totp_secret = await create_test_admin(pool, role="superadmin")
+    page = await browser.new_page(viewport={"width": 1280, "height": 900})
+    page_errors: list[str] = []
+    page.on("pageerror", lambda exc: page_errors.append(str(exc)))
+
+    await _login(page, admin_server, username, password, totp_secret)
+    await page.wait_for_selector("#system-health-row .badge", timeout=10000)
+
+    badge_text = await page.text_content("#system-health-row")
+    # Database and Redis are real, live connections in this test
+    # environment -- both must show green. Telegram has no real bot
+    # token configured here, so "unknown" (not a false green/red) is the
+    # only honest state this environment can produce.
+    assert "Database" in badge_text
+    assert "Redis" in badge_text
+    assert "Telegram" in badge_text
+    assert "Bingo" in badge_text
+
+    assert page_errors == [], f"JS errors: {page_errors}"
+    await page.close()
+
+
 async def test_admin_console_kyc_action_changes_real_database_state(admin_server, pool, conn, browser):
     admin_id, username, password, totp_secret = await create_test_admin(pool, role="finance")
     user_id = await create_funded_user(conn, Decimal("500.00"))
@@ -555,6 +578,46 @@ async def test_admin_console_telegram_commands_screen_edit_and_disable_over_a_re
         "UPDATE bot_commands SET cooldown_seconds = 0, rate_limit_per_minute = NULL "
         "WHERE handler_name = 'cmd_support'"
     )
+
+    assert page_errors == [], f"JS errors: {page_errors}"
+    await page.close()
+
+
+async def test_admin_console_global_search_via_command_palette_over_a_real_browser(admin_server, pool, browser):
+    admin_id, username, password, totp_secret = await create_test_admin(pool, role="superadmin")
+    page = await browser.new_page(viewport={"width": 1280, "height": 900})
+    page_errors: list[str] = []
+    page.on("pageerror", lambda exc: page_errors.append(str(exc)))
+
+    await _login(page, admin_server, username, password, totp_secret)
+    await page.wait_for_selector(".stat-grid", timeout=10000)
+
+    # Ctrl+K opens the overlay (Meta+K is the Mac equivalent -- Control
+    # is what a real Linux/Windows Chromium session under test actually
+    # sends either way).
+    await page.keyboard.press("Control+k")
+    await page.wait_for_selector("#global-search-overlay:not([hidden])", timeout=5000)
+
+    await page.fill("#global-search-input", "cmd_balance")
+    await page.wait_for_selector(".search-result-row", timeout=5000)
+    result_text = await page.text_content("#global-search-results")
+    assert "/balance" in result_text or "cmd_balance" in result_text
+
+    # Escape closes it without navigating anywhere.
+    await page.keyboard.press("Escape")
+    # state="attached", not the default "visible" -- an element carrying
+    # the hidden attribute is by definition never "visible", so waiting
+    # for the default state here would be a self-contradictory wait that
+    # can never resolve; wait_for_selector's own default doesn't fit an
+    # assertion about disappearing, only appearing.
+    await page.wait_for_selector("#global-search-overlay[hidden]", state="attached", timeout=5000)
+
+    # Reopen and click through to the Telegram screen.
+    await page.keyboard.press("Control+k")
+    await page.fill("#global-search-input", "cmd_balance")
+    await page.wait_for_selector(".search-result-row", timeout=5000)
+    await page.click(".search-result-row")
+    await page.wait_for_selector('tr[data-handler="cmd_balance"]', timeout=10000)
 
     assert page_errors == [], f"JS errors: {page_errors}"
     await page.close()

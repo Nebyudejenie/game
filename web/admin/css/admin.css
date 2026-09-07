@@ -437,3 +437,73 @@ pre.code-block {
   overflow-x: auto;
   font-size: 0.8rem;
 }
+
+/* Global search / command palette (Ctrl/Cmd+K) -- a plain overlay, not a
+   third-party modal library, matching every other UI primitive in this
+   frontend already being hand-rolled with the existing token set.
+   :not([hidden]) rather than a bare display rule -- see #login-screen's
+   own comment above for why an unconditional ".search-overlay { display:
+   flex }" would outrank the browser's own "[hidden] { display: none }"
+   on specificity, defeating `overlay.hidden = true` in global_search.js
+   and leaving this element intercepting clicks on everything underneath
+   it even while "hidden" -- caught by this exact symptom in a real
+   Playwright run (the login button became unclickable), not assumed. */
+.search-overlay:not([hidden]) {
+  position: fixed;
+  inset: 0;
+  background: rgba(28, 33, 40, 0.45);
+  z-index: 200;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 10vh;
+}
+
+.search-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: min(640px, 90vw);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+}
+
+.search-panel input {
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: 1rem;
+  font-size: 1.05rem;
+  outline: none;
+}
+
+#global-search-results {
+  overflow-y: auto;
+  padding: 0.5rem 0;
+}
+
+.search-category-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-dim);
+  padding: 0.4rem 1rem 0.2rem;
+}
+
+.search-result-row {
+  display: flex;
+  flex-direction: column;
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+}
+
+.search-result-row:hover,
+.search-result-row.active {
+  background: #eef2ff;
+}
+
+.search-result-row .field-value {
+  font-size: 0.9rem;
+}
