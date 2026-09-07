@@ -10968,3 +10968,102 @@ production gap should be expected to occasionally reveal a test that was
 quietly relying on the *absence* of the protection just added — the fix
 belongs in the test's own defensive scoping, not in weakening the new
 production guarantee to make the old test pass unchanged.
+
+---
+
+## 2026-09-07 — Enterprise SMS Control Plane: scoping a 128-section directive into a real, bounded, non-fabricated first slice
+
+A CTO-level directive asked for a full multi-tenant "SMS Operating
+System" — campaign lifecycle state machine, an Android/MacroDroid
+delivery-node mesh scaling to 10,000+ nodes, a pluggable
+`DeliveryProvider` abstraction anticipating SMPP/carrier gateways, a
+routing policy engine with nine strategies, compliance/suppression,
+retry classification and dead-lettering, a real-time operations center,
+multi-tenant billing-readiness, chaos testing, and dozens of other
+enterprise-SaaS subsystems — built inside this same repository even
+though it has no prior relationship to Bingo. Confirmed explicitly with
+the user before starting (this magnitude of scope-and-domain mismatch
+was worth one direct question rather than a guess in either direction):
+this is intentional, a second product meant to live in this codebase.
+
+The directive itself is explicit that a shallow pass across all of it
+("architecture diagrams," "a prototype," "a demo," "fake functionality")
+is the one outcome that's explicitly forbidden. It is also, honestly, a
+multi-person, multi-quarter build for a real engineering org. Applying
+the same discipline this entire session has used on every prior
+oversized directive (Telegram Phases 1-4 above): pick one real, narrow,
+end-to-end vertical slice and build it completely — schema through a
+working delivery path through tests — rather than scaffolding all 128
+sections shallowly. What follows is that slice's shape and, explicitly,
+what it deliberately is not.
+
+**Reused, not rebuilt** (the directive's own Principle 1): admin
+authentication and sessions (`services/admin/auth.py`'s bcrypt+TOTP+
+Redis-session mechanism — a second FastAPI app calls the exact same
+`auth.login()`/`auth.resolve_session()` functions rather than growing a
+second login system); RBAC (`services/admin/rbac.py`'s `PERMISSIONS`
+dict gets new `sms:*` keys, not a parallel authorization concept); the
+admin audit trail (`services/admin/audit.py::record()` — already
+target-type-generic, so SMS admin mutations write into the exact same
+`admin_audit_log` table as every other admin action, no new audit
+schema); the `FOR UPDATE SKIP LOCKED` claim pattern already used
+elsewhere in this codebase for exactly this "many workers, one queue"
+shape; the `asyncpg.Pool` + `create_pool()` + Settings-from-env
+conventions; the raw-SQL Alembic migration style; the plain-JS admin
+frontend conventions (`api.js`, `escapeHtml`, `.data-table`/`.badge-*`).
+
+**Built for real, this pass**: tenant-scoped schema (contacts,
+suppressions, templates, campaigns, messages, delivery attempts,
+delivery nodes — `tenant_id` on every table, genuinely enforced in every
+query, not decorative); a campaign lifecycle state machine with a real
+transition-audit table; a pull-based generic node protocol (heartbeat /
+fetch-job / start / report-result) that MacroDroid is just one caller
+of, authenticated by a per-node hashed credential (never one shared
+static token); atomic message claiming via `SKIP LOCKED` (the same
+mechanism this file documents elsewhere for round-claiming); a real
+compliance suppression list enforced at campaign-validation time; retry
+classification with a bounded-attempts-then-dead-letter path; a
+timeout-based reconciliation sweep that moves a silent, non-reporting
+in-flight message to an explicit `unknown` state rather than either
+pretending it succeeded or blindly resending; RBAC-gated admin CRUD
+(contacts/templates/campaigns/nodes/suppressions) with a narrower
+`sms:campaigns:approve` gate on the one action that actually sends real
+messages to real people, mirroring `payments:approve`'s and
+`rooms:emergency_stop`'s own least-privilege reasoning; a minimal but
+real admin frontend; deployment as a new `sms` compose service behind
+its own `sms.arada.fun` Cloudflare Tunnel hostname.
+
+**Explicitly deferred, and why** — each of these is a substantial
+initiative in its own right, and fabricating a shallow version of any of
+them would be worse than naming the gap honestly: SMPP/carrier/HTTP
+provider adapters (only the node-pull protocol exists; `DeliveryProvider`
+as an abstraction is not introduced until a second real provider exists
+to abstract over — premature today); fleet scale beyond a handful of
+real nodes (no 10,000-node test, no geographic/multi-region routing,
+`fleet_group` is a plain column with no routing logic keyed on it yet);
+a routing *policy engine* (v1 routing is "any healthy active node pulls
+the oldest queued job for its tenant" — a real, correct, but single
+strategy, not the nine-strategy configurable engine); inbound SMS /
+automatic STOP-keyword suppression (no inbound gateway exists; the
+suppression list is admin-curated only); a configurable N-person
+approval workflow (v1 approval is a single RBAC permission gate, not a
+workflow engine); billing/usage metering, quotas, and per-tenant
+fairness enforcement (only one real tenant exists; a quota UI with
+nothing to bound would be decorative); webhooks and a versioned domain-
+event bus (internal state changes are real and durable, but nothing
+external subscribes yet); load testing at 10K/100K/1M messages and
+formal chaos-injection testing; a command palette / global-search
+integration into the existing admin console's own search (the SMS
+console is a separate product per the directive's own instruction, so
+it gets its own minimal search, not wired into `search_queries.py`
+yet); AI/ML-based anomaly detection or capacity forecasting beyond
+straightforward deterministic counts; a segment/audience *builder* UI
+(v1 audience filters are a fixed JSON shape the backend validates and
+turns into a real parameterized query, matching the Notification
+Center's own `campaigns.py` precedent, but there's no visual rule
+builder yet); tenant self-service provisioning (one tenant is seeded by
+migration; there is no "create a new tenant" admin flow, since there is
+no second real tenant to create one for).
+
+Every one of these is a real, callable next phase once the slice below
+is proven in production — not a permanently-closed door.

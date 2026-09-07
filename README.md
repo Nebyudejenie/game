@@ -36,12 +36,18 @@ services/wallet/       Empty placeholder -- wallet logic lives directly in
 services/payments/     Phase 5-6: deposits + withdrawals against Chapa -- DONE
                         (SantimPay/ArifPay adapters not built, see above)
 services/admin/        Phase 7: admin console API -- DONE; no tax export
+services/sms/          Enterprise SMS Control Plane -- a genuinely
+                        separate product (DECISIONS.md, 2026-09-07),
+                        shares admin_users/RBAC/audit with services/admin/
 packages/core/         Shared, framework-free domain logic (ledger, bingo, config, logging, redis, telegram auth)
+packages/core/sms/     SMS domain logic (campaigns, messages, nodes, audience, compliance, templates)
 web/miniapp/           Phase 4: Telegram Mini App (vanilla JS, no framework) -- DONE
 web/admin/             Phase 7: admin console frontend (vanilla JS, no
                         framework, no build step -- same approach as
                         web/miniapp/) -- DONE, served at /console by
                         services/admin/app.py
+web/sms/               SMS Control Plane console frontend (same vanilla-JS
+                        approach), served at /console by services/sms/app.py
 migrations/            Alembic migrations (raw SQL, no ORM)
 tests/unit/            Pure-function tests, no external dependencies
 tests/integration/     Tests against real Postgres + Redis (docker-compose)
@@ -141,6 +147,16 @@ the toast), an RBAC-denied screen, and logout -- the permanent
 regression coverage that didn't exist when the frontend itself shipped
 (only a one-off, uncommitted verification script did at the time).
 
+The SMS Control Plane console (`web/sms/`, mounted at `/console` by
+`services/sms/app.py`) is the same pattern again: run `uvicorn
+services.sms.app:app --port 8006 --reload` and open
+`http://localhost:8006/console/` — it logs in with the exact same
+`admin_users` accounts as the Bingo admin console (no separate account to
+create). `tests/integration/test_sms_console_e2e.py` has the same
+real-Chromium regression coverage: login, a full campaign created through
+the UI (contact → node → campaign → validate → start), and the delivery
+result reflected back once a (simulated) node reports it.
+
 Copy `.env.example` to `.env` if you want to override any connection
 settings; most defaults are baked into `packages/core/config.py`, which
 already point at the docker-compose ports above. One exception:
@@ -218,7 +234,7 @@ ingress path onto a Proxmox VM with no public IP of its own.
 This deploys to a local server (a Proxmox VM) with no public IP, reached
 through the domain **arada.fun** via a **Cloudflare Tunnel** — DNS and the
 tunnel are both managed through Cloudflare regardless of where the domain
-itself was purchased. Four subdomains, one per public-facing service
+itself was purchased. Five subdomains, one per public-facing service
 (`engine-worker`/`payout-worker` are never exposed — their `/metrics`
 ports are for internal Prometheus scraping only):
 
@@ -228,6 +244,7 @@ ports are for internal Prometheus scraping only):
 | `admin.arada.fun` | `admin:8001` | Admin console (IP-allowlisted at the app layer — `ADMIN_IP_ALLOWLIST` is the real boundary, not the subdomain) |
 | `pay.arada.fun` | `payments:8002` | Chapa's real webhook, `POST /webhooks/chapa` |
 | `bot.arada.fun` | `bot:8003` | Telegram's webhook, `POST /webhook` |
+| `sms.arada.fun` | `sms:8006` | SMS Control Plane console + node protocol (DECISIONS.md, 2026-09-07) — a separate product, same admin accounts |
 
 Routing is defined in a committed config file, not clicked together in
 the Cloudflare dashboard — see `deploy/cloudflared/config.yml.example`.
@@ -242,12 +259,12 @@ One-time setup, on the Proxmox server itself:
    `deploy/cloudflared/tunnel-credentials.json` (gitignored, like
    `deploy/.env`).
 4. `cloudflared tunnel route dns jobingo app.arada.fun`, repeated for
-   `admin.arada.fun`, `pay.arada.fun`, and `bot.arada.fun` — this is what
-   actually creates the DNS records; nothing to add by hand in the
-   Cloudflare dashboard.
+   `admin.arada.fun`, `pay.arada.fun`, `bot.arada.fun`, and
+   `sms.arada.fun` — this is what actually creates the DNS records;
+   nothing to add by hand in the Cloudflare dashboard.
 5. Copy `deploy/cloudflared/config.yml.example` to
    `deploy/cloudflared/config.yml` (gitignored) and replace `<TUNNEL_ID>`
-   with the id step 3 printed. The four `ingress:` rules already match the
+   with the id step 3 printed. The five `ingress:` rules already match the
    table above — no other edits needed unless a subdomain changes.
 
 Once `deploy/.env` has real values for `PUBLIC_BASE_URL`
@@ -978,3 +995,41 @@ second account, and the marketing-audience query proven to exclude
 exactly the users spec section 12 says it must; see
 `DECISIONS.md`. `mypy --strict` is clean across the
 whole codebase.
+
+**Enterprise SMS Control Plane (`services/sms/`, `packages/core/sms/`,
+`web/sms/`) — a genuinely separate product, not a Bingo feature:** built
+in response to a CTO-level directive for a full multi-tenant SMS
+operating system; DECISIONS.md (2026-09-07) records the scoping call —
+one real, fully-tested vertical slice through the whole stack rather than
+shallow coverage of an effectively multi-quarter enterprise scope. What's
+real: a tenant-scoped domain (contacts, suppressions, templates,
+campaigns, messages, delivery attempts, delivery nodes); a campaign
+lifecycle state machine (`draft → validating → ready/failed → scheduled →
+running → paused/cancelled → completed/completed_with_errors`) with every
+transition validated and recorded in `sms_campaign_events`; a pull-based
+generic delivery-node protocol (heartbeat/fetch-job/start/report-result)
+authenticated by a per-node hashed credential (never a shared static
+token), with MacroDroid as only one interchangeable caller of it, exactly
+as the directive required; atomic message claiming via `FOR UPDATE SKIP
+LOCKED` in real priority order; retry classification with a
+bounded-attempts-then-dead-letter path; a timeout-based reconciliation
+sweep that moves a silently-non-reporting in-flight message to an
+explicit `unknown` state rather than guessing; a real compliance
+suppression list enforced both at campaign-validation time and again at
+audience resolution; and RBAC (`sms:*` permissions in the same
+`services/admin/rbac.py`) with a narrower `sms:campaigns:approve` gate on
+the one action that actually sends real messages. Authentication, RBAC,
+and the audit trail are the *same* `admin_users`/`PERMISSIONS`/
+`admin_audit_log` the Bingo admin console uses — no second login system.
+Verified with 29 real-Postgres domain tests (`test_sms_core.py`), 9
+real-HTTP tests including a full campaign-to-delivery flow and an RBAC
+boundary/node-ownership/suppression-enforcement set (`test_sms_app.py`),
+and a real-Chromium click-through of the console frontend
+(`test_sms_console_e2e.py`); `mypy --strict` clean. Explicitly deferred,
+named in DECISIONS.md rather than faked: SMPP/carrier provider adapters,
+fleet scale beyond a handful of nodes, a multi-strategy routing policy
+engine (v1 is single-strategy: oldest-queued-job-per-tenant), automatic
+inbound STOP-keyword suppression, a configurable N-person approval
+workflow, billing/quotas, webhooks/domain events, load/chaos testing at
+enterprise scale, and tenant self-service provisioning (one tenant is
+seeded; there is no second real tenant to provision for yet).

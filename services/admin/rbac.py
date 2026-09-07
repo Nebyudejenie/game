@@ -126,6 +126,23 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     # operational, non-financial content/behavior change), narrower than
     # telegram:commands_view's own read-only breadth.
     "telegram:commands_manage": frozenset({"ops", "superadmin"}),
+
+    # Enterprise SMS Control Plane (DECISIONS.md, 2026-09-07) -- a
+    # genuinely separate product (services/sms/app.py, its own
+    # sms.arada.fun subdomain) that reuses this exact PERMISSIONS dict and
+    # has_permission() rather than growing a second authorization concept.
+    "sms:view": frozenset({"support", "finance", "ops", "superadmin"}),
+    "sms:contacts:manage": frozenset({"ops", "superadmin"}),
+    "sms:templates:manage": frozenset({"ops", "superadmin"}),
+    "sms:campaigns:manage": frozenset({"ops", "superadmin"}),
+    # Narrower than sms:campaigns:manage on purpose, same reasoning as
+    # notifications:send -- creating/editing a draft campaign is
+    # reversible and harmless; actually starting one sends real messages
+    # to real people and cannot be undone once a node has dispatched a
+    # message, the single highest-leverage action in this whole product.
+    "sms:campaigns:approve": frozenset({"superadmin"}),
+    "sms:nodes:manage": frozenset({"ops", "superadmin"}),
+    "sms:compliance:manage": frozenset({"ops", "superadmin"}),
 }
 
 

@@ -187,6 +187,33 @@ async def admin_server():
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def sms_server():
+    """Runs the real SMS Control Plane API (services/sms/app.py) via
+    uvicorn -- same rationale as gateway_server/admin_server: both the
+    admin-facing routes and the node protocol are tested as genuine HTTP
+    endpoints, not in-process function calls.
+    """
+    from services.sms.app import app as sms_app
+
+    port = _free_port()
+    config = uvicorn.Config(sms_app, host="127.0.0.1", port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    task = asyncio.create_task(server.serve())
+
+    for _ in range(200):
+        if server.started:
+            break
+        await asyncio.sleep(0.05)
+    else:
+        raise RuntimeError("sms server did not start in time")
+
+    yield f"http://127.0.0.1:{port}"
+
+    server.should_exit = True
+    await asyncio.wait_for(task, timeout=10)
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def payments_server():
     """Runs the real payments API (services/payments/app.py) via uvicorn --
     same rationale as gateway_server/admin_server: the webhook route is the

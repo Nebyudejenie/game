@@ -1,0 +1,409 @@
+/* Same generic UI primitives as web/admin/css/admin.css (data-table, badge,
+   nav, stat-grid) -- reused as a pattern, not imported, since this is a
+   genuinely separate static frontend served from its own subdomain
+   (DECISIONS.md, 2026-09-07). A distinct accent (violet, not the Bingo
+   console's blue) keeps the two consoles visually distinguishable at a
+   glance for an admin who has both open. */
+
+:root {
+  --bg: #f5f4f8;
+  --panel: #ffffff;
+  --border: #ddd8e6;
+  --text: #1c1928;
+  --text-dim: #625d70;
+  --primary: #6d28d9;
+  --danger: #c0362c;
+  --success: #1b7a43;
+  --warn: #a8621a;
+  --radius: 6px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+h1 {
+  font-size: 1.4rem;
+  margin: 0 0 1rem;
+}
+
+h2 {
+  font-size: 1.1rem;
+  margin: 1.5rem 0 0.75rem;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+/* :not([hidden]) rather than a bare display rule -- an unconditional
+   "#login-screen { display: flex }" would outrank the browser's own
+   "[hidden] { display: none }" on specificity, the exact bug this
+   codebase has hit twice already for the Bingo admin console
+   (web/admin/css/admin.css's own comment on #login-screen/.search-overlay). */
+#login-screen:not([hidden]) {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.login-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 2rem;
+  width: 320px;
+}
+
+.login-card h1 {
+  text-align: center;
+}
+
+.login-card form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.login-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.login-card input,
+input[type="text"],
+input[type="password"],
+input[type="number"],
+input[type="datetime-local"],
+select,
+textarea {
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.95rem;
+  font-family: inherit;
+}
+
+.login-card button[type="submit"],
+.btn {
+  padding: 0.55rem 1rem;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--primary);
+  color: #fff;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-danger {
+  background: var(--danger);
+}
+
+.btn-success {
+  background: var(--success);
+}
+
+.btn-secondary {
+  background: var(--text-dim);
+}
+
+.form-error {
+  color: var(--danger);
+  font-size: 0.85rem;
+}
+
+/* --- app shell --- */
+
+#app-shell:not([hidden]) {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  min-height: 100vh;
+}
+
+#nav {
+  background: #1e1b2e;
+  padding: 1.25rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+#nav .nav-brand {
+  color: #fff;
+  font-weight: 700;
+  padding: 0 0.5rem 1rem;
+}
+
+.nav-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: #cbd5e1;
+  font-size: 0.9rem;
+}
+
+.nav-btn:hover {
+  background: #2d2844;
+}
+
+.nav-btn.active {
+  background: var(--primary);
+  color: #fff;
+}
+
+.nav-logout {
+  margin-top: auto;
+  color: #fca5a5;
+}
+
+#content {
+  padding: 1.5rem 2rem;
+  max-width: 1100px;
+}
+
+.loading,
+.empty {
+  color: var(--text-dim);
+}
+
+.error-banner {
+  background: #fde8e6;
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  padding: 0.75rem 1rem;
+  border-radius: var(--radius);
+}
+
+.toast {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  background: var(--text);
+  color: #fff;
+  padding: 0.6rem 1rem;
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+  z-index: 100;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+}
+
+.toast.visible {
+  opacity: 1;
+}
+
+.toast.toast-error {
+  background: var(--danger);
+}
+
+/* --- shared components --- */
+
+.inline-form {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.inline-form input,
+.inline-form select {
+  flex: 1;
+  min-width: 120px;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.stat-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.9rem 1rem;
+}
+
+.stat-label {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.stat-value {
+  font-size: 1.3rem;
+  font-weight: 700;
+  margin-top: 0.25rem;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  font-size: 0.88rem;
+}
+
+.data-table th,
+.data-table td {
+  text-align: left;
+  padding: 0.5rem 0.7rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.data-table th {
+  background: #f0eef4;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  letter-spacing: 0.03em;
+}
+
+.data-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.clickable-row {
+  cursor: pointer;
+}
+
+.clickable-row:hover {
+  background: #f1ecfb;
+}
+
+.detail-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+  margin-top: 1rem;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.field-label {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+
+.field-value {
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.action-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.badge-active,
+.badge-delivered,
+.badge-completed,
+.badge-ready {
+  background: #dcfce7;
+  color: var(--success);
+}
+
+.badge-pending,
+.badge-scheduled,
+.badge-assigned,
+.badge-sending,
+.badge-draining,
+.badge-completed_with_errors,
+.badge-unknown {
+  background: #fef3c7;
+  color: var(--warn);
+}
+
+.badge-revoked,
+.badge-disabled,
+.badge-failed,
+.badge-dead_letter {
+  background: #fde8e6;
+  color: var(--danger);
+}
+
+.badge-queued,
+.badge-validating,
+.badge-running {
+  background: #ede9fe;
+  color: var(--primary);
+}
+
+.badge-draft,
+.badge-cancelled,
+.badge-suppressed,
+.badge-paused {
+  background: #e5e7eb;
+  color: var(--text-dim);
+}
+
+pre.code-block {
+  background: #0b1020;
+  color: #d1e0ff;
+  padding: 0.75rem;
+  border-radius: var(--radius);
+  overflow-x: auto;
+  font-size: 0.8rem;
+}
+
+.health-bar {
+  display: inline-block;
+  width: 60px;
+  height: 6px;
+  border-radius: 3px;
+  background: #e5e7eb;
+  overflow: hidden;
+  vertical-align: middle;
+}
+
+.health-bar-fill {
+  height: 100%;
+  background: var(--success);
+}

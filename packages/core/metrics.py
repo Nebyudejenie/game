@@ -280,6 +280,38 @@ ledger_reconciliation_mismatch_count = Gauge(
     registry=reconcile_registry,
 )
 
+# --- sms control plane -------------------------------------------------
+
+sms_messages_created_total = Counter(
+    "sms_messages_created_total",
+    "SMS messages created, by initial status (queued or suppressed)",
+    ["status"],
+)
+
+sms_delivery_attempts_total = Counter(
+    "sms_delivery_attempts_total",
+    "SMS delivery attempts reported by a node, by outcome",
+    ["outcome"],
+)
+
+sms_messages_reconciled_total = Counter(
+    "sms_messages_reconciled_total",
+    "Messages the timeout-based reconciliation sweep moved out of an in-flight state",
+    ["to_status"],
+)
+
+sms_queue_depth = Gauge(
+    "sms_queue_depth",
+    "Messages currently queued, by priority",
+    ["priority"],
+)
+
+sms_node_health_score = Gauge(
+    "sms_node_health_score",
+    "Last-computed 0-100 health score per active delivery node",
+    ["node_id", "node_name"],
+)
+
 # --- bare /metrics server, for the two long-running processes with no
 # other HTTP surface of their own (engine worker, payout worker) --------
 

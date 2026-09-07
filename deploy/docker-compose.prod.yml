@@ -131,6 +131,20 @@ services:
       - "8003:8003"
     command: ["python", "-m", "services.bot.app"]
 
+  # Enterprise SMS Control Plane (DECISIONS.md, 2026-09-07) -- a
+  # genuinely separate product from Bingo, its own sms.arada.fun
+  # subdomain, sharing this same image and the admin_users/RBAC/audit
+  # tables the way every service here shares the database, but no other
+  # runtime dependency on gateway/bot/payments.
+  sms:
+    image: ${JOBINGO_IMAGE:-jobingo:latest}
+    restart: unless-stopped
+    <<: *app-env
+    depends_on: *app-depends-on
+    ports:
+      - "8006:8006"
+    command: ["uvicorn", "services.sms.app:app", "--host", "0.0.0.0", "--port", "8006"]
+
   engine-worker:
     image: ${JOBINGO_IMAGE:-jobingo:latest}
     restart: unless-stopped
@@ -191,6 +205,7 @@ services:
       - admin
       - payments
       - bot
+      - sms
 
 volumes:
   jobingo_prod_postgres_data:

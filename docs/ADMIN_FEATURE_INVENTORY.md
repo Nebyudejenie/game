@@ -1,10 +1,19 @@
 # Admin Feature Inventory
 
-Every row below was verified against the real, current code — the 85
-real routes in `services/admin/app.py`, the 34 real permissions in
-`services/admin/rbac.py`, and the 18 real screens registered in
-`web/admin/js/app.js`'s own `SCREENS` map — not assumed from any prior
-document. Re-generate the counts with:
+Scope: `services/admin/app.py` (the Bingo admin console) and
+`web/admin/`, its frontend. The Enterprise SMS Control Plane
+(`services/sms/`, `web/sms/`, a genuinely separate product — see
+`docs/SMS_CONTROL_PLANE.md` and `DECISIONS.md` 2026-09-07) is out of this
+table's scope; it shares this same `services/admin/rbac.py` permissions
+dict (7 `sms:*` keys, included in the count below) and audit table, but
+has its own console, its own routes, and its own screens documented
+separately.
+
+Every row below was verified against the real, current code — the real
+routes in `services/admin/app.py`, the 41 real permissions in
+`services/admin/rbac.py` (34 Bingo-console + 7 `sms:*`), and the 18 real
+screens registered in `web/admin/js/app.js`'s own `SCREENS` map — not
+assumed from any prior document. Re-generate the counts with:
 
 ```
 grep -c '@app\.\(get\|post\|patch\|put\|delete\)(' services/admin/app.py

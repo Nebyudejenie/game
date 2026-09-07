@@ -36,4 +36,9 @@ ingress:
   # this exact hostname.
   - hostname: bot.arada.fun
     service: http://bot:8003
+  # Enterprise SMS Control Plane -- a separate product/console, its own
+  # admin login page at /console (same admin_users accounts as
+  # admin.arada.fun; see DECISIONS.md 2026-09-07).
+  - hostname: sms.arada.fun
+    service: http://sms:8006
   - service: http_status:404
