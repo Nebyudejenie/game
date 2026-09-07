@@ -11364,3 +11364,88 @@ summarized here for the durable record: the two concurrency bugs were
 the only P0/P1-class findings, both fixed and proven with regression
 tests before this entry was written; nothing else discovered rose above
 P2 (deferred, honest, non-blocking).
+
+---
+
+## 2026-09-07 — Rebrand: "Jo Bingo" → "Arada Bingo" (user-facing text only, commit `f196016`)
+
+A branding-only directive: rename every user/operator-facing occurrence
+of the product name, touch nothing else. The interesting work was
+drawing the line between "user-facing brand text" and "internal
+technical identifier" correctly, since the two are heavily interleaved
+in this codebase (e.g. `jobingo` the Docker/DB/package name vs. "Jo
+Bingo" the string a player reads).
+
+**The rule applied**: something is user-facing branding if a human
+(player, admin, operator, or a developer running a CLI's own `--help`)
+would see it rendered as *output* of running the system. Something is an
+internal technical identifier if it's a name other code, config, or a
+person's already-registered external account keys off — changing it
+either breaks something or requires an out-of-band action this session
+can't take. Pure source comments/docstrings (never rendered to anyone)
+were left alone entirely, on the same footing as `idea.md`/`README.md`'s
+narrative body/`DECISIONS.md` itself: historical or source record, not
+live output.
+
+**Renamed** (34 files): bot player-facing locale strings (welcome/
+registration/self-exclusion/rules), the Mini App's "not in Telegram"
+error text, the admin and SMS consoles' HTML titles/nav-brand/login
+headers/bonus-announcement copy, all three FastAPI service `title=`
+fields (shown in Swagger UI), the admin TOTP issuer name (shown in an
+authenticator app — confirmed this has zero effect on already-
+provisioned admins' existing secrets, since RFC 6238 codes never depend
+on the issuer/label string), the Grafana dashboard's `title` (not its
+`uid`), the SMS tenant's seeded display name (migration source edited
+for fresh installs; the one already-seeded dev-DB row fixed with a
+direct `UPDATE`, not a new migration — a single-row display-name change
+on a not-yet-deployed feature didn't meet this session's own "no
+unnecessary migrations" bar), a CLI `--help` description, the Mini App's
+placeholder `--font-display` name (confirmed via `fonts.css` that no
+`@font-face` is actually named this — it only ever falls through to
+"Segoe UI"/system-ui, so the string is cosmetic naming with zero visual
+effect either way), six systemd unit `Description=` lines (real output
+of `systemctl status`), README's own `# ` H1, and every test
+assertion/fixture that checks or simulates the above.
+
+**Deliberately left unchanged**, each for a real, checked reason: the
+`jobingo` package name/DB user+name/Docker Compose project name/GHCR
+image tag and every systemd *unit filename* (renaming a filename risks
+orphaning an already-enabled unit on a real host); the Grafana dashboard
+`uid` and the Prometheus alert-group name (external bookmarks/config
+reference these by ID); `localStorage` key names
+(`jobingo_admin_token`/`jobingo_sms_token`/`jobingo_voice_*` — confirmed
+these are never rendered, and renaming them would silently sign out
+every currently-logged-in admin and reset every player's saved voice
+settings on next load, a real functional regression for zero benefit);
+the `@jobingo_support` Telegram handle in bot help text (a real external
+contact identifier — the displayed text must match whatever account is
+actually registered and monitored, which this session has no way to
+verify or change); aiogram's internal `Router(name="jobingo-bot")`
+(never rendered to any user); and `DECISIONS.md`/`README.md`'s body
+narrative/`idea.md` (the user's own original spec pack) — preserved as
+historical/source record, the same standard this file already holds
+itself to.
+
+**A real, pre-existing, branding-unrelated bug found along the way**:
+`test_admin_manual_payments_e2e.py`'s own regression test queried
+`manual_payment_destinations` by a hardcoded, non-unique `account_ref`
+with no `ORDER BY` — harmless for years of runs because every run
+inserted the identical value, so it never mattered which matching row
+came back. The instant this run's inserted value (the new brand text)
+actually differed from the ~14 stale rows the same test had accumulated
+across this session's own history, the unscoped query surfaced a
+coincidental stale row and the assertion failed. Not a rename mistake —
+confirmed by inspecting the table directly (14 old rows, 1 new correct
+one) — fixed with `ORDER BY id DESC LIMIT 1` so the assertion
+deterministically checks the row this run just created. The ~1,973
+now-stale "Jo Bingo PLC" rows this and sibling tests have left across
+the shared dev database over time were **not** bulk-rewritten — that's
+test-debris data hygiene, not a source-code branding concern, and out of
+this task's bounded scope; noted here rather than silently ignored.
+
+**Verification**: mypy `--strict` clean (126 files). Full suite: 1348
+passed / 0 failed. E2E standalone: 54 passed / 0 failed. A repo-wide
+case-insensitive sweep for "jo bingo"/"jo-bingo"/"jo_bingo" was run
+before starting and again after finishing; every remaining hit is one of
+the intentional exclusions listed above, individually confirmed, not
+assumed.
