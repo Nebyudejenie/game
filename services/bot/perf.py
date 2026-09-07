@@ -30,6 +30,7 @@ from packages.core.metrics import (
     telegram_dispatch_delay_seconds,
     telegram_redis_duration_seconds,
 )
+from services.bot import command_registry
 
 # The key perf_middleware reads out of aiogram's own per-update `data`
 # dict -- stashed by _dedup_middleware (services/bot/app.py) at the
@@ -97,17 +98,25 @@ async def perf_middleware(
     version's own TelegramEventObserver.trigger(), not assumed), so this
     only ever runs once routing has already picked one specific handler
     function, and .callback.__name__ names that real function
-    (cmd_balance, on_menu_text, ...) -- never an invented category label.
+    (cmd_balance, on_menu_text, ...).
 
-    This measures *handler execution time* -- from the moment this
-    specific handler starts to the moment it returns or raises. Dispatch
-    delay (dedup + routing/filter-check overhead before this point) is
-    recorded separately, from RECEIVED_AT_KEY.
+    Phase 3's own "one canonical command identity" requirement: the
+    metric label is the real function name UNLESS an admin has set a
+    different analytics_key for it in the bot_commands registry
+    (command_registry.analytics_label() -- returns the raw function name
+    itself when no override is set, which is every command today, so
+    this is a no-op change for the whole existing Grafana dashboard).
+    Every metric this module ever labels by "command" -- commands_total,
+    _success_total, _error_total, _latency_seconds, and (via
+    _current_command below) DB/Redis time -- resolves through this exact
+    same call, so a command's identity can never read one way on one
+    metric and a different way on another.
     """
-    command = handler.__name__ if hasattr(handler, "__name__") else "unknown"
+    handler_name = handler.__name__ if hasattr(handler, "__name__") else "unknown"
     handler_obj = data.get("handler")
     if handler_obj is not None and hasattr(handler_obj, "callback"):
-        command = getattr(handler_obj.callback, "__name__", command)
+        handler_name = getattr(handler_obj.callback, "__name__", handler_name)
+    command = command_registry.analytics_label(handler_name)
 
     received_at = data.get(RECEIVED_AT_KEY)
     start = time.monotonic()

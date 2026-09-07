@@ -32,6 +32,7 @@ class CommandMetrics:
     success: int
     errors: int
     blocked: int
+    rate_limited: int
     p50_seconds: float | None
     p95_seconds: float | None
     p99_seconds: float | None
@@ -94,6 +95,7 @@ async def fetch_command_metrics(metrics_url: str) -> dict[str, CommandMetrics]:
     success_total: dict[str, float] = {}
     error_total: dict[str, float] = {}
     blocked_total: dict[str, float] = {}
+    rate_limited_total: dict[str, float] = {}
     buckets_by_handler: dict[str, list[tuple[float, float]]] = {}
 
     for family in text_string_to_metric_families(text):
@@ -113,6 +115,16 @@ async def fetch_command_metrics(metrics_url: str) -> dict[str, CommandMetrics]:
             for sample in family.samples:
                 if sample.name == "telegram_command_blocked_total":
                     blocked_total[sample.labels["handler"]] = sample.value
+        elif family.name == "telegram_command_rate_limited":
+            for sample in family.samples:
+                if sample.name == "telegram_command_rate_limited_total":
+                    handler = sample.labels["handler"]
+                    # Summed across limit_type ("cooldown"/"rate_limit") --
+                    # the admin table shows one combined "Blocked
+                    # Attempts" figure per Section 4; the Telegram
+                    # Performance Grafana panel is where the cooldown-vs-
+                    # rate-limit split matters.
+                    rate_limited_total[handler] = rate_limited_total.get(handler, 0.0) + sample.value
         elif family.name == "telegram_command_latency_seconds":
             for sample in family.samples:
                 if sample.name == "telegram_command_latency_seconds_bucket":
@@ -130,6 +142,7 @@ async def fetch_command_metrics(metrics_url: str) -> dict[str, CommandMetrics]:
             success=int(success_total.get(handler, 0)),
             errors=int(error_total.get(handler, 0)),
             blocked=int(blocked_total.get(handler, 0)),
+            rate_limited=int(rate_limited_total.get(handler, 0)),
             p50_seconds=_quantile_from_buckets(buckets, 0.50),
             p95_seconds=_quantile_from_buckets(buckets, 0.95),
             p99_seconds=_quantile_from_buckets(buckets, 0.99),

@@ -204,6 +204,16 @@ telegram_command_blocked_total = Counter(
     ["handler"],
 )
 
+# Phase 3: distinct from telegram_command_blocked_total above (an admin's
+# own deliberate choice) -- this is a specific user hitting their own
+# configured cooldown_seconds or rate_limit_per_minute, split by which of
+# the two ("cooldown" or "rate_limit") to tell them apart on Grafana.
+telegram_command_rate_limited_total = Counter(
+    "telegram_command_rate_limited_total",
+    "Command invocations rejected by the per-user cooldown or rate limit",
+    ["handler", "limit_type"],
+)
+
 _LATENCY_BUCKETS = (0.01, 0.025, 0.05, 0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 3.0, 5.0, 8.0)
 
 telegram_command_latency_seconds = Histogram(

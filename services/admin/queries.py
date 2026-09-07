@@ -771,11 +771,36 @@ async def stop_room_admin(
     }
 
 
+ROOMS_ADMIN_LIST_LIMIT = 200
+
+
 async def list_rooms(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+    """Phase 3 (Section 34: "do not load every dashboard dataset... use
+    lazy loading, pagination") -- a real, growing gap this closes: every
+    real stake tier a room represents stays active indefinitely (19 real
+    rows in this environment today), while a deactivated room is
+    typically retired for good, not routinely revisited. An unbounded
+    `ORDER BY stake` here used to return literally every room row this
+    database has ever held (6,700+ in this shared, long-lived dev
+    environment, from years of this session's own test runs -- confirmed
+    directly, not assumed), which made the admin Rooms screen's own
+    render genuinely slow enough to fail a real-browser test's own
+    timeout, not just look untidy. Every currently-active room is always
+    included (there is no real scenario where an operator shouldn't see
+    every room actually taking player traffic); inactive rooms are
+    included newest-first up to the cap, so a room just deactivated
+    (the common "I need to re-check/reactivate this one" case) still
+    shows up, while years of long-abandoned rows don't have to render.
+    """
     rows = await pool.fetch(
-        "SELECT id, code, stake, house_cut_bps, min_players, max_players, "
-        "max_cards_per_player, lobby_seconds, call_interval_ms, result_seconds, "
-        "win_patterns, min_winning_lines, is_active FROM rooms ORDER BY stake"
+        f"""
+        SELECT id, code, stake, house_cut_bps, min_players, max_players,
+               max_cards_per_player, lobby_seconds, call_interval_ms, result_seconds,
+               win_patterns, min_winning_lines, is_active
+        FROM rooms
+        ORDER BY is_active DESC, id DESC
+        LIMIT {ROOMS_ADMIN_LIST_LIMIT}
+        """
     )
     out = []
     for r in rows:

@@ -140,3 +140,70 @@ def test_spec_bucket_constants_match_section_9_2():
     assert rate_limit.CLAIM["refill_per_second"] == pytest.approx(5.0 / 60.0)
     assert rate_limit.DEPOSIT["capacity"] == 5
     assert rate_limit.DEPOSIT["refill_per_second"] == pytest.approx(5.0 / 3600.0)
+
+
+# --- allow_with_retry_after: same bucket, plus a real computed wait ----
+
+
+async def test_allow_with_retry_after_returns_none_when_allowed(redis):
+    scope, key = _bucket()
+    bucket = {"capacity": 3, "refill_per_second": _NEGLIGIBLE_REFILL}
+
+    allowed, retry_after = await rate_limit.allow_with_retry_after(redis, scope, key, **bucket)
+    assert allowed is True
+    assert retry_after is None
+
+
+async def test_allow_with_retry_after_returns_a_real_positive_wait_when_denied(redis):
+    scope, key = _bucket()
+    # 1 token/second refill -- exhaust the single-token bucket, then the
+    # very next request needs to wait ~1s for the next token.
+    bucket = {"capacity": 1, "refill_per_second": 1.0}
+
+    first_allowed, first_retry = await rate_limit.allow_with_retry_after(redis, scope, key, **bucket)
+    assert first_allowed is True
+    assert first_retry is None
+
+    second_allowed, second_retry = await rate_limit.allow_with_retry_after(redis, scope, key, **bucket)
+    assert second_allowed is False
+    assert second_retry is not None
+    assert 0.5 < second_retry <= 1.0, second_retry
+
+
+async def test_allow_with_retry_after_wait_shrinks_the_longer_you_wait(redis):
+    scope, key = _bucket()
+    bucket = {"capacity": 1, "refill_per_second": 1.0}
+
+    await rate_limit.allow_with_retry_after(redis, scope, key, **bucket)  # consumes the only token
+    _, retry_immediately = await rate_limit.allow_with_retry_after(redis, scope, key, **bucket)
+
+    await asyncio.sleep(0.5)
+    _, retry_after_half_second = await rate_limit.allow_with_retry_after(redis, scope, key, **bucket)
+
+    assert retry_immediately is not None and retry_after_half_second is not None
+    assert retry_after_half_second < retry_immediately
+
+
+async def test_allow_still_works_unchanged_after_the_retry_after_addition(redis):
+    # allow() is now implemented in terms of allow_with_retry_after() --
+    # every pre-existing caller (deposits.py, gateway, admin login) must
+    # see byte-for-byte the same boolean behavior as before.
+    scope, key = _bucket()
+    bucket = {"capacity": 2, "refill_per_second": _NEGLIGIBLE_REFILL}
+
+    assert await rate_limit.allow(redis, scope, key, **bucket) is True
+    assert await rate_limit.allow(redis, scope, key, **bucket) is True
+    assert await rate_limit.allow(redis, scope, key, **bucket) is False
+
+
+async def test_allow_with_retry_after_fails_closed_with_no_retry_after_on_redis_error(redis, monkeypatch):
+    scope, key = _bucket()
+    bucket = {"capacity": 3, "refill_per_second": 1.0}
+
+    async def flaky_eval(*args, **kwargs):
+        raise ConnectionError("simulated Redis blip")
+
+    monkeypatch.setattr(redis, "eval", flaky_eval)
+    allowed, retry_after = await rate_limit.allow_with_retry_after(redis, scope, key, **bucket)
+    assert allowed is False
+    assert retry_after is None

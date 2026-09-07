@@ -80,6 +80,8 @@
   "error.generic": "Something went wrong. Please try again.",
   "error.not_registered": "Please register first. Tap /start.",
   "error.command_disabled": "This feature is temporarily unavailable. Please try again later.",
+  "error.rate_limited_retry": "You're doing that too often. Please try again in {seconds}s.",
+  "error.rate_limited_generic": "You're doing that too often. Please slow down and try again shortly.",
 
   "notify.deposit_confirmed": "✅ {amount} ETB deposited. Balance: {balance} ETB",
   "notify.withdrawal_succeeded": "✅ Your {amount} ETB withdrawal has been sent.",

@@ -72,6 +72,150 @@ async def test_unknown_field_is_rejected(pool):
         )
 
 
+# --- Security regression (Section 46): a malformed value for any field
+# must come back as a clean InvalidCommandField/422, never an unhandled
+# asyncpg.exceptions.DataError/500 for what is still just a client
+# mistake, not a security bypass. --------------------------------------
+
+
+async def test_wrong_type_for_a_boolean_field_is_rejected_not_a_raw_db_error(pool):
+    admin_id, *_ = await create_test_admin(pool, role="superadmin")
+    with pytest.raises(command_registry_queries.InvalidCommandField):
+        await command_registry_queries.update_command_admin(
+            pool, admin_id=admin_id, handler_name="cmd_rules", changes={"enabled": "yes"},
+            reason=None, ip_address=None,
+        )
+
+
+async def test_a_bool_is_rejected_for_an_integer_field(pool):
+    # isinstance(True, int) is True in Python -- must not silently pass
+    # sort_order validation as if it were a real integer.
+    admin_id, *_ = await create_test_admin(pool, role="superadmin")
+    with pytest.raises(command_registry_queries.InvalidCommandField):
+        await command_registry_queries.update_command_admin(
+            pool, admin_id=admin_id, handler_name="cmd_rules", changes={"sort_order": True},
+            reason=None, ip_address=None,
+        )
+
+
+async def test_wrong_type_for_a_string_field_is_rejected(pool):
+    admin_id, *_ = await create_test_admin(pool, role="superadmin")
+    with pytest.raises(command_registry_queries.InvalidCommandField):
+        await command_registry_queries.update_command_admin(
+            pool, admin_id=admin_id, handler_name="cmd_rules", changes={"description": 12345},
+            reason=None, ip_address=None,
+        )
+
+
+async def test_null_is_accepted_for_nullable_string_fields_only(pool):
+    admin_id, *_ = await create_test_admin(pool, role="superadmin")
+    # content_key/analytics_key are genuinely nullable -- None must pass.
+    result = await command_registry_queries.update_command_admin(
+        pool, admin_id=admin_id, handler_name="cmd_rules", changes={"analytics_key": None},
+        reason="test", ip_address=None,
+    )
+    assert result["analytics_key"] is None
+
+    # description is NOT nullable -- None must be rejected the same way
+    # any other wrong type is.
+    with pytest.raises(command_registry_queries.InvalidCommandField):
+        await command_registry_queries.update_command_admin(
+            pool, admin_id=admin_id, handler_name="cmd_rules", changes={"description": None},
+            reason=None, ip_address=None,
+        )
+
+
+async def test_malformed_field_over_http_returns_422_not_500(admin_server, pool):
+    headers = await _auth_headers(admin_server, pool, role="superadmin")
+    async with httpx.AsyncClient() as client:
+        response = await client.patch(
+            f"{admin_server}/telegram/commands/cmd_rules",
+            headers=headers,
+            json={"changes": {"enabled": "yes"}},
+        )
+        assert response.status_code == 422
+
+
+# --- Section 4: cooldown/rate-limit config validation ------------------
+
+
+async def test_negative_cooldown_is_rejected(pool):
+    admin_id, *_ = await create_test_admin(pool, role="superadmin")
+    with pytest.raises(command_registry_queries.InvalidCommandField):
+        await command_registry_queries.update_command_admin(
+            pool, admin_id=admin_id, handler_name="cmd_rules", changes={"cooldown_seconds": -1},
+            reason=None, ip_address=None,
+        )
+
+
+async def test_absurdly_large_cooldown_is_rejected(pool):
+    admin_id, *_ = await create_test_admin(pool, role="superadmin")
+    with pytest.raises(command_registry_queries.InvalidCommandField):
+        await command_registry_queries.update_command_admin(
+            pool, admin_id=admin_id, handler_name="cmd_rules",
+            changes={"cooldown_seconds": command_registry_queries.MAX_COOLDOWN_SECONDS + 1},
+            reason=None, ip_address=None,
+        )
+
+
+async def test_zero_or_negative_rate_limit_is_rejected(pool):
+    admin_id, *_ = await create_test_admin(pool, role="superadmin")
+    for bad_value in (0, -5):
+        with pytest.raises(command_registry_queries.InvalidCommandField):
+            await command_registry_queries.update_command_admin(
+                pool, admin_id=admin_id, handler_name="cmd_rules",
+                changes={"rate_limit_per_minute": bad_value}, reason=None, ip_address=None,
+            )
+
+
+async def test_absurdly_large_rate_limit_is_rejected(pool):
+    admin_id, *_ = await create_test_admin(pool, role="superadmin")
+    with pytest.raises(command_registry_queries.InvalidCommandField):
+        await command_registry_queries.update_command_admin(
+            pool, admin_id=admin_id, handler_name="cmd_rules",
+            changes={"rate_limit_per_minute": command_registry_queries.MAX_RATE_LIMIT_PER_MINUTE + 1},
+            reason=None, ip_address=None,
+        )
+
+
+async def test_null_rate_limit_means_explicitly_unlimited_not_rejected(pool):
+    admin_id, *_ = await create_test_admin(pool, role="superadmin")
+    result = await command_registry_queries.update_command_admin(
+        pool, admin_id=admin_id, handler_name="cmd_rules",
+        changes={"rate_limit_per_minute": None}, reason="explicit unlimited", ip_address=None,
+    )
+    assert result["rate_limit_per_minute"] is None
+
+
+async def test_a_reasonable_cooldown_and_rate_limit_are_accepted(pool):
+    admin_id, *_ = await create_test_admin(pool, role="superadmin")
+    try:
+        result = await command_registry_queries.update_command_admin(
+            pool, admin_id=admin_id, handler_name="cmd_rules",
+            changes={"cooldown_seconds": 10, "rate_limit_per_minute": 5},
+            reason="test", ip_address=None,
+        )
+        assert result["cooldown_seconds"] == 10
+        assert result["rate_limit_per_minute"] == 5
+    finally:
+        await command_registry_queries.update_command_admin(
+            pool, admin_id=admin_id, handler_name="cmd_rules",
+            changes={"cooldown_seconds": 0, "rate_limit_per_minute": None},
+            reason="test cleanup", ip_address=None,
+        )
+
+
+async def test_invalid_cooldown_over_http_returns_422(admin_server, pool):
+    headers = await _auth_headers(admin_server, pool, role="superadmin")
+    async with httpx.AsyncClient() as client:
+        response = await client.patch(
+            f"{admin_server}/telegram/commands/cmd_rules",
+            headers=headers,
+            json={"changes": {"cooldown_seconds": -1}},
+        )
+        assert response.status_code == 422
+
+
 async def test_update_produces_a_real_audit_record(pool, conn):
     admin_id, *_ = await create_test_admin(pool, role="superadmin")
     await command_registry_queries.update_command_admin(
@@ -203,3 +347,91 @@ async def test_unauthenticated_requests_are_rejected_over_http(admin_server):
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{admin_server}/telegram/commands")
         assert response.status_code in (401, 403)
+
+
+# --- rate-limit/cooldown enforcement (command_registry._check_rate_limit,
+# the real primitive services/bot/app.py wires into command_gate_
+# middleware) -- real Redis, the same token-bucket packages/core/
+# rate_limit.py already uses for deposits/gateway/admin-login. -----------
+
+
+def _config(handler_name: str, **overrides: object) -> command_registry.CommandConfig:
+    defaults = dict(
+        handler_name=handler_name, command=handler_name, display_name=handler_name, description="",
+        category="general", enabled=True, visible=True, sort_order=0, cooldown_seconds=0,
+        rate_limit_per_minute=None, content_key=None, analytics_key=None, admin_managed=True,
+    )
+    defaults.update(overrides)
+    return command_registry.CommandConfig(**defaults)  # type: ignore[arg-type]
+
+
+async def test_no_limits_configured_always_allows(redis):
+    config = _config("cmd_probe_a")
+    allowed, limit_type, retry_after = await command_registry._check_rate_limit(  # noqa: SLF001
+        redis, handler_name="cmd_probe_a", telegram_id=next_telegram_id(), config=config
+    )
+    assert allowed is True
+    assert limit_type is None
+    assert retry_after is None
+
+
+async def test_cooldown_blocks_a_second_immediate_call(redis):
+    config = _config("cmd_probe_b", cooldown_seconds=30)
+    telegram_id = next_telegram_id()
+
+    first = await command_registry._check_rate_limit(  # noqa: SLF001
+        redis, handler_name="cmd_probe_b", telegram_id=telegram_id, config=config
+    )
+    assert first[0] is True
+
+    second = await command_registry._check_rate_limit(  # noqa: SLF001
+        redis, handler_name="cmd_probe_b", telegram_id=telegram_id, config=config
+    )
+    assert second == (False, "cooldown", pytest.approx(30.0, abs=1.0))
+
+
+async def test_rate_limit_allows_up_to_the_configured_count_then_blocks(redis):
+    config = _config("cmd_probe_c", rate_limit_per_minute=3)
+    telegram_id = next_telegram_id()
+
+    results = [
+        await command_registry._check_rate_limit(  # noqa: SLF001
+            redis, handler_name="cmd_probe_c", telegram_id=telegram_id, config=config
+        )
+        for _ in range(4)
+    ]
+    allowed_flags = [r[0] for r in results]
+    assert allowed_flags == [True, True, True, False]
+    assert results[3][1] == "rate_limit"
+    assert results[3][2] is not None and results[3][2] > 0
+
+
+async def test_different_users_get_independent_limits(redis):
+    config = _config("cmd_probe_d", cooldown_seconds=30)
+    user_a, user_b = next_telegram_id(), next_telegram_id()
+
+    first = await command_registry._check_rate_limit(  # noqa: SLF001
+        redis, handler_name="cmd_probe_d", telegram_id=user_a, config=config
+    )
+    assert first[0] is True
+    # user_b's own cooldown must be untouched by user_a's -- these are two
+    # different real people, not one shared limit.
+    second = await command_registry._check_rate_limit(  # noqa: SLF001
+        redis, handler_name="cmd_probe_d", telegram_id=user_b, config=config
+    )
+    assert second[0] is True
+
+
+async def test_different_commands_get_independent_limits_for_the_same_user(redis):
+    telegram_id = next_telegram_id()
+    config_e = _config("cmd_probe_e", cooldown_seconds=30)
+    config_f = _config("cmd_probe_f", cooldown_seconds=30)
+
+    first = await command_registry._check_rate_limit(  # noqa: SLF001
+        redis, handler_name="cmd_probe_e", telegram_id=telegram_id, config=config_e
+    )
+    assert first[0] is True
+    second = await command_registry._check_rate_limit(  # noqa: SLF001
+        redis, handler_name="cmd_probe_f", telegram_id=telegram_id, config=config_f
+    )
+    assert second[0] is True

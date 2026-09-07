@@ -126,23 +126,74 @@ limited, below minimum, provider error, ...), so there is no single
 these returns a clear 404 (`MissingContentKey`), not a confusing empty
 render.
 
-## 6. What this pass deliberately did not build
+## 6. Rate limit/cooldown enforcement (Phase 3)
 
-- **Rate limit/cooldown enforcement.** `cooldown_seconds` and
-  `rate_limit_per_minute` are real, stored, admin-editable fields, but no
-  code path in `services/bot/handlers.py` or the middleware chain reads
-  and enforces them yet. Configuration ready for enforcement, not an
-  active control -- stated here so nobody mistakes the schema's existence
-  for the behavior actually being live.
-- **A visible/sort_order-driven dynamic `/help` listing.** The registry
-  has the fields a generated help menu would need; no handler currently
-  builds one from them.
-- **`analytics_key` applied to metric labels.** Stored and editable, but
-  `perf.py`'s own metrics still label by the real handler function name
-  unconditionally -- an admin-set analytics_key does not yet change what
-  appears on Grafana or in `GET /telegram/commands`. Kept simple
-  deliberately: retroactively renaming a metric's label risks confusing
-  an existing dashboard/alert built against the real function name, and
-  nothing in this pass's own scope needed it to work yet.
+Both `cooldown_seconds` and `rate_limit_per_minute` are now genuinely
+enforced, not just stored -- `services/bot/command_registry.py::
+command_gate_middleware` checks both (right after the enable/disable
+check, before the real handler ever runs) using the exact same Redis
+token-bucket primitive every other rate limit in this codebase already
+uses (`packages/core/rate_limit.py`, also backing the deposit cap, the
+gateway's per-connection limits, and the admin login brute-force
+throttle) -- extended additively with a new `allow_with_retry_after()`
+function (the existing `allow()` is now implemented in terms of it, with
+zero behavior change for any of its pre-existing callers) so a denied
+request gets a real, computed "try again in N seconds", not a bare "too
+many requests" or a guess.
 
-Both are explicit, bounded deferrals -- not scope silently dropped.
+A cooldown is a capacity-1 bucket refilling once every `cooldown_seconds`
+(a second attempt before that time elapses is denied outright); a rate
+limit is a capacity-N bucket refilling continuously at N/60 per second (a
+smoother, burst-tolerant version of "N per minute", not a hard
+reset-every-60-seconds window). Both are keyed per `(handler_name,
+telegram_id)`, so one player hitting their own limit never affects
+another, and one command's limit never affects a different command for
+the same player.
+
+Blocking happens entirely inside the gate middleware, before the real
+handler is ever called -- this is what makes rate limiting inherently
+safe against duplicate financial effects (Section 3's own requirement):
+a denied request never reaches `cmd_deposit`/`cmd_withdraw`/etc. at all,
+so there is no financial code path that could have run twice.
+
+Observability: `telegram_command_rate_limited_total{handler, limit_type}`
+(a new Counter, `limit_type` is `"cooldown"` or `"rate_limit"`), visible
+on both the bot's `/metrics` and the admin Commands screen (as "Rate-
+limited" hits) and the Grafana dashboard's own new panel. Admin
+configuration is validated server-side: `cooldown_seconds` must be a
+non-negative integer capped at 3600 (1 hour); `rate_limit_per_minute`
+must be null (explicitly unlimited) or a positive integer capped at 1000
+-- both reject with a clear 422 rather than a raw DB constraint failure
+or silently-accepted nonsense.
+
+## 7. Analytics key wiring (Phase 3)
+
+An admin-set `analytics_key` now relabels every metric this codebase
+attributes to a command -- `telegram_commands_total`, `_success_total`,
+`_error_total`, `_latency_seconds` (`services/bot/perf.py`), the DB/Redis
+timing histograms (same file, via the same resolved label feeding the
+shared `_current_command` contextvar), and both of command_registry.py's
+own counters (`telegram_command_blocked_total`,
+`telegram_command_rate_limited_total`). Resolution happens in exactly
+one place (`command_registry.analytics_label()`): the real handler
+function name unless an override is set, so every existing Grafana
+panel/alert built against a real function name (the overwhelming
+majority -- no command has an analytics_key set by default) is
+completely unaffected. `services/admin/command_registry_queries.py::
+list_commands_admin()` resolves the identical way when joining live
+`/metrics` data back to each registry row, so a command with a custom
+analytics_key shows its real numbers in the admin UI instead of a
+false NO DATA.
+
+The Redis rate-limit/cooldown bucket keys deliberately stay on the raw
+`handler_name`, never the analytics label -- an admin renaming a
+command's analytics identity must never reset or fragment a player's
+already-in-progress cooldown/rate-limit state.
+
+## 8. A visible/sort_order-driven dynamic `/help` listing
+
+Still not built. The registry has the fields a generated help menu would
+need (`visible`, `sort_order`, `category`, `display_name`); no handler
+currently builds one from them. Noted here as a real, bounded, still-open
+deferral -- not attempted this phase either, since it's a net-new player-
+facing feature rather than finishing an already-started one.

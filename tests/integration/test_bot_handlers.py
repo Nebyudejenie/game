@@ -1775,3 +1775,138 @@ async def test_disabling_a_command_also_blocks_it_via_the_menu_button_path(pool,
             reason="test cleanup", ip_address=None,
         )
         command_registry.set_cache({})
+
+
+async def test_a_configured_cooldown_is_enforced_through_the_real_dispatcher(pool, bot_ctx):
+    """Telegram Command Center Phase 3: cooldown_seconds/rate_limit_per_
+    minute were real, stored, admin-editable fields with no enforcement
+    wired up as of Phase 2's own report. Fixed by services/bot/
+    command_registry.py::command_gate_middleware reusing the same Redis
+    token-bucket packages/core/rate_limit.py already uses for deposits/
+    gateway/admin-login -- this test proves it end to end through the
+    real dispatcher, not just against the bucket primitive directly
+    (tests/integration/test_command_registry_admin.py covers that).
+    """
+    from packages.core import metrics
+    from services.admin import command_registry_queries
+    from services.bot import command_registry
+    from tests.integration.test_admin_auth import create_test_admin
+
+    dp, bot, session = bot_ctx
+    admin_id, *_ = await create_test_admin(pool, role="superadmin")
+
+    await command_registry_queries.update_command_admin(
+        pool, admin_id=admin_id, handler_name="cmd_rules", changes={"cooldown_seconds": 30},
+        reason="test", ip_address=None,
+    )
+    try:
+        await command_registry.refresh_once(pool)
+
+        telegram_id = next_telegram_id()
+        await dp.feed_update(
+            bot, make_contact_update(telegram_id, contact_user_id=telegram_id, phone=unique_phone())
+        )
+        await _settle()
+        session.sent.clear()
+
+        rate_limited_before = metrics.telegram_command_rate_limited_total.labels(
+            handler="cmd_rules", limit_type="cooldown"
+        )._value.get()
+
+        # First /rules goes through normally -- the real handler's own
+        # rules text, not a cooldown message.
+        await dp.feed_update(bot, make_text_update(telegram_id, "/rules"))
+        await _settle()
+        assert len(session.sent) == 1
+        first_reply = session.sent[0].text
+
+        # Immediately again -- must be blocked by the 30s cooldown just
+        # configured, with a real, computed "try again in ~30s" reply,
+        # not the earlier rules text repeated and not a bare "too many
+        # requests".
+        session.sent.clear()
+        await dp.feed_update(bot, make_text_update(telegram_id, "/rules"))
+        await _settle()
+        assert len(session.sent) == 1
+        assert session.sent[0].text != first_reply
+        assert "30" in session.sent[0].text or "ለ" in session.sent[0].text  # am: "በ{seconds}"
+        assert (
+            metrics.telegram_command_rate_limited_total.labels(
+                handler="cmd_rules", limit_type="cooldown"
+            )._value.get()
+            == rate_limited_before + 1
+        )
+    finally:
+        await command_registry_queries.update_command_admin(
+            pool, admin_id=admin_id, handler_name="cmd_rules", changes={"cooldown_seconds": 0},
+            reason="test cleanup", ip_address=None,
+        )
+        command_registry.set_cache({})
+
+
+async def test_a_configured_analytics_key_relabels_every_command_metric(pool, bot_ctx):
+    """Phase 3's "one canonical command identity": an admin-set
+    analytics_key must relabel *every* metric this codebase attributes to
+    a command -- count/success/error/latency (services/bot/perf.py) and
+    DB/Redis time (also perf.py, via the same resolved label feeding
+    _current_command) -- never leave some metrics keyed by the real
+    handler_name while others use the override.
+    """
+    from packages.core import metrics
+    from services.admin import command_registry_queries
+    from services.bot import command_registry
+    from tests.integration.test_admin_auth import create_test_admin
+
+    dp, bot, session = bot_ctx
+    admin_id, *_ = await create_test_admin(pool, role="superadmin")
+
+    await command_registry_queries.update_command_admin(
+        pool, admin_id=admin_id, handler_name="cmd_support", changes={"analytics_key": "support_v2"},
+        reason="test", ip_address=None,
+    )
+    try:
+        await command_registry.refresh_once(pool)
+
+        telegram_id = next_telegram_id()
+        await dp.feed_update(
+            bot, make_contact_update(telegram_id, contact_user_id=telegram_id, phone=unique_phone())
+        )
+        await _settle()
+        session.sent.clear()
+
+        real_name_before = metrics.telegram_commands_total.labels(handler="cmd_support")._value.get()
+        override_before = metrics.telegram_commands_total.labels(handler="support_v2")._value.get()
+        override_latency_before = metrics.telegram_command_latency_seconds.labels(
+            handler="support_v2"
+        )._sum.get()
+
+        await dp.feed_update(bot, make_text_update(telegram_id, "/support"))
+        await _settle()
+
+        assert len(session.sent) == 1
+        # The real handler ran normally -- this is a relabeling, not a
+        # behavior change.
+        assert metrics.telegram_commands_total.labels(handler="cmd_support")._value.get() == real_name_before
+        assert (
+            metrics.telegram_commands_total.labels(handler="support_v2")._value.get()
+            == override_before + 1
+        )
+        assert metrics.telegram_command_success_total.labels(handler="support_v2")._value.get() >= 1
+        assert (
+            metrics.telegram_command_latency_seconds.labels(handler="support_v2")._sum.get()
+            > override_latency_before
+        )
+        # DB/Redis time attribution (telegram_db_duration_seconds/
+        # telegram_redis_duration_seconds) is driven by the exact same
+        # resolved label via perf.py's _current_command contextvar --
+        # verified directly in tests/integration/test_perf_db_redis.py
+        # against a properly instrumented pool/redis client (this file's
+        # own bot_ctx fixture intentionally uses the *plain*, uninstrumented
+        # test pool/redis, matching every other test here, so it cannot
+        # itself observe DB/Redis timing regardless of labeling).
+    finally:
+        await command_registry_queries.update_command_admin(
+            pool, admin_id=admin_id, handler_name="cmd_support", changes={"analytics_key": None},
+            reason="test cleanup", ip_address=None,
+        )
+        command_registry.set_cache({})

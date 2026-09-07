@@ -80,6 +80,8 @@
   "error.generic": "የሆነ ስህተት ተፈጥሯል። እባክዎ እንደገና ይሞክሩ።",
   "error.not_registered": "እባክዎ በመጀመሪያ ይመዝገቡ። /start ይጫኑ።",
   "error.command_disabled": "ይህ አገልግሎት ለጊዜው አይገኝም። እባክዎ ቆይተው እንደገና ይሞክሩ።",
+  "error.rate_limited_retry": "ይህን በጣም ብዙ ጊዜ እየሞከሩ ነው። እባክዎ በ{seconds} ሰከንድ ውስጥ እንደገና ይሞክሩ።",
+  "error.rate_limited_generic": "ይህን በጣም ብዙ ጊዜ እየሞከሩ ነው። እባክዎ ትንሽ ቀንሰው እንደገና ይሞክሩ።",
 
   "notify.deposit_confirmed": "✅ {amount} ብር ገቢ ተደርጓል። ቀሪ ሂሳብ፦ {balance} ብር",
   "notify.withdrawal_succeeded": "✅ የ{amount} ብር ወጪዎ ተልኳል።",

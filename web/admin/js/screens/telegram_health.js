@@ -98,13 +98,26 @@ async function loadCommands(el) {
   }
 }
 
-function renderCommands(el, commands) {
+function sortBySlowestFirst(commands) {
+  // Section 7: "sort by slowest P95 so operators immediately see what
+  // needs optimization" -- commands with real traffic (a real P95) sort
+  // above every NO-DATA command, slowest first; NO-DATA commands keep
+  // the registry's own sort_order among themselves.
+  const withData = commands.filter((c) => c.metrics && c.metrics.p95_ms !== null);
+  const withoutData = commands.filter((c) => !c.metrics || c.metrics.p95_ms === null);
+  withData.sort((a, b) => b.metrics.p95_ms - a.metrics.p95_ms);
+  return [...withData, ...withoutData];
+}
+
+function renderCommands(el, commandsUnsorted) {
+  const commands = sortBySlowestFirst(commandsUnsorted);
   el.innerHTML = `
+    <p class="empty">Sorted slowest (P95) first -- commands with no real traffic yet sort last.</p>
     <table class="data-table">
       <thead>
         <tr>
           <th>Command</th><th>Category</th><th>Enabled</th><th>Usage</th>
-          <th>Success</th><th>P50</th><th>P95</th><th>P99</th><th>Blocked</th><th></th>
+          <th>Success</th><th>P50</th><th>P95</th><th>P99</th><th>Disabled hits</th><th>Rate-limited</th><th></th>
         </tr>
       </thead>
       <tbody>
@@ -125,9 +138,10 @@ function renderCommands(el, commands) {
             <td>${c.metrics ? fmtMs(c.metrics.p95_ms) : "—"}</td>
             <td>${c.metrics ? fmtMs(c.metrics.p99_ms) : "—"}</td>
             <td>${c.metrics ? c.metrics.blocked : "—"}</td>
+            <td>${c.metrics ? c.metrics.rate_limited : "—"}</td>
             <td><button class="btn btn-secondary btn-sm details-btn">Details</button></td>
           </tr>
-          <tr class="detail-row" data-detail-for="${c.handler_name}" hidden><td colspan="10"></td></tr>
+          <tr class="detail-row" data-detail-for="${c.handler_name}" hidden><td colspan="11"></td></tr>
         `).join("")}
       </tbody>
     </table>
@@ -157,18 +171,30 @@ function toggleDetails(el, command) {
     <div class="detail-panel">
       <div class="detail-grid">
         <div><div class="field-label">Handler</div><div class="field-value">${escapeHtml(command.handler_name)}</div></div>
+        <div><div class="field-label">Analytics key</div><div class="field-value">${command.analytics_key ? escapeHtml(command.analytics_key) : "(uses handler name)"}</div></div>
         <div><div class="field-label">Content key</div><div class="field-value">${command.content_key ? escapeHtml(command.content_key) : "—"}</div></div>
-        <div><div class="field-label">Cooldown</div><div class="field-value">${command.cooldown_seconds}s</div></div>
-        <div><div class="field-label">Rate limit</div><div class="field-value">${command.rate_limit_per_minute ? command.rate_limit_per_minute + "/min" : "none"}</div></div>
         <div><div class="field-label">Last changed</div><div class="field-value">${fmtDate(command.updated_at)}</div></div>
       </div>
+      ${command.metrics ? `
+        <div class="detail-grid" style="margin-top:0.5rem">
+          <div><div class="field-label">Requests</div><div class="field-value">${command.metrics.count}</div></div>
+          <div><div class="field-label">Errors</div><div class="field-value">${command.metrics.count > 0 ? Math.round(command.metrics.error_rate * command.metrics.count) : 0}</div></div>
+          <div><div class="field-label">Disabled hits</div><div class="field-value">${command.metrics.blocked}</div></div>
+          <div><div class="field-label">Rate-limited hits</div><div class="field-value">${command.metrics.rate_limited}</div></div>
+        </div>
+      ` : `<p class="empty" style="margin-top:0.5rem">NO DATA -- no real traffic for this command yet (or bot_metrics_url isn't configured in this environment).</p>`}
 
       <form class="edit-form">
         <div class="detail-grid">
           <label>Description <input type="text" name="description" value="${escapeHtml(command.description)}" /></label>
           <label>Category <input type="text" name="category" value="${escapeHtml(command.category)}" /></label>
           <label>Sort order <input type="number" name="sort_order" value="${command.sort_order}" /></label>
-          <label>Cooldown (s) <input type="number" name="cooldown_seconds" value="${command.cooldown_seconds}" min="0" /></label>
+          <label>Cooldown (seconds, 0 = none)
+            <input type="number" name="cooldown_seconds" value="${command.cooldown_seconds}" min="0" max="3600" />
+          </label>
+          <label>Rate limit (per minute, blank = unlimited)
+            <input type="number" name="rate_limit_per_minute" value="${command.rate_limit_per_minute ?? ""}" min="1" max="1000" placeholder="unlimited" />
+          </label>
         </div>
         <div class="action-row">
           ${
@@ -178,6 +204,11 @@ function toggleDetails(el, command) {
           }
           <button type="submit" class="btn">Save changes</button>
         </div>
+        <p class="empty" style="margin-top:0.5rem">
+          A configured limit takes effect within ~30s (the bot's own registry poll
+          interval). A player who hits it sees "try again in N seconds" whenever that's
+          computable -- never a bare "too many requests" or a Redis-level detail.
+        </p>
       </form>
 
       ${command.content_key ? `
@@ -219,6 +250,7 @@ function toggleDetails(el, command) {
   editForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = new FormData(editForm);
+    const rawRateLimit = data.get("rate_limit_per_minute");
     try {
       await api(`/telegram/commands/${command.handler_name}`, {
         method: "PATCH",
@@ -228,6 +260,7 @@ function toggleDetails(el, command) {
             category: data.get("category"),
             sort_order: Number(data.get("sort_order")),
             cooldown_seconds: Number(data.get("cooldown_seconds")),
+            rate_limit_per_minute: rawRateLimit === "" ? null : Number(rawRateLimit),
           },
           reason: "Edited from the Telegram Commands screen",
         },

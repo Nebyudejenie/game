@@ -37,6 +37,41 @@ _ALLOWED_FIELDS = {
     "analytics_key",
 }
 
+# Security regression finding (Section 46's own "input validation" check):
+# without this, a malformed value for any field not already given its own
+# bespoke check (cooldown_seconds/rate_limit_per_minute below) reached
+# asyncpg's own type binding raw -- e.g. {"enabled": "yes"} surfaced as an
+# unhandled asyncpg.exceptions.DataError, a 500 for an authenticated admin
+# request that should have been a clean 422. `str | None` fields
+# (content_key/analytics_key are nullable) accept None; every other
+# string field does not, since bot_commands has no nullable text column
+# in _ALLOWED_FIELDS besides those two.
+_NULLABLE_STRING_FIELDS = {"content_key", "analytics_key"}
+_FIELD_TYPES: dict[str, type] = {
+    "display_name": str,
+    "description": str,
+    "category": str,
+    "enabled": bool,
+    "visible": bool,
+    "sort_order": int,
+    "content_key": str,
+    "analytics_key": str,
+}
+
+# Section 4's own "validate: minimum, maximum, reasonable range... no
+# unlimited accidental configuration unless explicitly supported"
+# requirement. The database's own CHECK constraints (migrations/versions/
+# 232a259a3baa_bot_command_registry.py) already reject a negative
+# cooldown or a non-positive rate limit -- these are a *tighter*,
+# application-level ceiling so a fat-fingered "36000" (10 hours) comes
+# back as a clear 422 with a real explanation instead of either a raw
+# constraint violation (below zero) or silently accepted nonsense (an
+# unbounded-looking cooldown a human almost certainly didn't intend).
+# `rate_limit_per_minute=None` (unlimited) is unaffected -- that's the
+# explicit, deliberate way to express "no limit", not an oversight.
+MAX_COOLDOWN_SECONDS = 3600
+MAX_RATE_LIMIT_PER_MINUTE = 1000
+
 
 class UnknownBotCommand(ValueError):
     pass
@@ -60,7 +95,16 @@ async def list_commands_admin(pool: asyncpg.Pool, *, bot_metrics_url: str) -> li
     result = []
     for row in rows:
         record = dict(row)
-        m = live.get(row["handler_name"])
+        # Phase 3's "one canonical command identity": services/bot/perf.py
+        # and command_registry.py both label every metric by
+        # analytics_key when one is set, falling back to the real
+        # handler_name otherwise (services/bot/command_registry.py::
+        # analytics_label()) -- the lookup here has to resolve the exact
+        # same way, or a command with a custom analytics_key would show
+        # NO DATA despite the bot actually reporting real numbers for it
+        # under that other name.
+        metrics_label = row["analytics_key"] or row["handler_name"]
+        m = live.get(metrics_label)
         # None here is the explicit "NO DATA" signal the admin UI must
         # render as such -- never coerced to 0, per the parent
         # directive's own "if a metric has insufficient real traffic,
@@ -73,6 +117,7 @@ async def list_commands_admin(pool: asyncpg.Pool, *, bot_metrics_url: str) -> li
                 "success_rate": m.success_rate,
                 "error_rate": m.error_rate,
                 "blocked": m.blocked,
+                "rate_limited": m.rate_limited,
                 "p50_ms": round(m.p50_seconds * 1000, 1) if m.p50_seconds is not None else None,
                 "p95_ms": round(m.p95_seconds * 1000, 1) if m.p95_seconds is not None else None,
                 "p99_ms": round(m.p99_seconds * 1000, 1) if m.p99_seconds is not None else None,
@@ -96,6 +141,42 @@ async def update_command_admin(
         raise InvalidCommandField(f"cannot set: {sorted(unknown)}")
     if not changes:
         raise InvalidCommandField("no fields given")
+
+    for field, expected_type in _FIELD_TYPES.items():
+        if field not in changes:
+            continue
+        value = changes[field]
+        if value is None and field in _NULLABLE_STRING_FIELDS:
+            continue
+        # isinstance(True, int) is True in Python -- explicitly reject a
+        # bool where an int (sort_order) is expected, the same guard
+        # cooldown_seconds/rate_limit_per_minute already use below.
+        if expected_type is int and isinstance(value, bool):
+            raise InvalidCommandField(f"{field} must be an integer")
+        if not isinstance(value, expected_type):
+            raise InvalidCommandField(f"{field} must be a {expected_type.__name__}")
+
+    if "cooldown_seconds" in changes:
+        cooldown = changes["cooldown_seconds"]
+        if not isinstance(cooldown, int) or isinstance(cooldown, bool) or cooldown < 0:
+            raise InvalidCommandField("cooldown_seconds must be a non-negative integer")
+        if cooldown > MAX_COOLDOWN_SECONDS:
+            raise InvalidCommandField(
+                f"cooldown_seconds cannot exceed {MAX_COOLDOWN_SECONDS} ({MAX_COOLDOWN_SECONDS // 60} minutes)"
+            )
+    if "rate_limit_per_minute" in changes:
+        rate_limit_value = changes["rate_limit_per_minute"]
+        if rate_limit_value is not None:
+            if (
+                not isinstance(rate_limit_value, int)
+                or isinstance(rate_limit_value, bool)
+                or rate_limit_value <= 0
+            ):
+                raise InvalidCommandField("rate_limit_per_minute must be a positive integer, or null for unlimited")
+            if rate_limit_value > MAX_RATE_LIMIT_PER_MINUTE:
+                raise InvalidCommandField(
+                    f"rate_limit_per_minute cannot exceed {MAX_RATE_LIMIT_PER_MINUTE}"
+                )
 
     async with pool.acquire() as conn:
         async with conn.transaction():

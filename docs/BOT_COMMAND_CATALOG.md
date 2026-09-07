@@ -37,24 +37,24 @@ regression test for exactly that.
 
 | # | Handler | Trigger | Description | Admin-configurable? | RBAC/audience | Content source | Rate limit | Measured P50/P95/P99 | Error handling | Audit | Analytics | Test coverage |
 |---|---------|---------|-------------|---------------------|----------------|-----------------|------------|----------------------|----------------|-------|-----------|----------------|
-| 1 | `cmd_start` | `/start`, incl. `/start ref_<id>` deep link | Registration entry point; welcomes back a returning user with the Mini App keyboard, or starts contact-share registration | Description/content only -- **structural** (`admin_managed=false`): cannot be disabled, since that would lock out every new player with no recovery path but a deploy | Everyone | `services/bot/i18n.py` (am/en/om/ti); registry `content_key`: `welcome.back` | Storable (`rate_limit_per_minute`), not yet enforced | Not yet measured under real traffic (see below) | Falls through to aiogram's own unhandled-exception logging; no user-facing crash text | Registry edits: `admin_audit_log` via `telegram_commands.update` | `telegram_commands_total{handler="cmd_start"}` | `tests/integration/test_bot_handlers.py`, `test_command_registry_admin.py` (multiple) |
-| 2 | `on_contact` | Shared contact (`F.contact`) | Completes registration from a shared phone number | Structural (`admin_managed=false`), same reasoning as `cmd_start` | Everyone (pre-registration) | i18n | Storable, not yet enforced | Not yet measured | `ContactMismatch`/`InvalidPhone`/`PhoneAlreadyRegistered` each get a specific, accurate reply | Registry edits audited | via `telegram_commands_total{handler="on_contact"}` | `test_bot_handlers.py` |
-| 3 | `cmd_play` | `/play` | Sends the Mini App launch keyboard | **Yes** -- enable/disable, description, sort order, cooldown, rate limit | Registered users | i18n; `content_key`: `play.open` | Storable, not yet enforced | Not yet measured | Registered-user check only | Registry edits audited | Yes | `test_bot_handlers.py` |
-| 4 | `cmd_balance` | `/balance` | Reports cash/bonus/locked balance | **Yes** | Registered users | i18n; `content_key`: `balance.summary` | Storable, not yet enforced | **Measured** (bench script, real local Postgres): old 6-query pattern p50 7.24ms/p95 13.29ms/p99 14.72ms → new single-query p50 1.57ms/p95 2.28ms/p99 2.73ms (DB time only, not full command latency) | Registered-user check only | Registry edits audited | Yes | `test_bot_handlers.py`, `test_command_registry_admin.py` |
-| 5 | `cmd_history` | `/history` | Last 10 finished rounds | **Yes** | Registered users | i18n; `content_key`: `history.header` | Storable, not yet enforced | Not yet measured | Registered-user check only | Registry edits audited | Yes | `test_bot_handlers.py` |
-| 6 | `cmd_invite` | `/invite` | Referral link + referred-user count | **Yes** | Registered users | i18n; `content_key`: `invite.summary` | Storable, not yet enforced | Not yet measured | Registered-user check only | Registry edits audited | Yes | `test_bot_handlers.py` |
-| 7 | `cmd_rules` | `/rules` | Static rules text | **Yes** | Everyone | i18n; `content_key`: `rules.text` | Storable, not yet enforced | Not yet measured | None needed (no failure mode) | Registry edits audited | Yes | `test_bot_handlers.py`, `test_command_registry_admin.py` |
-| 8 | `cmd_support` | `/support` | Static support contact info | **Yes** | Everyone | i18n; `content_key`: `support.info` | Storable, not yet enforced | Not yet measured | None needed | Registry edits audited | Yes | `test_bot_handlers.py` |
-| 9 | `cmd_deposit` | `/deposit <amount>` | Starts a Chapa or manual deposit | **Yes** (registry); provider availability separately admin-configurable (`payments:configure`) | Registered users | i18n (no single `content_key` set -- multiple outcome-specific replies) | Storable, not yet enforced; `deposits.DepositRateLimited` already enforced independently | Not yet measured (includes a real payment-provider call; expect NORMAL-class, not FAST) | 7 distinct provider/limit exceptions, each a specific reply | Registry edits audited; provider-level audit trail unchanged | Yes | `test_bot_handlers.py` |
-| 10 | `cmd_withdraw` | `/withdraw <amount> <account> <name>` | Starts a withdrawal | **Yes** (registry); same provider caveat as deposit | Registered users | i18n | Storable; `withdrawals.request_withdrawal`'s own caps already enforced independently | Not yet measured (NORMAL-class expected) | 5 distinct exceptions, each a specific reply | Registry edits audited; existing payments audit trail unchanged | Yes | `test_bot_handlers.py` |
-| 11 | `cmd_limits` | `/limits ...` | Responsible-gaming deposit/loss limits, cool-off, self-exclusion | **Yes** | Registered users | i18n | Storable, not yet enforced | Not yet measured | Multiple invalid-input branches, each a specific reply | Registry edits audited; `responsible_gaming` module's own state changes unchanged | Yes | `test_bot_handlers.py` |
-| 12 | `cmd_language` | `/language <code>` | Sets `users.language` | **Yes** (registry); the language list itself is still hardcoded to `SUPPORTED_LANGUAGES` | Everyone | i18n | Storable, not yet enforced | Not yet measured | Rejects unsupported codes | Registry edits audited | Yes | `test_bot_handlers.py` |
-| 13 | `cmd_change_username` | `/change_username <name>` | Sets `users.display_name` | **Yes** | Registered users | i18n | Storable, not yet enforced | Not yet measured | Length-limit check | Registry edits audited | Yes | `test_bot_handlers.py` |
-| 14 | `on_photo` | Photo upload (`F.photo`) | Attaches a receipt image to the latest pending manual deposit | **Yes** | Registered users | i18n | Storable, not yet enforced | Not yet measured | "No pending request" reply if none found | Registry edits audited | Yes | `test_bot_handlers.py` |
-| 15 | `on_agent_portal_command` | `/portal` (active payment agents only) | Mints a one-time Agent Portal login link | **Yes** | `payment_agents.is_active` only | i18n | Storable, not yet enforced | Not yet measured | None needed | Registry edits audited | Yes | `test_bot_handlers.py` |
-| 16 | `on_agent_sms` | Any text, active payment agents only | Forwards Telebirr SMS text into `ingest_sms_evidence` | **Yes** | `payment_agents.is_active` only | i18n | Storable; ingestion's own dedup already enforced independently | Not yet measured | 5 distinct ingestion outcomes, each reported | Registry edits audited; ingestion's own `payment_evidence` audit trail unchanged | Yes | `test_bot_handlers.py` |
-| 17 | `on_menu_text` | Any text matching a localized menu button label | Dispatches to the matching slash-command handler | Description only -- structural (`admin_managed=false`): disabling the menu dispatcher would break every reply-keyboard button at once | Varies by dispatched command | i18n | Storable, not yet enforced | Not yet measured | Falls back to "please register" for unrecognized text | Registry edits audited | No (delegates to the dispatched command's own) | `test_bot_handlers.py` |
-| 18 | `on_unhandled_message` | Catch-all | Silent drop (registered) / registration prompt (unregistered) | Description only -- structural (`admin_managed=false`) | Everyone | i18n | Storable, not yet enforced | Not yet measured | None needed | Registry edits audited | Yes | `test_bot_handlers.py` |
+| 1 | `cmd_start` | `/start`, incl. `/start ref_<id>` deep link | Registration entry point; welcomes back a returning user with the Mini App keyboard, or starts contact-share registration | Description/content only -- **structural** (`admin_managed=false`): cannot be disabled, since that would lock out every new player with no recovery path but a deploy | Everyone | `services/bot/i18n.py` (am/en/om/ti); registry `content_key`: `welcome.back` | Enforced (Phase 3) when configured | Not yet measured under real traffic (see below) | Falls through to aiogram's own unhandled-exception logging; no user-facing crash text | Registry edits: `admin_audit_log` via `telegram_commands.update` | `telegram_commands_total{handler="cmd_start"}` | `tests/integration/test_bot_handlers.py`, `test_command_registry_admin.py` (multiple) |
+| 2 | `on_contact` | Shared contact (`F.contact`) | Completes registration from a shared phone number | Structural (`admin_managed=false`), same reasoning as `cmd_start` | Everyone (pre-registration) | i18n | Enforced (Phase 3) when configured, per-user cooldown/rate-limit via the same Redis token bucket deposits/gateway/admin-login use | Not yet measured | `ContactMismatch`/`InvalidPhone`/`PhoneAlreadyRegistered` each get a specific, accurate reply | Registry edits audited | via `telegram_commands_total{handler="on_contact"}` | `test_bot_handlers.py` |
+| 3 | `cmd_play` | `/play` | Sends the Mini App launch keyboard | **Yes** -- enable/disable, description, sort order, cooldown, rate limit | Registered users | i18n; `content_key`: `play.open` | Enforced (Phase 3) when configured, per-user cooldown/rate-limit via the same Redis token bucket deposits/gateway/admin-login use | Not yet measured | Registered-user check only | Registry edits audited | Yes | `test_bot_handlers.py` |
+| 4 | `cmd_balance` | `/balance` | Reports cash/bonus/locked balance | **Yes** | Registered users | i18n; `content_key`: `balance.summary` | Enforced (Phase 3) when configured, per-user cooldown/rate-limit via the same Redis token bucket deposits/gateway/admin-login use | **Measured** (bench script, real local Postgres): old 6-query pattern p50 7.24ms/p95 13.29ms/p99 14.72ms → new single-query p50 1.57ms/p95 2.28ms/p99 2.73ms (DB time only, not full command latency) | Registered-user check only | Registry edits audited | Yes | `test_bot_handlers.py`, `test_command_registry_admin.py` |
+| 5 | `cmd_history` | `/history` | Last 10 finished rounds | **Yes** | Registered users | i18n; `content_key`: `history.header` | Enforced (Phase 3) when configured, per-user cooldown/rate-limit via the same Redis token bucket deposits/gateway/admin-login use | Not yet measured | Registered-user check only | Registry edits audited | Yes | `test_bot_handlers.py` |
+| 6 | `cmd_invite` | `/invite` | Referral link + referred-user count | **Yes** | Registered users | i18n; `content_key`: `invite.summary` | Enforced (Phase 3) when configured, per-user cooldown/rate-limit via the same Redis token bucket deposits/gateway/admin-login use | Not yet measured | Registered-user check only | Registry edits audited | Yes | `test_bot_handlers.py` |
+| 7 | `cmd_rules` | `/rules` | Static rules text | **Yes** | Everyone | i18n; `content_key`: `rules.text` | Enforced (Phase 3) when configured, per-user cooldown/rate-limit via the same Redis token bucket deposits/gateway/admin-login use | Not yet measured | None needed (no failure mode) | Registry edits audited | Yes | `test_bot_handlers.py`, `test_command_registry_admin.py` |
+| 8 | `cmd_support` | `/support` | Static support contact info | **Yes** | Everyone | i18n; `content_key`: `support.info` | Enforced (Phase 3) when configured, per-user cooldown/rate-limit via the same Redis token bucket deposits/gateway/admin-login use | Not yet measured | None needed | Registry edits audited | Yes | `test_bot_handlers.py` |
+| 9 | `cmd_deposit` | `/deposit <amount>` | Starts a Chapa or manual deposit | **Yes** (registry); provider availability separately admin-configurable (`payments:configure`) | Registered users | i18n (no single `content_key` set -- multiple outcome-specific replies) | Enforced (Phase 3) when configured, per-user cooldown/rate-limit via the same Redis token bucket deposits/gateway/admin-login use; `deposits.DepositRateLimited` already enforced independently | Not yet measured (includes a real payment-provider call; expect NORMAL-class, not FAST) | 7 distinct provider/limit exceptions, each a specific reply | Registry edits audited; provider-level audit trail unchanged | Yes | `test_bot_handlers.py` |
+| 10 | `cmd_withdraw` | `/withdraw <amount> <account> <name>` | Starts a withdrawal | **Yes** (registry); same provider caveat as deposit | Registered users | i18n | Enforced (Phase 3) when configured; `withdrawals.request_withdrawal`'s own caps enforced independently | Not yet measured (NORMAL-class expected) | 5 distinct exceptions, each a specific reply | Registry edits audited; existing payments audit trail unchanged | Yes | `test_bot_handlers.py` |
+| 11 | `cmd_limits` | `/limits ...` | Responsible-gaming deposit/loss limits, cool-off, self-exclusion | **Yes** | Registered users | i18n | Enforced (Phase 3) when configured, per-user cooldown/rate-limit via the same Redis token bucket deposits/gateway/admin-login use | Not yet measured | Multiple invalid-input branches, each a specific reply | Registry edits audited; `responsible_gaming` module's own state changes unchanged | Yes | `test_bot_handlers.py` |
+| 12 | `cmd_language` | `/language <code>` | Sets `users.language` | **Yes** (registry); the language list itself is still hardcoded to `SUPPORTED_LANGUAGES` | Everyone | i18n | Enforced (Phase 3) when configured, per-user cooldown/rate-limit via the same Redis token bucket deposits/gateway/admin-login use | Not yet measured | Rejects unsupported codes | Registry edits audited | Yes | `test_bot_handlers.py` |
+| 13 | `cmd_change_username` | `/change_username <name>` | Sets `users.display_name` | **Yes** | Registered users | i18n | Enforced (Phase 3) when configured, per-user cooldown/rate-limit via the same Redis token bucket deposits/gateway/admin-login use | Not yet measured | Length-limit check | Registry edits audited | Yes | `test_bot_handlers.py` |
+| 14 | `on_photo` | Photo upload (`F.photo`) | Attaches a receipt image to the latest pending manual deposit | **Yes** | Registered users | i18n | Enforced (Phase 3) when configured, per-user cooldown/rate-limit via the same Redis token bucket deposits/gateway/admin-login use | Not yet measured | "No pending request" reply if none found | Registry edits audited | Yes | `test_bot_handlers.py` |
+| 15 | `on_agent_portal_command` | `/portal` (active payment agents only) | Mints a one-time Agent Portal login link | **Yes** | `payment_agents.is_active` only | i18n | Enforced (Phase 3) when configured, per-user cooldown/rate-limit via the same Redis token bucket deposits/gateway/admin-login use | Not yet measured | None needed | Registry edits audited | Yes | `test_bot_handlers.py` |
+| 16 | `on_agent_sms` | Any text, active payment agents only | Forwards Telebirr SMS text into `ingest_sms_evidence` | **Yes** | `payment_agents.is_active` only | i18n | Enforced (Phase 3) when configured; ingestion's own dedup enforced independently | Not yet measured | 5 distinct ingestion outcomes, each reported | Registry edits audited; ingestion's own `payment_evidence` audit trail unchanged | Yes | `test_bot_handlers.py` |
+| 17 | `on_menu_text` | Any text matching a localized menu button label | Dispatches to the matching slash-command handler | Description only -- structural (`admin_managed=false`): disabling the menu dispatcher would break every reply-keyboard button at once | Varies by dispatched command | i18n | Enforced (Phase 3) when configured, per-user cooldown/rate-limit via the same Redis token bucket deposits/gateway/admin-login use | Not yet measured | Falls back to "please register" for unrecognized text | Registry edits audited | No (delegates to the dispatched command's own) | `test_bot_handlers.py` |
+| 18 | `on_unhandled_message` | Catch-all | Silent drop (registered) / registration prompt (unregistered) | Description only -- structural (`admin_managed=false`) | Everyone | i18n | Enforced (Phase 3) when configured, per-user cooldown/rate-limit via the same Redis token bucket deposits/gateway/admin-login use | Not yet measured | None needed | Registry edits audited | Yes | `test_bot_handlers.py` |
 
 ## What "admin-configurable" actually means today
 
@@ -74,12 +74,19 @@ deploy. This is a deliberate, narrow exception, enforced server-side
 (`command_registry_queries.CommandNotAdminManaged`), not just a hidden
 button.
 
-**What is genuinely NOT yet built**: `cooldown_seconds` and
-`rate_limit_per_minute` are real, stored, admin-editable columns, but
-nothing in `services/bot/handlers.py` or the dispatch middleware chain
-reads and *enforces* them yet -- they are configuration ready for
-enforcement, not an active control today. Said honestly here rather than
-implied by their mere presence in the schema.
+**Phase 3 update**: `cooldown_seconds` and `rate_limit_per_minute` are
+now genuinely enforced by `services/bot/command_registry.py::
+command_gate_middleware`, not just stored -- see
+`docs/TELEGRAM_COMMAND_OPERATIONS.md` §6 for the full design. Every
+command in the table above shows "Enforced (Phase 3) when configured" in
+its Rate limit column: none has a non-default cooldown/rate-limit value
+set out of the box (every seeded row ships with `cooldown_seconds=0`,
+`rate_limit_per_minute=NULL`), so this is zero behavior change until an
+admin actually opts a specific command into a limit through the Commands
+screen. `analytics_key` is also now genuinely wired into every metric
+this codebase attributes to a command (same doc, §7) -- no command has
+one set by default either, so this too is a no-op for the existing
+Grafana dashboard until an admin sets one.
 
 ## What "Content source" means
 
@@ -93,3 +100,30 @@ catalog's "Content source" column doesn't distinguish "file default" from
 "admin override" per row because `t()` resolves that transparently and
 identically for every command; see `docs/CONTENT_STUDIO.md`-equivalent
 prior work if/when a unified Content Studio ships.
+
+## Bot Command Matrix -- closing assertion
+
+Cross-checked directly against `services/bot/handlers.py`'s live router
+(§ above) and the `bot_commands` table (real query, not assumed):
+
+```
+NO ORPHAN COMMANDS    -- every one of the 18 real handlers has exactly
+                          one bot_commands row (handler_name UNIQUE); no
+                          registry row references a handler that no
+                          longer exists in code, and no handler exists
+                          with no registry row (the seed migration
+                          created all 18 in the same transaction that
+                          created the table).
+NO HIDDEN COMMANDS     -- router introspection (python -c "from
+                          services.bot.handlers import router; ...")
+                          finds all 18 and nothing else; every other
+                          aiogram observer (callback_query, inline_query,
+                          ...) has zero registered handlers, confirmed
+                          directly, not assumed.
+NO UNMANAGED COMMANDS  -- all 18 are content-editable; 15/18 are also
+                          enable/disable-manageable (the remaining 3 are
+                          the registration entry point and core dispatch
+                          plumbing, deliberately structural -- see "What
+                          admin-configurable actually means today" above,
+                          not an oversight).
+```

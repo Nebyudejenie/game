@@ -20,8 +20,10 @@ from typing import Any, Awaitable, Callable
 import asyncpg
 import structlog
 from aiogram.types import Message, TelegramObject
+from redis.asyncio import Redis
 
-from packages.core.metrics import telegram_command_blocked_total
+from packages.core import rate_limit
+from packages.core.metrics import telegram_command_blocked_total, telegram_command_rate_limited_total
 from services.bot.i18n import t
 
 logger = structlog.get_logger()
@@ -124,6 +126,66 @@ async def run_forever(pool: asyncpg.Pool) -> None:
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
+async def _reply_in_users_language(data: dict[str, Any], event: Message, key: str, **kwargs: Any) -> None:
+    from services.bot.registration import get_user_and_language
+
+    pool = data.get("pool")
+    notifier = data.get("notifier")
+    if pool is not None and notifier is not None:
+        _, language = await get_user_and_language(pool, event.from_user.id)  # type: ignore[union-attr]
+        await notifier.send(event.chat.id, t(key, language, **kwargs))
+
+
+async def _check_rate_limit(
+    redis: Redis, *, handler_name: str, telegram_id: int, config: CommandConfig
+) -> tuple[bool, str | None, float | None]:
+    """Checks cooldown first, then the per-minute rate limit -- both are
+    the exact same Redis token-bucket primitive every other rate limit in
+    this codebase already uses (packages/core/rate_limit.py, also backing
+    services/payments/deposits.py's deposit cap and the gateway's own
+    per-connection limits), just parameterized differently: a cooldown is
+    a capacity-1 bucket refilling once every cooldown_seconds (so a
+    second attempt before that time is up is denied outright); a rate
+    limit is a capacity-N bucket refilling continuously at N/60 per
+    second (a smoother, burst-tolerant version of "N per minute", not a
+    hard reset-every-60-seconds window). Returns (allowed, limit_type,
+    retry_after_seconds) -- limit_type/retry_after are only meaningful
+    when allowed is False.
+
+    The Redis bucket key is deliberately keyed by the real handler_name,
+    not analytics_label(handler_name) -- an admin renaming a command's
+    analytics_key later must never reset or fragment a player's
+    already-in-progress cooldown/rate-limit state. Only the *metric
+    labels* this function's caller records use the canonical analytics
+    identity; the enforcement bucket itself is tied to the one thing
+    that's actually stable across an admin edit, the code's own function
+    name.
+    """
+    if config.cooldown_seconds > 0:
+        allowed, retry_after = await rate_limit.allow_with_retry_after(
+            redis,
+            "tg-cooldown",
+            f"{handler_name}:{telegram_id}",
+            capacity=1,
+            refill_per_second=1.0 / config.cooldown_seconds,
+        )
+        if not allowed:
+            return False, "cooldown", retry_after
+
+    if config.rate_limit_per_minute is not None:
+        allowed, retry_after = await rate_limit.allow_with_retry_after(
+            redis,
+            "tg-ratelimit",
+            f"{handler_name}:{telegram_id}",
+            capacity=config.rate_limit_per_minute,
+            refill_per_second=config.rate_limit_per_minute / 60.0,
+        )
+        if not allowed:
+            return False, "rate_limit", retry_after
+
+    return True, None, None
+
+
 async def command_gate_middleware(
     handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
     event: TelegramObject,
@@ -131,33 +193,61 @@ async def command_gate_middleware(
 ) -> Any:
     """Registered as the first dp.message inner middleware (see
     services/bot/app.py::build_dispatcher()) -- runs before perf
-    .perf_middleware, so a command an admin has disabled never reaches
-    that middleware's own timing/success/error counters at all (see
-    packages/core/metrics.py's own telegram_command_blocked_total
-    docstring for why that separation is deliberate).
+    .perf_middleware, so a command an admin has disabled or rate-limited
+    never reaches that middleware's own timing/success/error counters at
+    all (see packages/core/metrics.py's own telegram_command_blocked_total
+    docstring for why that separation is deliberate). Blocking here, before
+    ever calling the real handler, is also what makes rate limiting
+    inherently safe against duplicate financial effects: a denied request
+    never reaches cmd_deposit/cmd_withdraw/etc. at all, so there is no
+    financial code path to have run twice in the first place.
 
-    Section 10's own requirement: a disabled command must return a
-    controlled, configured reply -- never a 404/500/stack trace. This
-    reuses services/bot/registration.py::get_user_and_language() (an
-    already-tested query from the Telegram command latency diagnosis
-    pass) purely for this rare, admin-controlled path; the common case
-    (command enabled, the overwhelming majority of traffic) never pays
-    for this extra query since is_enabled() short-circuits first.
+    Section 10/Section 3's own requirements: a disabled or rate-limited
+    command must return a controlled, configured reply -- never a
+    404/500/stack trace, and never a bare "Too many requests" when a real
+    wait time is known. Reuses services/bot/registration.py::
+    get_user_and_language() (an already-tested query from the Telegram
+    command latency diagnosis pass) purely for these rare, non-happy-path
+    replies; the common case (command enabled, under its limits -- the
+    overwhelming majority of traffic) pays for at most the rate-limit
+    Redis check when one is actually configured, never this extra query.
     """
     handler_obj = data.get("handler")
     handler_name = getattr(handler_obj, "callback", None)
     handler_name = getattr(handler_name, "__name__", None) if handler_name is not None else None
 
-    if handler_name is not None and not is_enabled(handler_name):
-        telegram_command_blocked_total.labels(handler=handler_name).inc()
-        if isinstance(event, Message) and event.from_user is not None:
-            from services.bot.registration import get_user_and_language
+    if handler_name is None:
+        return await handler(event, data)
 
-            pool = data.get("pool")
-            notifier = data.get("notifier")
-            if pool is not None and notifier is not None:
-                _, language = await get_user_and_language(pool, event.from_user.id)
-                await notifier.send(event.chat.id, t("error.command_disabled", language))
+    if not is_enabled(handler_name):
+        telegram_command_blocked_total.labels(handler=analytics_label(handler_name)).inc()
+        if isinstance(event, Message) and event.from_user is not None:
+            await _reply_in_users_language(data, event, "error.command_disabled")
         return None
+
+    config = get_config(handler_name)
+    if (
+        config is not None
+        and (config.cooldown_seconds > 0 or config.rate_limit_per_minute is not None)
+        and isinstance(event, Message)
+        and event.from_user is not None
+    ):
+        redis = data.get("redis")
+        if redis is not None:
+            allowed, limit_type, retry_after = await _check_rate_limit(
+                redis, handler_name=handler_name, telegram_id=event.from_user.id, config=config
+            )
+            if not allowed:
+                assert limit_type is not None
+                telegram_command_rate_limited_total.labels(
+                    handler=analytics_label(handler_name), limit_type=limit_type
+                ).inc()
+                if retry_after is not None and retry_after > 0:
+                    await _reply_in_users_language(
+                        data, event, "error.rate_limited_retry", seconds=max(1, round(retry_after))
+                    )
+                else:
+                    await _reply_in_users_language(data, event, "error.rate_limited_generic")
+                return None
 
     return await handler(event, data)

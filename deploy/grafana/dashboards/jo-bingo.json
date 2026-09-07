@@ -281,6 +281,21 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 17,
+      "title": "Commands rate-limited, by handler and limit type",
+      "description": "Phase 3: a player hitting their own configured cooldown_seconds or rate_limit_per_minute (services/bot/command_registry.py::command_gate_middleware). limit_type distinguishes a cooldown denial from a per-minute rate-limit denial. Sustained growth on one handler suggests its limit may be tighter than real usage warrants -- worth a look on the Telegram Commands admin screen, not necessarily a problem.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 62 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(telegram_command_rate_limited_total[5m])) by (handler, limit_type)",
+          "legendFormat": "{{handler}} ({{limit_type}})",
+          "refId": "A"
+        }
+      ]
     }
   ]
 }

@@ -515,12 +515,45 @@ async def test_admin_console_telegram_commands_screen_edit_and_disable_over_a_re
         "SELECT enabled FROM bot_commands WHERE handler_name = 'cmd_balance'"
     )
     assert disabled_in_db is False
+    # Re-enable before continuing -- the next step edits a different
+    # command (cmd_support) and doesn't need cmd_balance disabled anymore.
+    await pool.execute("UPDATE bot_commands SET enabled = true WHERE handler_name = 'cmd_balance'")
+
+    # Phase 3: set a real cooldown + rate limit on a third command through
+    # the same edit form, and confirm the saved values round-trip back
+    # into the reopened detail panel's own input fields.
+    await page.click('tr[data-handler="cmd_support"] .details-btn')
+    await page.wait_for_selector('tr[data-detail-for="cmd_support"] input[name="cooldown_seconds"]', timeout=5000)
+    cooldown_input = page.locator('tr[data-detail-for="cmd_support"] input[name="cooldown_seconds"]')
+    await cooldown_input.fill("15")
+    rate_limit_input = page.locator('tr[data-detail-for="cmd_support"] input[name="rate_limit_per_minute"]')
+    await rate_limit_input.fill("4")
+    await page.click('tr[data-detail-for="cmd_support"] button[type="submit"]')
+    await page.wait_for_selector("#toast.visible", timeout=5000)
+
+    saved = await pool.fetchrow(
+        "SELECT cooldown_seconds, rate_limit_per_minute FROM bot_commands WHERE handler_name = 'cmd_support'"
+    )
+    assert saved["cooldown_seconds"] == 15
+    assert saved["rate_limit_per_minute"] == 4
+
+    await page.wait_for_selector('tr[data-handler="cmd_support"] .details-btn', timeout=5000)
+    await page.click('tr[data-handler="cmd_support"] .details-btn')
+    await page.wait_for_selector('tr[data-detail-for="cmd_support"] input[name="cooldown_seconds"]', timeout=5000)
+    reopened_cooldown = await page.input_value('tr[data-detail-for="cmd_support"] input[name="cooldown_seconds"]')
+    reopened_rate_limit = await page.input_value('tr[data-detail-for="cmd_support"] input[name="rate_limit_per_minute"]')
+    assert reopened_cooldown == "15"
+    assert reopened_rate_limit == "4"
 
     # Restore real, shared state for every other test/process using this
     # database.
     await pool.execute(
         "UPDATE bot_commands SET enabled = true, description = 'Static Bingo rules text' "
         "WHERE handler_name IN ('cmd_balance', 'cmd_rules')"
+    )
+    await pool.execute(
+        "UPDATE bot_commands SET cooldown_seconds = 0, rate_limit_per_minute = NULL "
+        "WHERE handler_name = 'cmd_support'"
     )
 
     assert page_errors == [], f"JS errors: {page_errors}"

@@ -41,17 +41,69 @@ local elapsed = math.max(0, now - ts)
 tokens = math.min(capacity, tokens + elapsed * refill_per_second)
 
 local allowed = 0
+local retry_after = 0
 if tokens >= cost then
     tokens = tokens - cost
     allowed = 1
+else
+    retry_after = (cost - tokens) / refill_per_second
 end
 
 redis.call("HMSET", KEYS[1], "tokens", tokens, "ts", now)
 local ttl = math.ceil(capacity / refill_per_second) + 1
 redis.call("EXPIRE", KEYS[1], ttl)
 
-return allowed
+return {allowed, tostring(retry_after)}
 """
+
+
+async def allow_with_retry_after(
+    redis: Redis,
+    scope: str,
+    key: str,
+    *,
+    capacity: float,
+    refill_per_second: float,
+    cost: float = 1.0,
+) -> tuple[bool, float | None]:
+    """Same bucket/semantics as allow() below (in fact allow() is just
+    this with the second value dropped), plus a real, computed "how many
+    seconds until this exact request would succeed" for the denied case
+    -- Telegram Command Center rate-limit enforcement's own "please try
+    again in X seconds" requirement (services/bot/command_registry.py)
+    needs a real number here, not a guess, and every *existing* caller of
+    allow() is completely unaffected by this addition (same script, same
+    bucket state, same failure-closed behavior -- just one more return
+    value computed from state the script already has in scope).
+
+    Returns (True, None) when allowed; (False, seconds) when denied,
+    where `seconds` is exactly how long until this bucket would have
+    enough tokens for this same request (rounding is the caller's job,
+    since a UI second-count and a raw retry-loop want different
+    precision).
+    """
+    now = time.time()
+    try:
+        allowed_raw, retry_after_raw = await redis.eval(
+            _TOKEN_BUCKET_SCRIPT,
+            1,
+            f"rl:{scope}:{key}",
+            capacity,
+            refill_per_second,
+            now,
+            cost,
+        )
+    except Exception:
+        logger.warning("rate_limit_redis_error", scope=scope, key=key)
+        # Failing closed (see allow()'s own docstring for the full
+        # reasoning) with no real retry-after to offer -- a transient
+        # Redis error isn't a token-bucket state this script can reason
+        # about, so there's nothing honest to compute here.
+        return False, None
+    allowed = bool(int(allowed_raw))
+    if allowed:
+        return True, None
+    return False, float(retry_after_raw)
 
 
 async def allow(
@@ -83,21 +135,10 @@ async def allow(
     outage -- it only changes behavior for the transient-blip case this
     fix actually targets.
     """
-    now = time.time()
-    try:
-        result = await redis.eval(
-            _TOKEN_BUCKET_SCRIPT,
-            1,
-            f"rl:{scope}:{key}",
-            capacity,
-            refill_per_second,
-            now,
-            cost,
-        )
-    except Exception:
-        logger.warning("rate_limit_redis_error", scope=scope, key=key)
-        return False
-    return bool(result)
+    allowed, _ = await allow_with_retry_after(
+        redis, scope, key, capacity=capacity, refill_per_second=refill_per_second, cost=cost
+    )
+    return allowed
 
 
 # Spec section 9.2 limits. WS_MESSAGES is a blanket per-connection backstop

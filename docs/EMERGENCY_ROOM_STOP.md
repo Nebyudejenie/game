@@ -7,6 +7,24 @@ the *next* round from starting; it never reached an *active* round's own
 number-calling loop at all (see `DECISIONS.md`'s entry on the finding
 that motivated this feature).
 
+**Status note (Phase 3 re-verification)**: a later directive asserted
+this gap was still open and had not actually been fixed. Independently
+re-verified against the current code before accepting or rejecting that
+claim, per this whole engagement's own "verify, don't assume" discipline
+— it does not hold. `_call_next_number()`
+(`services/engine/round_engine.py`) does detect an external stop (its own
+conditional `UPDATE ... WHERE status = 'running' RETURNING id`, described
+in full below); `_run_running()`'s loop breaks immediately when that
+returns `False`; and `test_stop_running_room_refunds_and_halts_number_
+calling` (§9 below) — which sleeps a full second (5 call intervals at
+this test's own 200ms setting) after issuing a real stop and asserts
+`call_index` never advances past what it was at that moment — passed
+cleanly when re-run just now, exactly as it did when this feature
+originally shipped. All 12 tests in `tests/integration/
+test_emergency_room_stop.py` pass. This document's own scenario table in
+§9 was already accurate; nothing here was downgraded or is being
+re-upgraded now.
+
 ## 1. Complete lifecycle audit
 
 Traced directly from `services/engine/round_engine.py`, not assumed:
