@@ -60,6 +60,13 @@ class Campaign:
     started_at: datetime | None
     completed_at: datetime | None
     created_by_admin_id: int
+    required_fleet_group: str | None
+
+
+_CAMPAIGN_COLUMNS = (
+    "id, tenant_id, name, template_id, body_override, status, audience_filter, "
+    "recipient_count, scheduled_at, started_at, completed_at, created_by_admin_id, required_fleet_group"
+)
 
 
 def _row_to_campaign(row: asyncpg.Record) -> Campaign:
@@ -81,14 +88,11 @@ def _row_to_campaign(row: asyncpg.Record) -> Campaign:
         started_at=row["started_at"],
         completed_at=row["completed_at"],
         created_by_admin_id=row["created_by_admin_id"],
+        required_fleet_group=row["required_fleet_group"],
     )
 
 
-_CAMPAIGN_SELECT = """
-    SELECT id, tenant_id, name, template_id, body_override, status, audience_filter,
-           recipient_count, scheduled_at, started_at, completed_at, created_by_admin_id
-    FROM sms_campaigns WHERE id = $1
-"""
+_CAMPAIGN_SELECT = f"SELECT {_CAMPAIGN_COLUMNS} FROM sms_campaigns WHERE id = $1"
 
 
 async def get_campaign(conn: AsyncpgConnection, *, campaign_id: int) -> Campaign:
@@ -100,11 +104,7 @@ async def get_campaign(conn: AsyncpgConnection, *, campaign_id: int) -> Campaign
 
 async def list_campaigns(conn: AsyncpgConnection, *, tenant_id: int) -> list[Campaign]:
     rows = await conn.fetch(
-        """
-        SELECT id, tenant_id, name, template_id, body_override, status, audience_filter,
-               recipient_count, scheduled_at, started_at, completed_at, created_by_admin_id
-        FROM sms_campaigns WHERE tenant_id = $1 ORDER BY id DESC
-        """,
+        f"SELECT {_CAMPAIGN_COLUMNS} FROM sms_campaigns WHERE tenant_id = $1 ORDER BY id DESC",
         tenant_id,
     )
     return [_row_to_campaign(row) for row in rows]
@@ -119,6 +119,7 @@ async def create_campaign(
     body_override: str | None,
     audience_filter: dict[str, Any],
     created_by_admin_id: int,
+    required_fleet_group: str | None = None,
 ) -> Campaign:
     validate_audience_filter(audience_filter)
     if template_id is None and body_override is None:
@@ -126,11 +127,11 @@ async def create_campaign(
     import json
 
     row = await conn.fetchrow(
-        """
-        INSERT INTO sms_campaigns (tenant_id, name, template_id, body_override, audience_filter, created_by_admin_id)
-        VALUES ($1, $2, $3, $4, $5::jsonb, $6)
-        RETURNING id, tenant_id, name, template_id, body_override, status, audience_filter,
-                  recipient_count, scheduled_at, started_at, completed_at, created_by_admin_id
+        f"""
+        INSERT INTO sms_campaigns
+            (tenant_id, name, template_id, body_override, audience_filter, created_by_admin_id, required_fleet_group)
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
+        RETURNING {_CAMPAIGN_COLUMNS}
         """,
         tenant_id,
         name,
@@ -138,6 +139,7 @@ async def create_campaign(
         body_override,
         json.dumps(audience_filter),
         created_by_admin_id,
+        required_fleet_group,
     )
     assert row is not None
     campaign = _row_to_campaign(row)

@@ -17,6 +17,7 @@ at, never a silently-dropped message.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal
@@ -26,6 +27,7 @@ import asyncpg
 from packages.core import metrics
 from packages.core.ledger import AsyncpgConnection
 from packages.core.sms import campaigns as campaigns_module
+from packages.core.sms.nodes import DeliveryNode, current_assigned_count
 
 ErrorClass = Literal["temporary", "permanent", "network", "timeout", "node_failure", "unknown"]
 RETRYABLE_ERROR_CLASSES: frozenset[str] = frozenset({"temporary", "network", "timeout", "node_failure", "unknown"})
@@ -82,43 +84,77 @@ _MESSAGE_COLUMNS = (
 )
 
 
-async def claim_next_message(conn: AsyncpgConnection, *, tenant_id: int, node_id: int) -> Message | None:
-    """Atomically claims the oldest queued message for this tenant, in
-    priority order, skipping any campaign currently paused. A paused
-    campaign's already-queued messages are left untouched in place
-    (`preserve queue state`) -- they simply aren't offered to any node
-    until the campaign resumes.
+async def claim_next_message(conn: AsyncpgConnection, *, tenant_id: int, node: DeliveryNode) -> Message | None:
+    """Atomically claims a message for this tenant that this specific node
+    is eligible for, applying two real claim-time decisions (Phase 2 --
+    see DECISIONS.md for why these, not a push-style routing engine, are
+    what actually apply to a pull protocol):
+
+    - **Eligibility**: skips any campaign currently paused (queue state
+      preserved, simply not offered until resumed) and any campaign whose
+      `required_fleet_group` doesn't match this node's own fleet_group.
+    - **Fairness**: among eligible messages, priority still wins first,
+      but within a priority tier this orders by each message's own
+      position within its *own* campaign's queue (`ROW_NUMBER() OVER
+      (PARTITION BY campaign_id ...)`) rather than raw tenant-wide
+      creation order -- so one huge campaign's backlog cannot starve a
+      smaller campaign queued alongside it.
+
+    Also enforces this node's own advertised `max_concurrent_jobs` --
+    computed live from real in-flight message rows, not a self-reported
+    count a node could lie about.
     """
+    in_flight = await current_assigned_count(conn, node_id=node.id)
+    if in_flight >= node.max_concurrent_jobs:
+        return None
+
     row = await conn.fetchrow(
         f"""
+        WITH ranked AS (
+            SELECT m2.id, m2.priority, m2.campaign_id, m2.status,
+                   ROW_NUMBER() OVER (PARTITION BY m2.campaign_id ORDER BY m2.created_at) AS campaign_seq
+            FROM sms_messages m2
+            LEFT JOIN sms_campaigns c ON c.id = m2.campaign_id
+            WHERE m2.tenant_id = $1
+              AND (c.id IS NULL OR c.status <> 'paused')
+              AND (c.id IS NULL OR c.required_fleet_group IS NULL OR c.required_fleet_group = $3)
+        )
         UPDATE sms_messages m
         SET status = 'assigned', assigned_node_id = $2, assigned_at = now(),
             attempt_count = attempt_count + 1, updated_at = now()
         WHERE m.id = (
-            SELECT m2.id FROM sms_messages m2
-            LEFT JOIN sms_campaigns c ON c.id = m2.campaign_id
-            WHERE m2.tenant_id = $1 AND m2.status = 'queued'
-              AND (c.id IS NULL OR c.status <> 'paused')
-            ORDER BY {_priority_rank_sql('m2.priority')}, m2.created_at
-            FOR UPDATE OF m2 SKIP LOCKED
+            SELECT ranked.id FROM ranked
+            WHERE ranked.status = 'queued'
+            ORDER BY {_priority_rank_sql('ranked.priority')}, ranked.campaign_seq, ranked.id
             LIMIT 1
+            FOR UPDATE SKIP LOCKED
         )
-        RETURNING {_MESSAGE_COLUMNS}
+        RETURNING {_MESSAGE_COLUMNS},
+            (SELECT c.required_fleet_group FROM sms_campaigns c WHERE c.id = m.campaign_id) AS required_fleet_group
         """,
         tenant_id,
-        node_id,
+        node.id,
+        node.fleet_group,
     )
     if row is None:
         return None
     message = _row_to_message(row)
+    routing_snapshot = {
+        "node_fleet_group": node.fleet_group,
+        "node_health_score": node.health_score,
+        "node_concurrent_jobs_before": in_flight,
+        "node_max_concurrent_jobs": node.max_concurrent_jobs,
+        "campaign_required_fleet_group": row["required_fleet_group"],
+    }
     await conn.execute(
         """
-        INSERT INTO sms_delivery_attempts (message_id, node_id, attempt_number, outcome, started_at)
-        VALUES ($1, $2, $3, 'accepted', now())
+        INSERT INTO sms_delivery_attempts (message_id, node_id, attempt_number, outcome, started_at, routing_snapshot)
+        VALUES ($1, $2, $3, 'accepted', now(), $4::jsonb)
         """,
         message.id,
-        node_id,
+        node.id,
         message.attempt_count,
+        json.dumps(routing_snapshot),
     )
     return message
 

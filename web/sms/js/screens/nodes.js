@@ -14,8 +14,8 @@ export async function render(container) {
     <div id="nodes-error"></div>
     <div id="new-token-panel"></div>
     <table class="data-table">
-      <thead><tr><th>Name</th><th>Fleet</th><th>Status</th><th>Health</th><th>Last heartbeat</th><th>Actions</th></tr></thead>
-      <tbody id="nodes-body"><tr><td colspan="6" class="loading">Loading…</td></tr></tbody>
+      <thead><tr><th>Name</th><th>Fleet</th><th>Status</th><th>Capacity</th><th>Protocol</th><th>Health</th><th>Last heartbeat</th><th>Actions</th></tr></thead>
+      <tbody id="nodes-body"><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
     </table>
   `;
 
@@ -23,9 +23,13 @@ export async function render(container) {
   const bodyEl = container.querySelector("#nodes-body");
   const tokenPanel = container.querySelector("#new-token-panel");
 
+  // Keyed by the *stored* status -- 'degraded'/'offline' are display-only
+  // overlays computed server-side (never stored), so they never appear as
+  // a key here; an active-but-degraded node still gets active's actions.
   const ACTIONS = {
     pending: [["approve", "Approve"], ["revoke", "Revoke"]],
-    active: [["disable", "Disable"], ["drain", "Drain"], ["revoke", "Revoke"]],
+    active: [["disable", "Disable"], ["maintenance", "Maintenance"], ["drain", "Drain"], ["revoke", "Revoke"]],
+    maintenance: [["resume", "Resume"], ["revoke", "Revoke"]],
     disabled: [["resume", "Resume"], ["revoke", "Revoke"]],
     draining: [["resume", "Resume"], ["revoke", "Revoke"]],
     revoked: [],
@@ -34,12 +38,14 @@ export async function render(container) {
   async function refresh() {
     const nodes = await api("/nodes");
     bodyEl.innerHTML = nodes.length === 0
-      ? `<tr><td colspan="6" class="empty">No nodes registered yet.</td></tr>`
+      ? `<tr><td colspan="8" class="empty">No nodes registered yet.</td></tr>`
       : nodes.map((n) => `
         <tr data-id="${n.id}">
           <td>${escapeHtml(n.name)}</td>
           <td>${escapeHtml(n.fleet_group)}</td>
-          <td>${badge(n.status)}</td>
+          <td>${badge(n.display_status)}</td>
+          <td>${n.max_concurrent_jobs}</td>
+          <td>v${n.protocol_version}</td>
           <td><span class="health-bar"><span class="health-bar-fill" style="width:${n.health_score}%"></span></span> ${n.health_score}</td>
           <td>${fmtDate(n.last_heartbeat_at)}</td>
           <td>

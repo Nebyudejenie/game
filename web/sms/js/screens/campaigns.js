@@ -11,6 +11,7 @@ export async function render(container) {
       <input type="text" name="body_override" placeholder="Message text ({{display_name}} allowed)" required />
       <input type="text" name="attribute_key" placeholder="Audience: attribute key (optional)" />
       <input type="text" name="attribute_value" placeholder="Audience: attribute value" />
+      <input type="text" name="required_fleet_group" placeholder="Required node fleet (optional, e.g. vip)" />
       <button type="submit" class="btn">Create draft</button>
     </form>
     <div id="campaigns-error"></div>
@@ -56,6 +57,7 @@ export async function render(container) {
             <div><div class="field-label">Status</div><div class="field-value">${badge(campaign.status)}</div></div>
             <div><div class="field-label">Recipients</div><div class="field-value">${campaign.recipient_count ?? "—"}</div></div>
             <div><div class="field-label">Audience filter</div><div class="field-value">${escapeHtml(JSON.stringify(campaign.audience_filter))}</div></div>
+            <div><div class="field-label">Required fleet group</div><div class="field-value">${escapeHtml(campaign.required_fleet_group || "any")}</div></div>
           </div>
           <div class="action-row" id="campaign-actions"></div>
           <h2>Messages (${messages.length})</h2>
@@ -124,7 +126,10 @@ export async function render(container) {
     try {
       await api("/campaigns", {
         method: "POST",
-        body: { name: data.get("name"), body_override: data.get("body_override"), audience_filter: audienceFilter },
+        body: {
+          name: data.get("name"), body_override: data.get("body_override"), audience_filter: audienceFilter,
+          required_fleet_group: data.get("required_fleet_group") || null,
+        },
       });
       event.target.reset();
       toast("Draft campaign created");

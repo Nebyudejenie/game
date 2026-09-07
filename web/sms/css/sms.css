@@ -355,6 +355,9 @@ textarea {
 .badge-assigned,
 .badge-sending,
 .badge-draining,
+.badge-maintenance,
+.badge-degraded,
+.badge-offline,
 .badge-completed_with_errors,
 .badge-unknown {
   background: #fef3c7;

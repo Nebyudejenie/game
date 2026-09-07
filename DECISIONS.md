@@ -11067,3 +11067,147 @@ no second real tenant to create one for).
 
 Every one of these is a real, callable next phase once the slice below
 is proven in production — not a permanently-closed door.
+
+---
+
+## 2026-09-07 — SMS Control Plane Phase 2, slice 1: node lifecycle, capacity, fairness, routing forensics
+
+A follow-up 78-section directive asked for the full deferred roadmap from
+Phase 1 (SMPP/carrier providers, a 1000+-node fleet, a multi-strategy
+routing engine, inbound SMS/automatic STOP, billing/quotas, an outbound
+webhook/event bus, a real-time ops-center dashboard with a "campaign
+digital twin," enterprise-scale load/chaos testing, tenant self-service/
+white-label, a dedicated security pass, DR drills, and more) — again,
+honestly, a multi-quarter build. Same discipline as Phase 1: one real,
+bounded, fully-tested slice, explicit about what's still deferred, rather
+than a shallow pass at all 78 sections. The directive's own instructions
+agreed with this shape ("do not implement all of these chaotically,"
+"architecture-first sequence," "evolve, do not rewrite").
+
+**Reinspected before modifying** (the directive's own first instruction):
+confirmed the working tree exactly matches commit `a6cfb1a` for every SMS
+path, then re-read `packages/core/sms/nodes.py` and `messages.py` in
+full rather than trusting memory of having just written them. This
+surfaced the real architectural fact this slice is built around:
+`claim_next_message()` is **pull-based** — any active node asks for the
+oldest eligible job for its tenant. The directive's "routing engine"
+sections (13-14: least-loaded/round-robin/health-weighted strategies,
+explainable per-job node *selection*) assume a **push** model where the
+server picks a node for a job. Those don't translate directly onto a
+pull protocol: a pull node's own poll cadence already does natural load
+balancing (a busy node is occupied handling its current job instead of
+asking for another). What genuinely translates, and is what got built:
+**eligibility** (does this asking node qualify for this job at all) and
+**fair ordering** (among eligible jobs, which does this asking node get
+first) — both real claim-time decisions in a pull system, and both now
+implemented for real rather than glossed over as "not applicable."
+Formalizing a pluggable `RoutingStrategy` interface is deferred until a
+second real strategy actually needs to exist alongside this one — one
+concrete, fully-tested policy is not itself a case for an abstraction
+layer (`DECISIONS.md`'s and this codebase's own repeated stance on
+premature abstraction).
+
+**Built this slice** (migration `fb759e477bcd`, additive, zero change to
+any existing column's meaning):
+- **Node lifecycle**: `maintenance` added as a real, admin-settable
+  status distinct from `disabled` (an incident reads differently as
+  "an admin took this out for hardware work" vs. "an admin turned this
+  off, reason unknown"). `DEGRADED`/`OFFLINE` are deliberately **not**
+  stored — they're computed at read time from `health_score` and
+  heartbeat recency (`nodes.py::display_status()`), so there is never a
+  second, driftable source of truth alongside the real signals that
+  already exist for exactly this purpose.
+- **Per-node capacity**: a node advertises `max_concurrent_jobs` at
+  heartbeat time; `fetch-job` now refuses new work once a node already
+  holds that many `assigned`/`sending` messages, with an honest reason
+  string, rather than flooding a slow node. Defaults to 1 — today's de
+  facto behavior for every already-registered node, so this is
+  behavior-preserving, not a silent capacity cut.
+- **Node-group eligibility**: `sms_campaigns.required_fleet_group`
+  (nullable; NULL = today's only behavior, any node) restricts which
+  nodes may claim a campaign's messages to one `fleet_group` — verified
+  empirically against real Postgres, not assumed, that the eligibility
+  filter composes correctly with the existing paused-campaign exclusion.
+- **Cross-campaign fairness**: `claim_next_message()`'s claim query was
+  rewritten from strict tenant-wide FIFO-by-`created_at` (under which one
+  huge campaign's backlog would starve a smaller campaign queued
+  alongside it) to a per-campaign `ROW_NUMBER() OVER (PARTITION BY
+  campaign_id ORDER BY created_at)` fair-share ordering: priority first,
+  then each campaign's own position in its own queue, then id as a final
+  tiebreak. **Verified as a real, non-obvious SQL constraint, not
+  assumed**: `SELECT ... FOR UPDATE` cannot appear in the same statement
+  as a window function — confirmed by testing the naive single-statement
+  form against real Postgres and having it accepted only once restructured
+  as `WITH ranked AS (... ROW_NUMBER() ...) UPDATE ... WHERE id = (SELECT
+  ... FROM ranked ORDER BY ... LIMIT 1 FOR UPDATE SKIP LOCKED)` — the
+  window function lives in the CTE, the lock lives in the outer SELECT
+  over it, which Postgres accepts because the CTE's window function
+  doesn't collapse the one-row-per-underlying-row correspondence `FOR
+  UPDATE` needs. Tested directly against a real Postgres connection
+  before writing it into `messages.py`.
+
+  **A real correctness bug, caught by the fairness test itself, not
+  assumed correct**: the first working version computed `campaign_seq`
+  only over currently-`queued` rows (`WHERE m2.status = 'queued'` inside
+  the same CTE that computes the window). That silently defeats fairness
+  entirely: once a campaign's front message is claimed, PostgreSQL
+  renumbers its *remaining* queued rows starting back at 1 (`ROW_NUMBER()`
+  always starts at 1 for whatever rows are actually in its partition), so
+  a large campaign's next message perpetually re-qualifies as "position
+  1" and keeps winning the tiebreak against a smaller campaign's genuine
+  position-1 message via a lower `id` (having been created earlier) —
+  every single time, forever. A real end-to-end test (two campaigns, one
+  with 3 messages queued before the other's 1) caught this directly: the
+  first two claims both went to the larger campaign instead of
+  interleaving. Fixed by computing `campaign_seq` over the campaign's
+  **entire** message history (window computed before any status filter,
+  which is applied only in the outer claim), so a message's fair-share
+  position is fixed at creation time and never renumbered by what else
+  happens to still be queued. Added `ix_sms_messages_campaign_created
+  (campaign_id, created_at)` in the same migration so this now-necessarily-
+  broader window scan stays index-backed rather than degrading to a full
+  per-campaign sort as message history grows — the real DB-scale
+  consideration DECISIONS.md's own "database scale review" section of
+  this directive asked for, applied to the one query this slice actually
+  changed, not deferred as a vague future concern.
+- **Routing-decision forensics**: `sms_delivery_attempts.routing_snapshot`
+  (jsonb) now records, at the moment of claim, the node's fleet_group and
+  health_score, its concurrent-job count before this claim, the
+  campaign's `required_fleet_group`, and this message's fair-share
+  sequence number within its own campaign — a real, queryable answer to
+  "why did this node get this job," not reconstructed after the fact from
+  scattered tables.
+- **Contract regression protection** (the directive's own section 5,
+  done before adding features): audited the existing Phase 1 test
+  coverage against its own explicit checklist (tenant isolation,
+  authorization, claiming, idempotency, retry classification, dead-
+  letter, reconciliation, suppression, campaign transitions, node auth,
+  audit logging) and added the two genuine gaps found — an explicit
+  cross-tenant isolation test (a node in tenant A cannot claim tenant B's
+  queued message even when both exist in the same claim query's search
+  space) and an explicit audit-log-content test (an SMS admin mutation
+  writes a real, correctly-shaped row into the *same* `admin_audit_log`
+  table every other admin action uses, not a parallel or missing one).
+
+**Explicitly deferred, named rather than faked** (each a real, callable
+next phase, same discipline as Phase 1's own deferral list): SMPP/
+carrier/HTTP provider adapters and the formal `DeliveryProvider`
+abstraction (still nothing to abstract over without a second real
+provider); a pluggable multi-strategy routing engine (this slice's
+eligibility+fairness policy is real production logic, not a stub, but
+it is one concrete policy, not yet an interface with multiple
+implementations); fleet scale validated beyond a handful of real nodes
+(no 100-node or 1000-node test); backpressure/auto-throttling beyond the
+capacity gate already built (no queue-depth-driven admission control
+yet); inbound SMS and automatic STOP-keyword detection (still no inbound
+gateway); a configurable N-person approval workflow; billing/usage
+metering and quotas; an outbound webhook/domain-event bus and the outbox
+pattern; the real-time ops-center dashboard maturity (campaign digital
+twin, control tower, capacity forecasting, anomaly/alert engines) beyond
+the existing `/overview` counts; enterprise-scale load and chaos testing;
+disaster-recovery drills specific to this feature; node-protocol-version-
+gated rolling upgrades (the version is now stored and visible, but
+nothing yet refuses to dispatch a job a node's version can't handle);
+feature flags; policy/template/audience versioning and snapshotting;
+tenant self-service provisioning and white-labeling; a dedicated
+security-hardening pass; and commercial/billing-plan readiness.

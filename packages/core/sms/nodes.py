@@ -26,12 +26,21 @@ import asyncpg
 
 from packages.core.ledger import AsyncpgConnection
 
-NodeStatus = str  # 'pending' | 'active' | 'disabled' | 'draining' | 'revoked'
+NodeStatus = str  # 'pending' | 'active' | 'maintenance' | 'disabled' | 'draining' | 'revoked'
+DisplayStatus = str  # a stored NodeStatus, or the computed 'degraded' / 'offline' overlay
 
 # A node that hasn't heartbeat-ed within this window is scored down hard
 # regardless of its recent delivery history -- silence is itself a health
-# signal, not a neutral one.
+# signal, not a neutral one. Also the threshold for the computed OFFLINE
+# display status (see display_status() below).
 HEARTBEAT_STALE_AFTER = timedelta(minutes=5)
+
+# A stored 'active' node whose health score has fallen below this is
+# shown as DEGRADED -- still eligible for work (a real product decision:
+# degraded means "watch this node," not "stop routing to it"; an admin
+# who wants that stronger response still has drain_node/disable_node),
+# but visibly flagged rather than looking identical to a fully healthy one.
+DEGRADED_HEALTH_THRESHOLD = 50
 
 
 class NodeNotFound(Exception):
@@ -48,10 +57,36 @@ class DeliveryNode:
     health_score: int
     last_heartbeat_at: datetime | None
     app_version: str | None
+    max_concurrent_jobs: int
+    protocol_version: int
+
+
+def display_status(node: DeliveryNode, *, now: datetime | None = None) -> DisplayStatus:
+    """DEGRADED and OFFLINE are computed overlays, never stored -- there is
+    exactly one place health_score/last_heartbeat_at are written
+    (compute_and_store_health_score/record_heartbeat) and exactly one
+    place they're interpreted into a display label, so the two can never
+    drift out of sync the way a second, independently-updated status
+    column could.
+    """
+    if node.status != "active":
+        return node.status
+    reference_now = now or datetime.now(timezone.utc)
+    if node.last_heartbeat_at is None or (reference_now - node.last_heartbeat_at) > HEARTBEAT_STALE_AFTER:
+        return "offline"
+    if node.health_score < DEGRADED_HEALTH_THRESHOLD:
+        return "degraded"
+    return "active"
 
 
 def _hash_token(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+_NODE_COLUMNS = (
+    "id, tenant_id, name, fleet_group, status, health_score, last_heartbeat_at, "
+    "app_version, max_concurrent_jobs, protocol_version"
+)
 
 
 def _row_to_node(row: asyncpg.Record) -> DeliveryNode:
@@ -64,6 +99,8 @@ def _row_to_node(row: asyncpg.Record) -> DeliveryNode:
         health_score=row["health_score"],
         last_heartbeat_at=row["last_heartbeat_at"],
         app_version=row["app_version"],
+        max_concurrent_jobs=row["max_concurrent_jobs"],
+        protocol_version=row["protocol_version"],
     )
 
 
@@ -77,10 +114,10 @@ async def create_node(
     """
     raw_token = secrets.token_urlsafe(32)
     row = await conn.fetchrow(
-        """
+        f"""
         INSERT INTO sms_delivery_nodes (tenant_id, name, fleet_group, token_hash, created_by_admin_id)
         VALUES ($1, $2, $3, $4, $5)
-        RETURNING id, tenant_id, name, fleet_group, status, health_score, last_heartbeat_at, app_version
+        RETURNING {_NODE_COLUMNS}
         """,
         tenant_id,
         name,
@@ -122,6 +159,14 @@ async def disable_node(conn: AsyncpgConnection, *, node_id: int) -> None:
     await _set_status(conn, node_id=node_id, status="disabled")
 
 
+async def set_maintenance(conn: AsyncpgConnection, *, node_id: int) -> None:
+    """Distinct from disable_node -- same routing effect (no new work),
+    different operator-facing meaning: "temporarily out for planned work,"
+    not "an admin turned this off, reason unknown."
+    """
+    await _set_status(conn, node_id=node_id, status="maintenance")
+
+
 async def resume_node(conn: AsyncpgConnection, *, node_id: int) -> None:
     await _set_status(conn, node_id=node_id, status="active")
 
@@ -151,10 +196,7 @@ async def authenticate_node(conn: AsyncpgConnection | asyncpg.Pool, *, raw_token
     them a clear, honest reason for having no work rather than a bare 401.
     """
     row = await conn.fetchrow(
-        """
-        SELECT id, tenant_id, name, fleet_group, status, health_score, last_heartbeat_at, app_version
-        FROM sms_delivery_nodes WHERE token_hash = $1
-        """,
+        f"SELECT {_NODE_COLUMNS} FROM sms_delivery_nodes WHERE token_hash = $1",
         _hash_token(raw_token),
     )
     if row is None or row["status"] == "revoked":
@@ -163,20 +205,50 @@ async def authenticate_node(conn: AsyncpgConnection | asyncpg.Pool, *, raw_token
 
 
 async def record_heartbeat(
-    conn: AsyncpgConnection, *, node_id: int, app_version: str | None, capabilities: dict[str, object]
+    conn: AsyncpgConnection,
+    *,
+    node_id: int,
+    app_version: str | None,
+    capabilities: dict[str, object],
+    max_concurrent_jobs: int | None = None,
+    protocol_version: int | None = None,
 ) -> None:
+    """max_concurrent_jobs/protocol_version are optional -- an older node
+    (or a MacroDroid device whose macro was never updated to send them)
+    simply keeps whatever value it last advertised (default 1 / 1 for a
+    node that has never sent one), never silently reset to a default on
+    every heartbeat.
+    """
     import json
 
     await conn.execute(
         """
         UPDATE sms_delivery_nodes
-        SET last_heartbeat_at = now(), app_version = $2, capabilities = $3::jsonb, updated_at = now()
+        SET last_heartbeat_at = now(), app_version = $2, capabilities = $3::jsonb,
+            max_concurrent_jobs = COALESCE($4, max_concurrent_jobs),
+            protocol_version = COALESCE($5, protocol_version),
+            updated_at = now()
         WHERE id = $1
         """,
         node_id,
         app_version,
         json.dumps(capabilities),
+        max_concurrent_jobs,
+        protocol_version,
     )
+
+
+async def current_assigned_count(conn: AsyncpgConnection, *, node_id: int) -> int:
+    """How many messages this node currently holds in a non-terminal
+    in-flight state -- the real, live number fetch-job's own capacity gate
+    compares against max_concurrent_jobs, not a cached or self-reported
+    count a compromised or buggy node could lie about.
+    """
+    count = await conn.fetchval(
+        "SELECT count(*) FROM sms_messages WHERE assigned_node_id = $1 AND status IN ('assigned', 'sending')",
+        node_id,
+    )
+    return int(count)
 
 
 async def compute_and_store_health_score(conn: AsyncpgConnection, *, node_id: int) -> int:
@@ -219,12 +291,21 @@ async def compute_and_store_health_score(conn: AsyncpgConnection, *, node_id: in
     return score
 
 
+async def get_node(conn: AsyncpgConnection, *, node_id: int) -> DeliveryNode:
+    """A fresh read of a single node -- DeliveryNode is an immutable
+    snapshot (a frozen dataclass), so any caller holding one from before a
+    heartbeat/status change needs to re-fetch rather than assume it's
+    still current, exactly like this codebase's other domain objects.
+    """
+    row = await conn.fetchrow(f"SELECT {_NODE_COLUMNS} FROM sms_delivery_nodes WHERE id = $1", node_id)
+    if row is None:
+        raise NodeNotFound(str(node_id))
+    return _row_to_node(row)
+
+
 async def list_nodes(conn: AsyncpgConnection, *, tenant_id: int) -> list[DeliveryNode]:
     rows = await conn.fetch(
-        """
-        SELECT id, tenant_id, name, fleet_group, status, health_score, last_heartbeat_at, app_version
-        FROM sms_delivery_nodes WHERE tenant_id = $1 ORDER BY id
-        """,
+        f"SELECT {_NODE_COLUMNS} FROM sms_delivery_nodes WHERE tenant_id = $1 ORDER BY id",
         tenant_id,
     )
     return [_row_to_node(row) for row in rows]

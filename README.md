@@ -1021,15 +1021,33 @@ audience resolution; and RBAC (`sms:*` permissions in the same
 the one action that actually sends real messages. Authentication, RBAC,
 and the audit trail are the *same* `admin_users`/`PERMISSIONS`/
 `admin_audit_log` the Bingo admin console uses — no second login system.
-Verified with 29 real-Postgres domain tests (`test_sms_core.py`), 9
+**Phase 2 (same day)** extended this with real node-lifecycle maturity
+(`maintenance` as a stored, admin-settable status; `degraded`/`offline`
+computed at read time from health/heartbeat signals, never stored),
+per-node capacity enforcement (`max_concurrent_jobs`, checked against a
+live in-flight count, never self-reported), node-group campaign
+eligibility (`required_fleet_group`), and cross-campaign fair-share
+claim ordering so one huge campaign cannot starve a smaller one queued
+alongside it — plus routing-decision forensics (`routing_snapshot` on
+every claim) and two explicit regression-protection tests (cross-tenant
+isolation, real audit-log content). See `docs/SMS_CONTROL_PLANE.md`'s
+own "Phase 2" section for why this reads as eligibility+fairness rather
+than a push-style routing engine: the node protocol is pull-based, and
+that's what genuinely translates onto it.
+
+Verified with 42 real-Postgres domain tests (`test_sms_core.py`), 13
 real-HTTP tests including a full campaign-to-delivery flow and an RBAC
-boundary/node-ownership/suppression-enforcement set (`test_sms_app.py`),
-and a real-Chromium click-through of the console frontend
-(`test_sms_console_e2e.py`); `mypy --strict` clean. Explicitly deferred,
-named in DECISIONS.md rather than faked: SMPP/carrier provider adapters,
-fleet scale beyond a handful of nodes, a multi-strategy routing policy
-engine (v1 is single-strategy: oldest-queued-job-per-tenant), automatic
+boundary/node-ownership/suppression-enforcement/capacity/eligibility set
+(`test_sms_app.py`), and a real-Chromium click-through of the console
+frontend (`test_sms_console_e2e.py`); `mypy --strict` clean across the
+whole repo. Explicitly deferred, named in DECISIONS.md rather than
+faked: SMPP/carrier provider adapters, fleet scale validated beyond a
+handful of nodes, a pluggable multi-strategy routing engine (this
+slice's eligibility+fairness is real, not a stub, but it's one concrete
+policy, not an interface with multiple implementations), automatic
 inbound STOP-keyword suppression, a configurable N-person approval
-workflow, billing/quotas, webhooks/domain events, load/chaos testing at
-enterprise scale, and tenant self-service provisioning (one tenant is
-seeded; there is no second real tenant to provision for yet).
+workflow, billing/quotas, webhooks/domain events, the real-time
+ops-center dashboard maturity, load/chaos testing at enterprise scale,
+node-protocol-version-gated rolling upgrades, and tenant self-service
+provisioning (one tenant is seeded; there is no second real tenant to
+provision for yet).

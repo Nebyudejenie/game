@@ -117,6 +117,51 @@ enforce "a revoked node cannot receive work"); a **draining** node
 authenticates and heartbeats normally but is never handed new work,
 letting any job already in flight on it resolve normally.
 
+## Phase 2: node lifecycle, capacity, eligibility, fairness
+
+Added 2026-09-07 in response to a follow-up directive asking for the full
+distributed-mesh roadmap (see `DECISIONS.md`'s Phase 2 entry for the full
+scoping call — again, one real bounded slice, not the whole roadmap).
+
+**A key architectural finding, not assumed**: the directive's own
+"routing engine" concept (least-loaded/round-robin/health-weighted
+strategies, explainable per-job node *selection*) describes a **push**
+model, where the server picks a node for a job. This protocol is
+**pull**: a node asks, the server decides only whether *this asking
+node* qualifies and, among qualifying jobs, which one it gets. What
+translates onto a pull protocol for real is **eligibility** (does this
+node qualify at all) and **fair ordering** (which job it gets first) —
+both implemented below. A pluggable multi-strategy routing engine is
+deferred until a second real strategy actually needs to exist.
+
+- **Node lifecycle**: `pending → active ⇄ maintenance/disabled/draining →
+  revoked`. `maintenance` is a real, admin-settable status distinct from
+  `disabled` (different operator meaning: planned work vs. unexplained
+  shutdown). `degraded`/`offline` are **never stored** — they're computed
+  at read time from `health_score`/heartbeat recency
+  (`nodes.py::display_status()`), so there is exactly one source of truth
+  for those signals, never a second column that could drift from it.
+- **Per-node capacity**: a node advertises `max_concurrent_jobs` via
+  heartbeat (defaults to 1 — today's de facto behavior); `fetch-job`
+  checks the node's real, live in-flight message count (never a
+  self-reported number) before handing out more work.
+- **Node-group eligibility**: `sms_campaigns.required_fleet_group`
+  (nullable; NULL = any node, today's only prior behavior) restricts a
+  campaign's messages to nodes in one exact `fleet_group`.
+- **Cross-campaign fairness**: the claim query no longer orders strictly
+  by tenant-wide `created_at` (under which one huge campaign starves
+  every other campaign queued alongside it). It now ranks each message by
+  its own position within its *own* campaign's full message history
+  (`ROW_NUMBER() OVER (PARTITION BY campaign_id ORDER BY created_at)`,
+  computed over the whole history, not just what's still queued — see
+  DECISIONS.md for the real bug this distinction fixes), so campaigns
+  interleave rather than serve strictly first-created-first-served.
+- **Routing-decision forensics**: every claimed message's
+  `sms_delivery_attempts` row now carries a `routing_snapshot` (jsonb):
+  the node's fleet_group/health_score/in-flight count at claim time, and
+  the campaign's `required_fleet_group` — a real, queryable answer to
+  "why did this node get this job."
+
 ## Retry and reconciliation
 
 Six named error classes (`temporary`, `permanent`, `network`, `timeout`,
@@ -155,16 +200,19 @@ least-privilege reasoning for the single highest-leverage lever.
 
 ## Testing
 
-- `tests/integration/test_sms_core.py` — 29 tests against real Postgres,
+- `tests/integration/test_sms_core.py` — 42 tests against real Postgres,
   no mocks: audience resolution, suppression, node lifecycle/health
   scoring, the full campaign state machine, message claiming/priority
-  ordering, retry classification, and the reconciliation sweep (a real
-  backdated `assigned_at`, not a mocked clock).
-- `tests/integration/test_sms_app.py` — 9 tests over real HTTP: login
+  ordering, retry classification, the reconciliation sweep (a real
+  backdated `assigned_at`, not a mocked clock), and Phase 2's node
+  capacity/fleet-group eligibility/cross-campaign fairness/routing
+  forensics, plus two explicit regression-protection tests (cross-tenant
+  isolation, real audit-log content).
+- `tests/integration/test_sms_app.py` — 13 tests over real HTTP: login
   against a real admin account, RBAC boundaries enforced through the
   actual dependency chain, a full campaign-to-delivery flow through the
-  real node protocol, suppression enforcement, and node-ownership
-  rejection.
+  real node protocol, suppression enforcement, node-ownership rejection,
+  and Phase 2's capacity/maintenance/fleet-group-eligibility routes.
 - `tests/integration/test_sms_console_e2e.py` (`pytest -m e2e`) — a real
   Chromium tab driving the actual frontend: login, add a contact,
   register and approve a node, create/validate/start a campaign, and
@@ -179,10 +227,17 @@ database.
 
 ## What's deliberately not built yet
 
-See `DECISIONS.md` (2026-09-07) for the full list and reasoning: SMPP/
-carrier/HTTP provider adapters, fleet scale beyond a handful of real
-nodes, a multi-strategy routing policy engine, automatic inbound
-STOP-keyword suppression, a configurable N-person approval workflow,
-billing/usage metering and per-tenant quotas, an outbound webhook/domain-
-event bus, load/chaos testing at enterprise scale, and tenant
-self-service provisioning.
+See `DECISIONS.md` (2026-09-07, both the Phase 1 and Phase 2 entries) for
+the full list and reasoning: SMPP/carrier/HTTP provider adapters, fleet
+scale validated beyond a handful of real nodes, a pluggable
+multi-strategy routing engine (this slice's eligibility+fairness is real
+production logic, not a stub, but it's one concrete policy, not an
+interface with multiple implementations), backpressure/auto-throttling
+beyond the capacity gate already built, automatic inbound STOP-keyword
+suppression, a configurable N-person approval workflow, billing/usage
+metering and per-tenant quotas, an outbound webhook/domain-event bus, the
+real-time ops-center dashboard maturity (campaign digital twin, control
+tower, capacity forecasting, anomaly/alert engines), load/chaos testing
+at enterprise scale, node-protocol-version-gated rolling upgrades (the
+version is stored and visible; nothing yet refuses to dispatch to an
+incompatible version), and tenant self-service provisioning.

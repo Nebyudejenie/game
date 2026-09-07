@@ -74,6 +74,20 @@ async def test_sms_console_full_campaign_flow_through_the_real_ui(sms_server, po
     node_token = (await page.text_content('#new-token-panel pre.code-block')).strip()
     await page.wait_for_selector(f'tr:has-text("{node_name}") button:has-text("Approve")', timeout=10000)
     await page.click(f'tr:has-text("{node_name}") button:has-text("Approve")')
+
+    # The console's own display_status is a real, computed overlay (Phase
+    # 2): an approved node that has never actually heartbeat-ed is
+    # honestly shown as 'offline', not 'active' -- exactly like a real
+    # physical device that hasn't connected yet. Send a real heartbeat, as
+    # an actual node would, before expecting the UI to show it as active.
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            f"{sms_server}/v1/nodes/heartbeat",
+            headers={"Authorization": f"Bearer {node_token}"},
+            json={"app_version": "e2e-test", "max_concurrent_jobs": 5},
+        )
+    await page.reload()
+    await page.click('button[data-screen="nodes"]')
     await page.wait_for_selector(f'tr:has-text("{node_name}") .badge-active', timeout=10000)
 
     # claim_next_message() correctly claims the oldest queued message for

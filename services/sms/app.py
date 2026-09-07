@@ -190,6 +190,7 @@ def _campaign_to_dict(campaign: campaigns_module.Campaign) -> dict[str, Any]:
         "scheduled_at": campaign.scheduled_at.isoformat() if campaign.scheduled_at else None,
         "started_at": campaign.started_at.isoformat() if campaign.started_at else None,
         "completed_at": campaign.completed_at.isoformat() if campaign.completed_at else None,
+        "required_fleet_group": campaign.required_fleet_group,
     }
 
 
@@ -215,6 +216,11 @@ class CreateCampaignRequest(BaseModel):
     template_id: int | None = None
     body_override: str | None = None
     audience_filter: dict[str, Any] = {}
+    # NULL/omitted -- today's only behavior -- means any active node may
+    # deliver this campaign; set to restrict delivery to nodes whose own
+    # fleet_group matches exactly (packages/core/sms/messages.py's claim
+    # query enforces this).
+    required_fleet_group: str | None = None
 
 
 @app.post("/campaigns")
@@ -227,7 +233,8 @@ async def create_campaign(
         campaign = await admin_queries.create_campaign_admin(
             app.state.pool, tenant_id=app.state.tenant_id, admin_id=admin.admin_id, name=body.name,
             template_id=body.template_id, body_override=body.body_override,
-            audience_filter=body.audience_filter, ip_address=_client_ip(request),
+            audience_filter=body.audience_filter, required_fleet_group=body.required_fleet_group,
+            ip_address=_client_ip(request),
         )
     except InvalidAudienceFilter as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -495,9 +502,14 @@ async def remove_suppression(
 def _node_to_dict(node: nodes_module.DeliveryNode) -> dict[str, Any]:
     return {
         "id": node.id, "name": node.name, "fleet_group": node.fleet_group, "status": node.status,
+        # A computed overlay (degraded/offline), never a second stored
+        # status -- see packages/core/sms/nodes.py::display_status().
+        "display_status": nodes_module.display_status(node),
         "health_score": node.health_score,
         "last_heartbeat_at": node.last_heartbeat_at.isoformat() if node.last_heartbeat_at else None,
         "app_version": node.app_version,
+        "max_concurrent_jobs": node.max_concurrent_jobs,
+        "protocol_version": node.protocol_version,
     }
 
 
@@ -566,6 +578,13 @@ async def drain_node(
     return await _node_lifecycle_action(admin, node_id, _client_ip(request), admin_queries.drain_node_admin)
 
 
+@app.post("/nodes/{node_id}/maintenance")
+async def set_node_maintenance(
+    request: Request, admin: Annotated[AdminSession, Depends(require("sms:nodes:manage"))], node_id: int
+) -> dict[str, str]:
+    return await _node_lifecycle_action(admin, node_id, _client_ip(request), admin_queries.set_maintenance_admin)
+
+
 @app.post("/nodes/{node_id}/revoke")
 async def revoke_node(
     request: Request, admin: Annotated[AdminSession, Depends(require("sms:nodes:manage"))], node_id: int
@@ -592,13 +611,16 @@ async def rotate_node_token(
 class HeartbeatRequest(BaseModel):
     app_version: str | None = None
     capabilities: dict[str, Any] = {}
+    max_concurrent_jobs: int | None = None
+    protocol_version: int | None = None
 
 
 @app.post("/v1/nodes/heartbeat")
 async def node_heartbeat(node: CurrentNode, body: HeartbeatRequest) -> dict[str, Any]:
     async with app.state.pool.acquire() as conn:
         await nodes_module.record_heartbeat(
-            conn, node_id=node.id, app_version=body.app_version, capabilities=body.capabilities
+            conn, node_id=node.id, app_version=body.app_version, capabilities=body.capabilities,
+            max_concurrent_jobs=body.max_concurrent_jobs, protocol_version=body.protocol_version,
         )
         score = await nodes_module.compute_and_store_health_score(conn, node_id=node.id)
     return {"status": node.status, "health_score": score}
@@ -608,15 +630,15 @@ async def node_heartbeat(node: CurrentNode, body: HeartbeatRequest) -> dict[str,
 async def node_fetch_job(node: CurrentNode) -> dict[str, Any] | None:
     if node.status != "active":
         # Honest, not a bare 401/403 -- a pending node is waiting on
-        # admin approval, a disabled/draining one is intentionally not
-        # being given new work, distinct real reasons a device operator
-        # should be able to tell apart.
+        # admin approval, a disabled/draining/maintenance one is
+        # intentionally not being given new work, distinct real reasons a
+        # device operator should be able to tell apart.
         return {"job": None, "reason": f"node status is {node.status!r}, not accepting work"}
     async with app.state.pool.acquire() as conn:
         async with conn.transaction():
-            message = await messages_module.claim_next_message(conn, tenant_id=node.tenant_id, node_id=node.id)
+            message = await messages_module.claim_next_message(conn, tenant_id=node.tenant_id, node=node)
     if message is None:
-        return {"job": None, "reason": "no queued messages"}
+        return {"job": None, "reason": "no eligible queued messages, or already at max_concurrent_jobs"}
     return {
         "job": {
             "message_id": message.id, "phone_e164": message.phone_e164, "body": message.body,

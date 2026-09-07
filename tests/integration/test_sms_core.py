@@ -258,7 +258,7 @@ async def test_campaign_full_lifecycle_creates_and_delivers_messages(conn, tenan
     node, _ = await nodes.create_node(conn, tenant_id=tenant_id, name=f"node-{random.randint(1, 10**9)}", fleet_group="default", created_by_admin_id=admin_id)
     await nodes.approve_node(conn, node_id=node.id)
 
-    claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node_id=node.id)
+    claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node=node)
     assert claimed is not None
     assert claimed.campaign_id == campaign.id
     assert claimed.phone_e164 == phone
@@ -304,7 +304,7 @@ async def test_cancel_campaign_cancels_only_still_queued_messages(conn, tenant_i
 
     node, _ = await nodes.create_node(conn, tenant_id=tenant_id, name=f"node-{random.randint(1, 10**9)}", fleet_group="default", created_by_admin_id=admin_id)
     await nodes.approve_node(conn, node_id=node.id)
-    claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node_id=node.id)
+    claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node=node)
     assert claimed is not None  # one of the two messages is now 'assigned'
 
     cancelled = await campaigns.cancel_campaign(conn, campaign_id=campaign.id, admin_id=admin_id, reason="test cancel")
@@ -332,12 +332,12 @@ async def test_paused_campaign_messages_are_not_claimable(conn, tenant_id):
 
     node, _ = await nodes.create_node(conn, tenant_id=tenant_id, name=f"node-{random.randint(1, 10**9)}", fleet_group="default", created_by_admin_id=admin_id)
     await nodes.approve_node(conn, node_id=node.id)
-    claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node_id=node.id)
+    claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node=node)
     assert claimed is None  # queue state preserved, just not offered while paused
 
     resumed = await campaigns.resume_campaign(conn, campaign_id=campaign.id, admin_id=admin_id)
     assert resumed.status == "running"
-    claimed_after_resume = await messages.claim_next_message(conn, tenant_id=tenant_id, node_id=node.id)
+    claimed_after_resume = await messages.claim_next_message(conn, tenant_id=tenant_id, node=node)
     assert claimed_after_resume is not None
 
 
@@ -354,7 +354,7 @@ async def test_claim_next_message_respects_priority_order(conn, tenant_id):
         "INSERT INTO sms_messages (tenant_id, phone_e164, body, priority, idempotency_key) VALUES ($1, $2, 'x', 'critical', $3)",
         tenant_id, unique_sms_phone(), crit_key,
     )
-    claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node_id=node.id)
+    claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node=node)
     assert claimed is not None
     assert claimed.priority == "critical"
 
@@ -367,7 +367,7 @@ async def test_report_result_requeues_a_retryable_failure(conn, tenant_id):
         "INSERT INTO sms_messages (tenant_id, phone_e164, body, idempotency_key) VALUES ($1, $2, 'x', $3)",
         tenant_id, unique_sms_phone(), key,
     )
-    claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node_id=node.id)
+    claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node=node)
     assert claimed is not None
     result = await messages.report_result(
         conn, message_id=claimed.id, node_id=node.id, outcome="failed", error_class="network", raw_provider_response=None,
@@ -384,7 +384,7 @@ async def test_report_result_dead_letters_a_permanent_failure(conn, tenant_id):
         "INSERT INTO sms_messages (tenant_id, phone_e164, body, idempotency_key) VALUES ($1, $2, 'x', $3)",
         tenant_id, unique_sms_phone(), key,
     )
-    claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node_id=node.id)
+    claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node=node)
     assert claimed is not None
     result = await messages.report_result(
         conn, message_id=claimed.id, node_id=node.id, outcome="failed", error_class="permanent", raw_provider_response=None,
@@ -402,7 +402,7 @@ async def test_report_result_dead_letters_after_max_attempts_exhausted(conn, ten
     )
     message_id = None
     for attempt in range(messages.MAX_DELIVERY_ATTEMPTS):
-        claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node_id=node.id)
+        claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node=node)
         assert claimed is not None, f"expected a claimable message on attempt {attempt + 1}"
         message_id = claimed.id
         result = await messages.report_result(
@@ -422,7 +422,7 @@ async def test_report_result_rejects_a_report_from_a_non_owning_node(conn, tenan
         "INSERT INTO sms_messages (tenant_id, phone_e164, body, idempotency_key) VALUES ($1, $2, 'x', $3)",
         tenant_id, unique_sms_phone(), key,
     )
-    claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node_id=node_a.id)
+    claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node=node_a)
     assert claimed is not None
     with pytest.raises(NotOwnedByNode):
         await messages.report_result(
@@ -438,7 +438,7 @@ async def test_reconcile_stale_in_flight_moves_a_silent_message_to_unknown_then_
         "INSERT INTO sms_messages (tenant_id, phone_e164, body, idempotency_key) VALUES ($1, $2, 'x', $3)",
         tenant_id, unique_sms_phone(), key,
     )
-    claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node_id=node.id)
+    claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node=node)
     assert claimed is not None
     # Simulate the node going silent: backdate assigned_at well past the
     # in-flight timeout without ever calling start/report_result.
@@ -458,3 +458,229 @@ async def test_reconcile_stale_in_flight_moves_a_silent_message_to_unknown_then_
     )
     assert attempt["outcome"] == "unknown"
     assert attempt["error_class"] == "timeout"
+
+
+# --- Phase 2: node lifecycle, capacity, eligibility, fairness -----------
+
+
+def test_display_status_active_node_with_fresh_heartbeat_and_good_health():
+    node = nodes.DeliveryNode(
+        id=1, tenant_id=1, name="n", fleet_group="default", status="active", health_score=90,
+        last_heartbeat_at=datetime.now(timezone.utc), app_version=None, max_concurrent_jobs=1, protocol_version=1,
+    )
+    assert nodes.display_status(node) == "active"
+
+
+def test_display_status_computes_degraded_from_low_health_without_storing_it():
+    node = nodes.DeliveryNode(
+        id=1, tenant_id=1, name="n", fleet_group="default", status="active", health_score=10,
+        last_heartbeat_at=datetime.now(timezone.utc), app_version=None, max_concurrent_jobs=1, protocol_version=1,
+    )
+    assert nodes.display_status(node) == "degraded"
+
+
+def test_display_status_computes_offline_from_stale_heartbeat():
+    node = nodes.DeliveryNode(
+        id=1, tenant_id=1, name="n", fleet_group="default", status="active", health_score=100,
+        last_heartbeat_at=datetime.now(timezone.utc) - timedelta(hours=1), app_version=None,
+        max_concurrent_jobs=1, protocol_version=1,
+    )
+    assert nodes.display_status(node) == "offline"
+
+
+def test_display_status_passes_through_non_active_stored_statuses_unchanged():
+    for status in ("pending", "maintenance", "disabled", "draining", "revoked"):
+        node = nodes.DeliveryNode(
+            id=1, tenant_id=1, name="n", fleet_group="default", status=status, health_score=100,
+            last_heartbeat_at=datetime.now(timezone.utc), app_version=None, max_concurrent_jobs=1, protocol_version=1,
+        )
+        assert nodes.display_status(node) == status
+
+
+async def test_set_maintenance_is_a_real_distinct_status_from_disabled(conn, tenant_id):
+    node, _ = await nodes.create_node(conn, tenant_id=tenant_id, name=f"node-{random.randint(1, 10**9)}", fleet_group="default", created_by_admin_id=None)
+    await nodes.set_maintenance(conn, node_id=node.id)
+    row = await conn.fetchrow("SELECT status FROM sms_delivery_nodes WHERE id = $1", node.id)
+    assert row["status"] == "maintenance"
+
+
+async def test_record_heartbeat_updates_capacity_and_protocol_version(conn, tenant_id):
+    node, _ = await nodes.create_node(conn, tenant_id=tenant_id, name=f"node-{random.randint(1, 10**9)}", fleet_group="default", created_by_admin_id=None)
+    await nodes.record_heartbeat(conn, node_id=node.id, app_version="1.0", capabilities={}, max_concurrent_jobs=5, protocol_version=2)
+    row = await conn.fetchrow("SELECT max_concurrent_jobs, protocol_version FROM sms_delivery_nodes WHERE id = $1", node.id)
+    assert row["max_concurrent_jobs"] == 5
+    assert row["protocol_version"] == 2
+
+
+async def test_record_heartbeat_without_capacity_fields_preserves_the_existing_value(conn, tenant_id):
+    node, _ = await nodes.create_node(conn, tenant_id=tenant_id, name=f"node-{random.randint(1, 10**9)}", fleet_group="default", created_by_admin_id=None)
+    await nodes.record_heartbeat(conn, node_id=node.id, app_version="1.0", capabilities={}, max_concurrent_jobs=7, protocol_version=3)
+    # A later heartbeat that omits these fields (an older device, or a
+    # MacroDroid macro that never sends them) must never silently reset
+    # them back to the column default.
+    await nodes.record_heartbeat(conn, node_id=node.id, app_version="1.0", capabilities={})
+    row = await conn.fetchrow("SELECT max_concurrent_jobs, protocol_version FROM sms_delivery_nodes WHERE id = $1", node.id)
+    assert row["max_concurrent_jobs"] == 7
+    assert row["protocol_version"] == 3
+
+
+async def test_claim_next_message_respects_node_capacity(conn, tenant_id):
+    node, _ = await nodes.create_node(conn, tenant_id=tenant_id, name=f"node-{random.randint(1, 10**9)}", fleet_group="default", created_by_admin_id=None)
+    await nodes.approve_node(conn, node_id=node.id)
+    # DeliveryNode is immutable -- re-fetch after the heartbeat rather than
+    # relying on the (now stale) object create_node returned, which would
+    # coincidentally still show the column default (1) either way.
+    await nodes.record_heartbeat(conn, node_id=node.id, app_version=None, capabilities={}, max_concurrent_jobs=1)
+    node = await nodes.get_node(conn, node_id=node.id)
+    for i in range(2):
+        await conn.execute(
+            "INSERT INTO sms_messages (tenant_id, phone_e164, body, idempotency_key) VALUES ($1, $2, 'x', $3)",
+            tenant_id, unique_sms_phone(), f"capacity-{node.id}-{i}",
+        )
+    first = await messages.claim_next_message(conn, tenant_id=tenant_id, node=node)
+    assert first is not None
+    # Node already holds one in-flight message and max_concurrent_jobs=1
+    # -- a second claim must be refused, not silently overload it.
+    second = await messages.claim_next_message(conn, tenant_id=tenant_id, node=node)
+    assert second is None
+
+    await messages.report_result(conn, message_id=first.id, node_id=node.id, outcome="delivered", error_class=None, raw_provider_response=None)
+    third = await messages.claim_next_message(conn, tenant_id=tenant_id, node=node)
+    assert third is not None
+
+
+async def test_claim_next_message_enforces_campaign_fleet_group_eligibility(conn, tenant_id):
+    admin_id = await _make_admin_id(conn)
+    template_id = await _make_template(conn, tenant_id)
+    marker = f"eligibility-{random.randint(1, 10**9)}"
+    await _make_contact(conn, tenant_id, attributes={"segment": marker})
+
+    campaign = await campaigns.create_campaign(
+        conn, tenant_id=tenant_id, name="vip-only", template_id=template_id, body_override=None,
+        audience_filter={"attributes": {"segment": marker}}, created_by_admin_id=admin_id,
+        required_fleet_group="vip",
+    )
+    await campaigns.validate_campaign(conn, campaign_id=campaign.id, admin_id=admin_id)
+    await campaigns.start_campaign(conn, campaign_id=campaign.id, admin_id=admin_id)
+
+    default_node, _ = await nodes.create_node(conn, tenant_id=tenant_id, name=f"default-{random.randint(1, 10**9)}", fleet_group="default", created_by_admin_id=admin_id)
+    vip_node, _ = await nodes.create_node(conn, tenant_id=tenant_id, name=f"vip-{random.randint(1, 10**9)}", fleet_group="vip", created_by_admin_id=admin_id)
+    await nodes.approve_node(conn, node_id=default_node.id)
+    await nodes.approve_node(conn, node_id=vip_node.id)
+
+    ineligible = await messages.claim_next_message(conn, tenant_id=tenant_id, node=default_node)
+    assert ineligible is None
+
+    eligible = await messages.claim_next_message(conn, tenant_id=tenant_id, node=vip_node)
+    assert eligible is not None
+    assert eligible.campaign_id == campaign.id
+
+
+async def test_claim_next_message_records_a_routing_snapshot(conn, tenant_id):
+    node, _ = await nodes.create_node(conn, tenant_id=tenant_id, name=f"node-{random.randint(1, 10**9)}", fleet_group="eu-west", created_by_admin_id=None)
+    await nodes.approve_node(conn, node_id=node.id)
+    key = f"snapshot-{random.randint(1, 10**9)}"
+    await conn.execute(
+        "INSERT INTO sms_messages (tenant_id, phone_e164, body, idempotency_key) VALUES ($1, $2, 'x', $3)",
+        tenant_id, unique_sms_phone(), key,
+    )
+    claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node=node)
+    assert claimed is not None
+    row = await conn.fetchrow(
+        "SELECT routing_snapshot FROM sms_delivery_attempts WHERE message_id = $1", claimed.id
+    )
+    import json
+
+    snapshot = json.loads(row["routing_snapshot"]) if isinstance(row["routing_snapshot"], str) else row["routing_snapshot"]
+    assert snapshot["node_fleet_group"] == "eu-west"
+    assert snapshot["node_concurrent_jobs_before"] == 0
+    assert snapshot["campaign_required_fleet_group"] is None
+
+
+async def test_claim_next_message_is_fair_across_campaigns_not_strict_fifo(conn, tenant_id):
+    """Without fairness, campaign A's 3 pre-existing messages would all be
+    claimed before campaign B's single message ever gets a turn. With
+    per-campaign fair-share ordering, B's message is claimed second, not
+    fourth.
+    """
+    admin_id = await _make_admin_id(conn)
+    template_id = await _make_template(conn, tenant_id)
+    marker_a = f"fair-a-{random.randint(1, 10**9)}"
+    marker_b = f"fair-b-{random.randint(1, 10**9)}"
+    for _ in range(3):
+        await _make_contact(conn, tenant_id, attributes={"segment": marker_a})
+    await _make_contact(conn, tenant_id, attributes={"segment": marker_b})
+
+    campaign_a = await campaigns.create_campaign(
+        conn, tenant_id=tenant_id, name="fair-a", template_id=template_id, body_override=None,
+        audience_filter={"attributes": {"segment": marker_a}}, created_by_admin_id=admin_id,
+    )
+    await campaigns.validate_campaign(conn, campaign_id=campaign_a.id, admin_id=admin_id)
+    await campaigns.start_campaign(conn, campaign_id=campaign_a.id, admin_id=admin_id)
+
+    campaign_b = await campaigns.create_campaign(
+        conn, tenant_id=tenant_id, name="fair-b", template_id=template_id, body_override=None,
+        audience_filter={"attributes": {"segment": marker_b}}, created_by_admin_id=admin_id,
+    )
+    await campaigns.validate_campaign(conn, campaign_id=campaign_b.id, admin_id=admin_id)
+    await campaigns.start_campaign(conn, campaign_id=campaign_b.id, admin_id=admin_id)
+
+    node, _ = await nodes.create_node(conn, tenant_id=tenant_id, name=f"fair-node-{random.randint(1, 10**9)}", fleet_group="default", created_by_admin_id=admin_id)
+    await nodes.approve_node(conn, node_id=node.id)
+    await nodes.record_heartbeat(conn, node_id=node.id, app_version=None, capabilities={}, max_concurrent_jobs=10)
+    node = await nodes.get_node(conn, node_id=node.id)  # DeliveryNode is immutable -- re-fetch after the heartbeat
+
+    claimed_campaign_ids = []
+    for _ in range(4):
+        claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node=node)
+        assert claimed is not None
+        claimed_campaign_ids.append(claimed.campaign_id)
+
+    assert claimed_campaign_ids[0] == campaign_a.id  # A was created (and thus queued) first
+    assert campaign_b.id in claimed_campaign_ids[:2]  # B's one message is not starved to last
+
+
+async def test_cross_tenant_isolation_a_node_cannot_claim_another_tenants_message(conn, tenant_id, pool):
+    """Explicit regression protection (DECISIONS.md Phase 2, section 5):
+    tenant_id fixture gives this test its own tenant already, but this
+    test additionally proves a *second*, independently-created tenant's
+    queued message is genuinely invisible to the first tenant's node --
+    not merely "untested," but proven impossible.
+    """
+    other_tenant_id = await pool.fetchval(
+        "INSERT INTO sms_tenants (slug, name) VALUES ($1, $2) RETURNING id",
+        f"isolation-other-{random.randint(1, 10**12)}", "other",
+    )
+    node, _ = await nodes.create_node(conn, tenant_id=tenant_id, name=f"iso-node-{random.randint(1, 10**9)}", fleet_group="default", created_by_admin_id=None)
+    await nodes.approve_node(conn, node_id=node.id)
+    await conn.execute(
+        "INSERT INTO sms_messages (tenant_id, phone_e164, body, idempotency_key) VALUES ($1, $2, 'x', $3)",
+        other_tenant_id, unique_sms_phone(), f"other-tenant-{random.randint(1, 10**9)}",
+    )
+    claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node=node)
+    assert claimed is None
+
+
+async def test_sms_admin_mutation_writes_a_real_audit_log_row(conn, tenant_id, pool):
+    """Explicit regression protection: services/sms writes into the exact
+    same admin_audit_log table every other admin action in this codebase
+    uses -- not a parallel table, not silently skipped.
+    """
+    from services.admin import auth
+    from services.sms import admin_queries
+
+    admin_id, _ = await auth.create_admin_user(
+        conn, username=f"sms-audit-{random.randint(1, 10**9)}", password="x" * 20, role="superadmin"
+    )
+    campaign = await admin_queries.create_campaign_admin(
+        pool, tenant_id=tenant_id, admin_id=admin_id, name="audit-check", template_id=None,
+        body_override="hi", audience_filter={}, ip_address="127.0.0.1",
+    )
+    row = await conn.fetchrow(
+        "SELECT action, target_type, target_id, admin_id FROM admin_audit_log "
+        "WHERE target_type = 'sms_campaign' AND target_id = $1 ORDER BY id DESC LIMIT 1",
+        str(campaign.id),
+    )
+    assert row is not None
+    assert row["action"] == "sms.campaigns.create"
+    assert row["admin_id"] == admin_id

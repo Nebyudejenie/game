@@ -31,16 +31,19 @@ async def create_campaign_admin(
     body_override: str | None,
     audience_filter: dict[str, Any],
     ip_address: str | None,
+    required_fleet_group: str | None = None,
 ) -> Campaign:
     async with pool.acquire() as conn:
         async with conn.transaction():
             campaign = await campaigns_module.create_campaign(
                 conn, tenant_id=tenant_id, name=name, template_id=template_id,
                 body_override=body_override, audience_filter=audience_filter, created_by_admin_id=admin_id,
+                required_fleet_group=required_fleet_group,
             )
             await audit.record(
                 conn, admin_id=admin_id, action="sms.campaigns.create", target_type="sms_campaign",
-                target_id=str(campaign.id), before=None, after={"name": name, "status": campaign.status},
+                target_id=str(campaign.id), before=None,
+                after={"name": name, "status": campaign.status, "required_fleet_group": required_fleet_group},
                 ip_address=ip_address,
             )
     return campaign
@@ -270,6 +273,10 @@ async def resume_node_admin(pool: asyncpg.Pool, *, admin_id: int, node_id: int, 
 
 async def drain_node_admin(pool: asyncpg.Pool, *, admin_id: int, node_id: int, ip_address: str | None) -> None:
     await _node_lifecycle_action(pool, admin_id=admin_id, node_id=node_id, action="sms.nodes.drain", fn=nodes.drain_node, ip_address=ip_address)
+
+
+async def set_maintenance_admin(pool: asyncpg.Pool, *, admin_id: int, node_id: int, ip_address: str | None) -> None:
+    await _node_lifecycle_action(pool, admin_id=admin_id, node_id=node_id, action="sms.nodes.maintenance", fn=nodes.set_maintenance, ip_address=ip_address)
 
 
 async def revoke_node_admin(pool: asyncpg.Pool, *, admin_id: int, node_id: int, ip_address: str | None) -> None:
