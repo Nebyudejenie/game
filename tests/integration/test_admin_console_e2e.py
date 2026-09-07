@@ -437,3 +437,91 @@ async def test_admin_console_telegram_health_screen_shows_live_webhook_status(
 
     assert page_errors == [], f"JS errors: {page_errors}"
     await page.close()
+
+
+async def test_admin_console_telegram_commands_screen_edit_and_disable_over_a_real_browser(
+    admin_server, pool, browser, monkeypatch
+):
+    from aiogram import Bot
+    from aiogram.types import WebhookInfo
+
+    from packages.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "telegram_bot_token", "123456:FAKE-TEST-TOKEN")
+
+    async def fake_get_webhook_info(self: Bot) -> WebhookInfo:
+        return WebhookInfo(
+            url="https://bot.test/webhook", has_custom_certificate=False, pending_update_count=0,
+            ip_address=None, last_error_date=None, last_error_message=None,
+            last_synchronization_error_date=None, max_connections=40, allowed_updates=None,
+        )
+
+    monkeypatch.setattr(Bot, "get_webhook_info", fake_get_webhook_info)
+
+    admin_id, username, password, totp_secret = await create_test_admin(pool, role="superadmin")
+    page = await browser.new_page(viewport={"width": 1280, "height": 1000})
+    page_errors: list[str] = []
+    page.on("pageerror", lambda exc: page_errors.append(str(exc)))
+    page.on("dialog", lambda dialog: dialog.accept("e2e test: temporary maintenance"))
+
+    await _login(page, admin_server, username, password, totp_secret)
+    await page.wait_for_selector(".stat-grid", timeout=10000)
+
+    await page.click('.nav-btn[data-screen="telegram_health"]')
+    await page.wait_for_selector('tr[data-handler="cmd_rules"]', timeout=10000)
+
+    # Open the /rules row's detail panel and edit its description.
+    await page.click('tr[data-handler="cmd_rules"] .details-btn')
+    await page.wait_for_selector('tr[data-detail-for="cmd_rules"] .edit-form', timeout=5000)
+    description_input = page.locator('tr[data-detail-for="cmd_rules"] input[name="description"]')
+    await description_input.fill("")
+    await description_input.fill("Edited via e2e test")
+    await page.click('tr[data-detail-for="cmd_rules"] button[type="submit"]')
+    await page.wait_for_selector("#toast.visible", timeout=5000)
+
+    updated_description = await pool.fetchval(
+        "SELECT description FROM bot_commands WHERE handler_name = 'cmd_rules'"
+    )
+    assert updated_description == "Edited via e2e test"
+
+    # A successful save reloads the whole table (renderCommands()), which
+    # collapses whatever detail row was open -- re-open it before
+    # continuing.
+    await page.wait_for_selector('tr[data-handler="cmd_rules"] .details-btn', timeout=5000)
+    await page.click('tr[data-handler="cmd_rules"] .details-btn')
+
+    # Load a real preview -- proves the backend round trip renders through
+    # a real browser click, not just a direct API call.
+    await page.wait_for_selector('tr[data-detail-for="cmd_rules"] .preview-btn', timeout=5000)
+    await page.click('tr[data-detail-for="cmd_rules"] .preview-btn')
+    await page.wait_for_selector('tr[data-detail-for="cmd_rules"] .preview-result .field-value', timeout=5000)
+    preview_text = await page.text_content('tr[data-detail-for="cmd_rules"] .preview-result .field-value')
+    assert preview_text and len(preview_text) > 0
+
+    # Disable /balance (window.prompt auto-accepted above with a reason)
+    # and confirm the badge flips to "disabled" in the live UI.
+    await page.click('tr[data-handler="cmd_balance"] .details-btn')
+    await page.wait_for_selector('tr[data-detail-for="cmd_balance"] .toggle-enabled-btn', timeout=5000)
+    await page.click('tr[data-detail-for="cmd_balance"] .toggle-enabled-btn')
+    await page.wait_for_function(
+        """() => {
+            const row = document.querySelector('tr[data-handler="cmd_balance"]');
+            return row && row.textContent.includes('disabled');
+        }""",
+        timeout=5000,
+    )
+
+    disabled_in_db = await pool.fetchval(
+        "SELECT enabled FROM bot_commands WHERE handler_name = 'cmd_balance'"
+    )
+    assert disabled_in_db is False
+
+    # Restore real, shared state for every other test/process using this
+    # database.
+    await pool.execute(
+        "UPDATE bot_commands SET enabled = true, description = 'Static Bingo rules text' "
+        "WHERE handler_name IN ('cmd_balance', 'cmd_rules')"
+    )
+
+    assert page_errors == [], f"JS errors: {page_errors}"
+    await page.close()

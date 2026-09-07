@@ -17,7 +17,8 @@ from redis.asyncio import Redis
 
 from packages.core import ledger, responsible_gaming
 from packages.core.config import Settings
-from services.bot import referral
+from packages.core.metrics import telegram_command_blocked_total
+from services.bot import command_registry, referral
 from services.bot.i18n import SUPPORTED_LANGUAGES, resolve_language, t
 from services.bot.keyboards import (
     MenuAction,
@@ -748,6 +749,34 @@ async def on_menu_text(message: Message, pool: asyncpg.Pool, redis: Redis, notif
     action, needs_registration = matched
     if needs_registration and not registered:
         await notifier.send(message.chat.id, t("error.not_registered", language))
+        return
+
+    # Telegram Command Center: command_registry.command_gate_middleware
+    # (services/bot/app.py) only wraps aiogram's own routed dispatch --
+    # this dispatch is a plain, direct Python call to the target
+    # handler, invisible to that middleware entirely. Without this
+    # explicit check here too, disabling e.g. cmd_balance through the
+    # admin registry would still let it run for anyone who presses the
+    # "Balance" reply-keyboard button instead of typing /balance, which
+    # would make "disable a command" a lie for the button-press path.
+    # Mapped by real function reference, not a hardcoded string, so a
+    # future rename can't silently drift the registry lookup out of sync
+    # with the actual handler (and so this dict holds no bare string
+    # literals for test_bot_no_hardcoded_strings.py's own AST checker to
+    # flag -- it can't tell "cmd_balance" the internal identifier from
+    # real user-facing text without this).
+    handler_by_action = {
+        MenuAction.PLAY: cmd_play,
+        MenuAction.BALANCE: cmd_balance,
+        MenuAction.DEPOSIT: cmd_deposit,
+        MenuAction.WITHDRAW: cmd_withdraw,
+        MenuAction.INVITE: cmd_invite,
+        MenuAction.RULES: cmd_rules,
+    }
+    handler_name = handler_by_action[action].__name__
+    if not command_registry.is_enabled(handler_name):
+        telegram_command_blocked_total.labels(handler=handler_name).inc()
+        await notifier.send(message.chat.id, t("error.command_disabled", language))
         return
 
     if action == MenuAction.PLAY:

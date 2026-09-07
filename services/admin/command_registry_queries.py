@@ -1,0 +1,218 @@
+"""Telegram Command Center admin operations: CRUD over the bot_commands
+registry (services/bot/command_registry.py is the bot process's own
+read-only, polling-cached consumer of this same table), live metrics
+joined in from the bot's own /metrics endpoint (services/admin/
+bot_metrics_client.py), and a safe "send test" primitive that reuses the
+existing cross-process notification pipeline (packages/core/
+notifications.py's NOTIFICATIONS_STREAM) rather than a new one.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import asyncpg
+from redis.asyncio import Redis
+
+from packages.core.notifications import NOTIFICATIONS_STREAM
+from services.admin import audit, bot_metrics_client
+from services.bot import i18n
+
+# Only these columns are admin-settable -- a fixed, code-reviewed
+# whitelist, not whatever a request body happens to contain. Column
+# names below are interpolated into SQL (never a request-supplied
+# string) only after being checked against this exact set, so this is
+# the one and only thing standing between "safe configuration" and "SQL
+# injection" -- keep it a literal set, never derived from user input.
+_ALLOWED_FIELDS = {
+    "display_name",
+    "description",
+    "category",
+    "enabled",
+    "visible",
+    "sort_order",
+    "cooldown_seconds",
+    "rate_limit_per_minute",
+    "content_key",
+    "analytics_key",
+}
+
+
+class UnknownBotCommand(ValueError):
+    pass
+
+
+class CommandNotAdminManaged(ValueError):
+    pass
+
+
+class InvalidCommandField(ValueError):
+    pass
+
+
+class MissingContentKey(ValueError):
+    pass
+
+
+async def list_commands_admin(pool: asyncpg.Pool, *, bot_metrics_url: str) -> list[dict[str, Any]]:
+    rows = await pool.fetch("SELECT * FROM bot_commands ORDER BY sort_order, handler_name")
+    live = await bot_metrics_client.fetch_command_metrics(bot_metrics_url)
+    result = []
+    for row in rows:
+        record = dict(row)
+        m = live.get(row["handler_name"])
+        # None here is the explicit "NO DATA" signal the admin UI must
+        # render as such -- never coerced to 0, per the parent
+        # directive's own "if a metric has insufficient real traffic,
+        # show NO DATA, not zero" requirement.
+        record["metrics"] = (
+            None
+            if m is None
+            else {
+                "count": m.count,
+                "success_rate": m.success_rate,
+                "error_rate": m.error_rate,
+                "blocked": m.blocked,
+                "p50_ms": round(m.p50_seconds * 1000, 1) if m.p50_seconds is not None else None,
+                "p95_ms": round(m.p95_seconds * 1000, 1) if m.p95_seconds is not None else None,
+                "p99_ms": round(m.p99_seconds * 1000, 1) if m.p99_seconds is not None else None,
+            }
+        )
+        result.append(record)
+    return result
+
+
+async def update_command_admin(
+    pool: asyncpg.Pool,
+    *,
+    admin_id: int,
+    handler_name: str,
+    changes: dict[str, Any],
+    reason: str | None,
+    ip_address: str | None,
+) -> dict[str, Any]:
+    unknown = set(changes) - _ALLOWED_FIELDS
+    if unknown:
+        raise InvalidCommandField(f"cannot set: {sorted(unknown)}")
+    if not changes:
+        raise InvalidCommandField("no fields given")
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            before = await conn.fetchrow(
+                "SELECT * FROM bot_commands WHERE handler_name = $1 FOR UPDATE", handler_name
+            )
+            if before is None:
+                raise UnknownBotCommand(handler_name)
+            if not before["admin_managed"] and ("enabled" in changes or "visible" in changes):
+                raise CommandNotAdminManaged(
+                    f"{handler_name} is a structural/registration command and cannot be "
+                    "disabled or hidden from the admin console"
+                )
+
+            set_clauses = []
+            values: list[Any] = []
+            for field, value in changes.items():
+                values.append(value)
+                set_clauses.append(f"{field} = ${len(values)}")
+            values.append(admin_id)
+            set_clauses.append(f"updated_by_admin_id = ${len(values)}")
+            values.append(handler_name)
+
+            after = await conn.fetchrow(
+                f"""
+                UPDATE bot_commands SET {', '.join(set_clauses)}, updated_at = now()
+                WHERE handler_name = ${len(values)}
+                RETURNING *
+                """,
+                *values,
+            )
+            assert after is not None
+
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="telegram_commands.update",
+                target_type="bot_command",
+                target_id=handler_name,
+                before={field: before[field] for field in changes},
+                after={field: after[field] for field in changes},
+                reason=reason,
+                ip_address=ip_address,
+            )
+    return dict(after)
+
+
+async def _current_content_value(pool: asyncpg.Pool, *, content_key: str, language: str) -> str | None:
+    override = await pool.fetchval(
+        "SELECT value FROM bot_i18n_overrides WHERE key = $1 AND language = $2", content_key, language
+    )
+    return override if override is not None else i18n.default_template(content_key, language)
+
+
+async def preview_command_content_admin(
+    pool: asyncpg.Pool, *, handler_name: str, language: str
+) -> dict[str, Any]:
+    """Section 7's "Preview": what a player would actually see, rendered
+    with clearly-marked sample values for any required placeholder
+    (real values -- a real balance, a real amount -- are never fabricated
+    for a preview an admin didn't ask this system to know).
+    """
+    row = await pool.fetchrow("SELECT content_key FROM bot_commands WHERE handler_name = $1", handler_name)
+    if row is None:
+        raise UnknownBotCommand(handler_name)
+    content_key = row["content_key"]
+    if not content_key:
+        raise MissingContentKey(f"{handler_name} has no content_key configured")
+
+    template = await _current_content_value(pool, content_key=content_key, language=language)
+    if template is None:
+        raise MissingContentKey(f"content_key {content_key!r} has no value for language {language!r}")
+
+    placeholders = sorted(i18n.required_placeholders(template))
+    sample_kwargs = {name: f"[{name}]" for name in placeholders}
+    rendered = template.format(**sample_kwargs) if sample_kwargs else template
+    return {
+        "content_key": content_key,
+        "language": language,
+        "template": template,
+        "placeholders": placeholders,
+        "rendered_preview": rendered,
+    }
+
+
+async def send_test_command_admin(
+    pool: asyncpg.Pool,
+    redis: Redis,
+    *,
+    admin_id: int,
+    handler_name: str,
+    target_telegram_id: int,
+    language: str,
+    ip_address: str | None,
+) -> str:
+    """Section 8's "Send Test": always exactly one explicit, admin-typed
+    telegram_id -- there is no "test group"/"default test account"
+    concept to default to and no code path from here that can reach more
+    than the one recipient given, so there is no way for this to become
+    an accidental broadcast. Reuses NOTIFICATIONS_STREAM (packages/core/
+    notifications.py) -- the same cross-process pipeline every other
+    admin-originated Telegram message already goes through -- rather
+    than a second delivery mechanism.
+    """
+    preview = await preview_command_content_admin(pool, handler_name=handler_name, language=language)
+    test_text = f"[TEST -- sent by an administrator] {preview['rendered_preview']}"
+
+    await redis.xadd(
+        NOTIFICATIONS_STREAM, {"telegram_id": str(target_telegram_id), "raw_text": test_text}
+    )
+    await audit.record(
+        pool,
+        admin_id=admin_id,
+        action="telegram_commands.send_test",
+        target_type="bot_command",
+        target_id=handler_name,
+        after={"target_telegram_id": target_telegram_id, "language": language, "text": test_text},
+        ip_address=ip_address,
+    )
+    return test_text

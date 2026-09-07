@@ -1,5 +1,5 @@
 import { api, escapeHtml, fmtDate } from "../api.js";
-import { renderError } from "../ui.js";
+import { renderError, toast } from "../ui.js";
 
 export const label = "Telegram";
 
@@ -9,20 +9,45 @@ const STATUS_EXPLAINER = {
   critical: "A large backlog is stuck -- Telegram cannot reach the webhook, or it is failing to process updates.",
 };
 
+function fmtMs(ms) {
+  return ms === null || ms === undefined ? "—" : `${ms.toFixed(1)}ms`;
+}
+
+function fmtPct(fraction) {
+  return fraction === null || fraction === undefined ? "—" : `${(fraction * 100).toFixed(1)}%`;
+}
+
 export async function render(container) {
   container.innerHTML = `
     <h1>Telegram</h1>
     <p class="empty">
       A live check against Telegram's own getWebhookInfo -- made fresh every
-      time this page loads, not cached. Per-command latency (P50/P95/P99) and
-      DB/Redis/Telegram-API time breakdown live on the Grafana dashboard,
-      which can compute real percentiles over time; this page answers the
-      simpler, more urgent question -- "is Telegram reaching us right now?"
+      time this page loads, not cached. Time-series percentiles across a
+      real traffic window live on the Grafana dashboard; the table below
+      shows the same underlying counters and percentiles read directly
+      from the bot's own /metrics right now.
     </p>
     <div id="webhook-health"><p class="loading">Loading…</p></div>
+
+    <h2>Commands</h2>
+    <p class="empty">
+      Every real Telegram command handler in this codebase (services/bot/
+      handlers.py) -- generated from live router introspection, see
+      docs/BOT_COMMAND_CATALOG.md. Disabling a command here takes effect
+      within ~30s (the bot's own registry poll interval) and shows every
+      player a controlled, translated message instead of running the
+      handler -- never a crash, never silence.
+    </p>
+    <div id="commands-list"><p class="loading">Loading…</p></div>
   `;
 
-  const el = container.querySelector("#webhook-health");
+  const healthEl = container.querySelector("#webhook-health");
+  const commandsEl = container.querySelector("#commands-list");
+
+  await Promise.all([loadHealth(healthEl), loadCommands(commandsEl)]);
+}
+
+async function loadHealth(el) {
   try {
     const h = await api("/telegram/webhook-health");
     el.innerHTML = `
@@ -61,5 +86,221 @@ export async function render(container) {
     `;
   } catch (err) {
     renderError(el, err);
+  }
+}
+
+async function loadCommands(el) {
+  try {
+    const commands = await api("/telegram/commands");
+    renderCommands(el, commands);
+  } catch (err) {
+    renderError(el, err);
+  }
+}
+
+function renderCommands(el, commands) {
+  el.innerHTML = `
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Command</th><th>Category</th><th>Enabled</th><th>Usage</th>
+          <th>Success</th><th>P50</th><th>P95</th><th>P99</th><th>Blocked</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        ${commands.map((c) => `
+          <tr data-handler="${c.handler_name}" class="clickable-row">
+            <td>
+              <strong>${c.command ? "/" + escapeHtml(c.command) : escapeHtml(c.display_name)}</strong>
+              <div class="empty" style="margin:0">${escapeHtml(c.description)}</div>
+            </td>
+            <td>${escapeHtml(c.category)}</td>
+            <td>
+              <span class="badge badge-${c.enabled ? "active" : "banned"}">${c.enabled ? "enabled" : "disabled"}</span>
+              ${!c.admin_managed ? '<div class="empty" style="margin:0">structural</div>' : ""}
+            </td>
+            <td>${c.metrics ? c.metrics.count : "NO DATA"}</td>
+            <td>${c.metrics ? fmtPct(c.metrics.success_rate) : "NO DATA"}</td>
+            <td>${c.metrics ? fmtMs(c.metrics.p50_ms) : "—"}</td>
+            <td>${c.metrics ? fmtMs(c.metrics.p95_ms) : "—"}</td>
+            <td>${c.metrics ? fmtMs(c.metrics.p99_ms) : "—"}</td>
+            <td>${c.metrics ? c.metrics.blocked : "—"}</td>
+            <td><button class="btn btn-secondary btn-sm details-btn">Details</button></td>
+          </tr>
+          <tr class="detail-row" data-detail-for="${c.handler_name}" hidden><td colspan="10"></td></tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+
+  for (const row of el.querySelectorAll("tr[data-handler]")) {
+    const handlerName = row.dataset.handler;
+    const command = commands.find((c) => c.handler_name === handlerName);
+    row.querySelector(".details-btn").addEventListener("click", () => toggleDetails(el, command));
+  }
+}
+
+function toggleDetails(el, command) {
+  const detailRow = el.querySelector(`tr[data-detail-for="${command.handler_name}"]`);
+  const cell = detailRow.querySelector("td");
+  if (!detailRow.hidden) {
+    detailRow.hidden = true;
+    return;
+  }
+  // Collapse any other open row first -- one detail panel open at a time
+  // keeps this table readable with 18 real rows in it.
+  for (const other of el.querySelectorAll(".detail-row")) {
+    if (other !== detailRow) other.hidden = true;
+  }
+
+  cell.innerHTML = `
+    <div class="detail-panel">
+      <div class="detail-grid">
+        <div><div class="field-label">Handler</div><div class="field-value">${escapeHtml(command.handler_name)}</div></div>
+        <div><div class="field-label">Content key</div><div class="field-value">${command.content_key ? escapeHtml(command.content_key) : "—"}</div></div>
+        <div><div class="field-label">Cooldown</div><div class="field-value">${command.cooldown_seconds}s</div></div>
+        <div><div class="field-label">Rate limit</div><div class="field-value">${command.rate_limit_per_minute ? command.rate_limit_per_minute + "/min" : "none"}</div></div>
+        <div><div class="field-label">Last changed</div><div class="field-value">${fmtDate(command.updated_at)}</div></div>
+      </div>
+
+      <form class="edit-form">
+        <div class="detail-grid">
+          <label>Description <input type="text" name="description" value="${escapeHtml(command.description)}" /></label>
+          <label>Category <input type="text" name="category" value="${escapeHtml(command.category)}" /></label>
+          <label>Sort order <input type="number" name="sort_order" value="${command.sort_order}" /></label>
+          <label>Cooldown (s) <input type="number" name="cooldown_seconds" value="${command.cooldown_seconds}" min="0" /></label>
+        </div>
+        <div class="action-row">
+          ${
+            command.admin_managed
+              ? `<button type="button" class="btn btn-secondary toggle-enabled-btn">${command.enabled ? "Disable" : "Enable"}</button>`
+              : `<span class="empty">A structural command -- cannot be disabled from here.</span>`
+          }
+          <button type="submit" class="btn">Save changes</button>
+        </div>
+      </form>
+
+      ${command.content_key ? `
+        <h3>Preview</h3>
+        <div class="action-row">
+          <label>Language
+            <select class="preview-language">
+              <option value="am">Amharic</option>
+              <option value="en">English</option>
+            </select>
+          </label>
+          <button type="button" class="btn btn-secondary preview-btn">Load preview</button>
+        </div>
+        <div class="preview-result"></div>
+
+        <h3>Send test</h3>
+        <form class="send-test-form">
+          <div class="action-row">
+            <label>Target Telegram user id <input type="number" name="target_telegram_id" required /></label>
+            <label>Language
+              <select name="language">
+                <option value="am">Amharic</option>
+                <option value="en">English</option>
+              </select>
+            </label>
+            <button type="submit" class="btn">Send test</button>
+          </div>
+        </form>
+        <p class="empty">
+          Sends only to the exact Telegram user id entered above, never to
+          any group of players -- there is no "broadcast" path from here.
+        </p>
+      ` : `<p class="empty">No content_key configured -- nothing to preview or test-send for this command.</p>`}
+    </div>
+  `;
+  detailRow.hidden = false;
+
+  const editForm = cell.querySelector(".edit-form");
+  editForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData(editForm);
+    try {
+      await api(`/telegram/commands/${command.handler_name}`, {
+        method: "PATCH",
+        body: {
+          changes: {
+            description: data.get("description"),
+            category: data.get("category"),
+            sort_order: Number(data.get("sort_order")),
+            cooldown_seconds: Number(data.get("cooldown_seconds")),
+          },
+          reason: "Edited from the Telegram Commands screen",
+        },
+      });
+      toast("Command updated.");
+      await loadCommands(el);
+    } catch (err) {
+      toast(err.detail || err.message, true);
+    }
+  });
+
+  const toggleBtn = cell.querySelector(".toggle-enabled-btn");
+  if (toggleBtn) {
+    toggleBtn.addEventListener("click", async () => {
+      const reason = window.prompt(
+        `${command.enabled ? "Disabling" : "Enabling"} /${command.command || command.handler_name} -- reason for the audit log:`
+      );
+      if (reason === null) return;
+      try {
+        await api(`/telegram/commands/${command.handler_name}`, {
+          method: "PATCH",
+          body: { changes: { enabled: !command.enabled }, reason },
+        });
+        toast(`Command ${command.enabled ? "disabled" : "enabled"}.`);
+        await loadCommands(el);
+      } catch (err) {
+        toast(err.detail || err.message, true);
+      }
+    });
+  }
+
+  const previewBtn = cell.querySelector(".preview-btn");
+  if (previewBtn) {
+    const previewResult = cell.querySelector(".preview-result");
+    previewBtn.addEventListener("click", async () => {
+      const language = cell.querySelector(".preview-language").value;
+      previewResult.innerHTML = `<p class="loading">Loading…</p>`;
+      try {
+        const preview = await api(
+          `/telegram/commands/${command.handler_name}/preview?language=${language}`
+        );
+        previewResult.innerHTML = `
+          <div class="detail-panel">
+            <div class="field-label">What the player sees</div>
+            <div class="field-value">${escapeHtml(preview.rendered_preview)}</div>
+            ${preview.placeholders.length > 0 ? `<p class="empty">Placeholders shown as [name] here are filled with real values (e.g. a real balance) when actually sent.</p>` : ""}
+          </div>
+        `;
+      } catch (err) {
+        renderError(previewResult, err);
+      }
+    });
+  }
+
+  const sendTestForm = cell.querySelector(".send-test-form");
+  if (sendTestForm) {
+    sendTestForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = new FormData(sendTestForm);
+      const targetTelegramId = Number(data.get("target_telegram_id"));
+      if (!Number.isInteger(targetTelegramId) || targetTelegramId <= 0) {
+        toast("Please enter a real Telegram user id.", true);
+        return;
+      }
+      try {
+        await api(`/telegram/commands/${command.handler_name}/send-test`, {
+          method: "POST",
+          body: { target_telegram_id: targetTelegramId, language: data.get("language") },
+        });
+        toast("Test message enqueued for delivery.");
+      } catch (err) {
+        toast(err.detail || err.message, true);
+      }
+    });
   }
 }

@@ -32,7 +32,7 @@ from packages.core.logging import configure_logging
 from packages.core.metrics import telegram_updates_deduplicated_total, telegram_updates_received_total
 from packages.core.redis_conn import get_redis
 from packages.core.tracing import configure_tracing
-from services.bot import bot_content_sync, campaign_worker, dedup, notification_relay, perf
+from services.bot import bot_content_sync, campaign_worker, command_registry, dedup, notification_relay, perf
 from services.bot.handlers import router
 from services.bot.notifier import Notifier
 
@@ -65,10 +65,16 @@ async def _dedup_middleware(
 def build_dispatcher(pool: asyncpg.Pool, redis: Redis, notifier: Notifier, settings: Settings) -> Dispatcher:
     dp = Dispatcher()
     dp.update.outer_middleware(_dedup_middleware)
-    # An inner middleware (not outer_middleware) -- runs only once routing
-    # has matched one specific handler, so it can label every metric by
-    # that handler's own real function name (see perf.py's own docstring
-    # for exactly how it recovers that name from aiogram's internals).
+    # Inner middlewares (not outer_middleware) -- run only once routing
+    # has matched one specific handler, so each can identify that
+    # handler's own real function name (see perf.py's own docstring for
+    # exactly how it recovers that name from aiogram's internals).
+    # Registration order is execution order (confirmed directly against
+    # this project's installed aiogram version's own MiddlewareManager):
+    # the command registry's enable/disable gate must run *before* perf
+    # tracking starts, so a command an admin disabled never pollutes that
+    # command's own latency/success/error stats.
+    dp.message.middleware(command_registry.command_gate_middleware)
     dp.message.middleware(perf.perf_middleware)
     dp.include_router(router)
     dp["pool"] = pool
@@ -130,9 +136,10 @@ def main() -> None:
     relay_task: asyncio.Task[None] | None = None
     campaign_task: asyncio.Task[None] | None = None
     bot_content_task: asyncio.Task[None] | None = None
+    command_registry_task: asyncio.Task[None] | None = None
 
     async def _on_startup() -> None:
-        nonlocal relay_task, campaign_task, bot_content_task
+        nonlocal relay_task, campaign_task, bot_content_task, command_registry_task
         assert notifier is not None and pool is not None and redis is not None
         if settings.public_base_url:
             await bot.set_webhook(
@@ -154,6 +161,13 @@ def main() -> None:
         # current every POLL_INTERVAL_SECONDS after that.
         await bot_content_sync.refresh_once(pool)
         bot_content_task = asyncio.create_task(bot_content_sync.run_forever(pool))
+        # Same reasoning as bot_content_sync directly above -- the very
+        # first update this process handles must already reflect any
+        # admin-disabled command, not a startup window where every
+        # command is silently treated as enabled just because the cache
+        # hasn't loaded yet.
+        await command_registry.refresh_once(pool)
+        command_registry_task = asyncio.create_task(command_registry.run_forever(pool))
 
     async def _on_shutdown() -> None:
         if relay_task is not None:
@@ -162,6 +176,8 @@ def main() -> None:
             campaign_task.cancel()
         if bot_content_task is not None:
             bot_content_task.cancel()
+        if command_registry_task is not None:
+            command_registry_task.cancel()
         assert notifier is not None and pool is not None and redis is not None
         await notifier.stop()
         if pool is not None:

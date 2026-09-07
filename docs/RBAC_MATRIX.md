@@ -1,13 +1,17 @@
 # RBAC Matrix
 
 The complete, real permission set from `services/admin/rbac.py` — not a
-sample. 26 permissions, 4 roles (`support`, `finance`, `ops`,
-`superadmin`), additive only (no role loses what a "lower" role has; no
-hidden god-mode bypass exists separate from this table). Verified this
-pass by direct static analysis of all 79 routes in `services/admin/
-app.py`: exactly 3 have no permission dependency at all — `/auth/login`,
-`/healthz`, `/metrics` — the only 3 that should be public. Every other
-route requires one of the permissions below.
+sample. 34 permissions (re-verified by direct introspection of
+`PERMISSIONS.keys()` during the Telegram Command Center pass — was 26 at
+this doc's original writing; `rooms:emergency_stop`, `bot_content:manage`,
+the 4 `bonuses:*` permissions, and the 3 `telegram:*` permissions below
+were each added by a later pass and are included here now), 4 roles
+(`support`, `finance`, `ops`, `superadmin`), additive only (no role loses
+what a "lower" role has; no hidden god-mode bypass exists separate from
+this table). Originally verified by direct static analysis of all admin
+routes: only `/auth/login`, `/healthz`, `/metrics` have no permission
+dependency at all — the only 3 that should be public. Every other route
+requires one of the permissions below.
 
 **ACTUAL ACCESS** reflects the code as written (`PERMISSIONS` dict, the
 sole source of truth `require()` reads from — no per-route override
@@ -27,6 +31,7 @@ path calls `audit.record()`, and `admin_audit_log` is append-only
 | `rounds:void` | ❌ | ❌ | ✅ | ✅ | Force-void a round | YES |
 | `rooms:view` | ✅ | ✅ | ✅ | ✅ | Room list/detail | N/A (read) |
 | `rooms:manage` | ❌ | ❌ | ✅ | ✅ | Room config (`PATCH /rooms/{id}`) | YES |
+| `rooms:emergency_stop` | ❌ | ❌ | ❌ | ✅ | Immediately halt an active, money-bearing round platform-wide for one room and deactivate it — narrower than `rooms:manage`/`rounds:void` on purpose, since neither alone covers this exact blast radius | YES |
 | `reports:view` | ❌ | ✅ | ❌ | ✅ | Financial reports | N/A (read) |
 | `audit:view` | ❌ | ❌ | ❌ | ✅ | The audit log itself | N/A (read) |
 | `payments:view` | ✅ | ✅ | ✅ | ✅ | Payment list/status | N/A (read) |
@@ -48,6 +53,9 @@ path calls `audit.record()`, and `admin_audit_log` is append-only
 | `bonuses:manage_rules` | ❌ | ❌ | ✅ | ✅ | Bonus rule configuration | YES |
 | `bonuses:grant` | ❌ | ✅ | ❌ | ✅ | Manual ad-hoc bonus grant — same shape as `users:adjust_balance` | YES |
 | `bonuses:view_fraud_signals` | ❌ | ✅ | ✅ | ✅ | Referral fraud-clustering signals | N/A (read) |
+| `telegram:view_health` | ✅ | ✅ | ✅ | ✅ | Live Telegram webhook health (`getWebhookInfo`) — same breadth as `dashboard:view`; a read-only, side-effect-free check every role benefits from | N/A (read) |
+| `telegram:commands_view` | ✅ | ✅ | ✅ | ✅ | Command registry + live per-command metrics | N/A (read) |
+| `telegram:commands_manage` | ❌ | ❌ | ✅ | ✅ | Enable/disable a command, edit its description/category/cooldown/rate limit, preview content, send a test message | YES |
 
 ## Separation-of-duties properties this table actually enforces
 

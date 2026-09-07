@@ -79,6 +79,7 @@
 
   "error.generic": "የሆነ ስህተት ተፈጥሯል። እባክዎ እንደገና ይሞክሩ።",
   "error.not_registered": "እባክዎ በመጀመሪያ ይመዝገቡ። /start ይጫኑ።",
+  "error.command_disabled": "ይህ አገልግሎት ለጊዜው አይገኝም። እባክዎ ቆይተው እንደገና ይሞክሩ።",
 
   "notify.deposit_confirmed": "✅ {amount} ብር ገቢ ተደርጓል። ቀሪ ሂሳብ፦ {balance} ብር",
   "notify.withdrawal_succeeded": "✅ የ{amount} ብር ወጪዎ ተልኳል።",

@@ -1661,3 +1661,117 @@ async def test_15_concurrent_balance_commands_all_succeed_with_measured_latency(
     assert (
         metrics.telegram_commands_total.labels(handler="cmd_balance")._value.get() >= concurrency
     )
+
+
+async def test_disabling_a_command_makes_a_real_dispatcher_call_degrade_gracefully(pool, bot_ctx):
+    """Telegram Command Center: an admin-disabled command must return a
+    controlled, translated reply through the real dispatcher -- never a
+    crash, never silence, and never the real handler's own effect (a
+    disabled /balance must not leak a real balance). Uses this file's own
+    bot_ctx/bot_setup rather than building a second dispatcher elsewhere:
+    aiogram permanently attaches services/bot/handlers.py's module-level
+    `router` singleton to whichever Dispatcher calls build_dispatcher()
+    first and refuses a second attachment for the rest of the process --
+    confirmed the hard way when an earlier draft of this test lived in
+    its own file and imported bot_ctx across modules, which made pytest
+    instantiate the session-scoped bot_setup fixture a second time.
+    """
+    from packages.core import metrics
+    from services.admin import command_registry_queries
+    from services.bot import command_registry
+    from tests.integration.test_admin_auth import create_test_admin
+
+    dp, bot, session = bot_ctx
+    admin_id, *_ = await create_test_admin(pool, role="superadmin")
+
+    await command_registry_queries.update_command_admin(
+        pool, admin_id=admin_id, handler_name="cmd_balance", changes={"enabled": False},
+        reason="test", ip_address=None,
+    )
+    try:
+        await command_registry.refresh_once(pool)
+
+        telegram_id = next_telegram_id()
+        await dp.feed_update(
+            bot, make_contact_update(telegram_id, contact_user_id=telegram_id, phone=unique_phone())
+        )
+        await _settle()
+        session.sent.clear()
+
+        blocked_before = metrics.telegram_command_blocked_total.labels(handler="cmd_balance")._value.get()
+        await dp.feed_update(bot, make_text_update(telegram_id, "/balance"))
+        await _settle()
+
+        assert len(session.sent) == 1
+        assert "temporarily unavailable" in session.sent[0].text or "ለጊዜው" in session.sent[0].text
+        assert (
+            metrics.telegram_command_blocked_total.labels(handler="cmd_balance")._value.get()
+            == blocked_before + 1
+        )
+    finally:
+        # This table is real, shared, persistent config -- restore it for
+        # every other test/process sharing this database, the same
+        # discipline as clean_payout_stream/clean_notifications_stream in
+        # conftest.py.
+        await command_registry_queries.update_command_admin(
+            pool, admin_id=admin_id, handler_name="cmd_balance", changes={"enabled": True},
+            reason="test cleanup", ip_address=None,
+        )
+        command_registry.set_cache({})
+
+
+async def test_disabling_a_command_also_blocks_it_via_the_menu_button_path(pool, bot_ctx):
+    """command_gate_middleware (services/bot/app.py) only wraps aiogram's
+    own routed dispatch -- on_menu_text's own dispatch to e.g. cmd_balance
+    is a plain, direct Python function call, invisible to that
+    middleware. A real architecture-review finding while wiring the
+    registry: without handlers.py::on_menu_text's own explicit
+    command_registry.is_enabled() check, disabling /balance would still
+    leave it fully working for anyone who presses the "Balance" reply-
+    keyboard button instead of typing the slash command -- this is the
+    regression test for that gap, exercised via the real localized button
+    text on_menu_text actually matches against, not the slash command.
+    """
+    from packages.core import metrics
+    from services.admin import command_registry_queries
+    from services.bot import command_registry
+    from services.bot.i18n import t
+    from tests.integration.test_admin_auth import create_test_admin
+
+    dp, bot, session = bot_ctx
+    admin_id, *_ = await create_test_admin(pool, role="superadmin")
+
+    await command_registry_queries.update_command_admin(
+        pool, admin_id=admin_id, handler_name="cmd_balance", changes={"enabled": False},
+        reason="test", ip_address=None,
+    )
+    try:
+        await command_registry.refresh_once(pool)
+
+        telegram_id = next_telegram_id()
+        await dp.feed_update(
+            bot, make_contact_update(telegram_id, contact_user_id=telegram_id, phone=unique_phone())
+        )
+        await _settle()
+        session.sent.clear()
+
+        blocked_before = metrics.telegram_command_blocked_total.labels(handler="cmd_balance")._value.get()
+        # "am" is the language make_contact_update's fresh registration
+        # resolves to by default (no language_code on the fake sender) --
+        # the real localized menu button label, not the slash command.
+        button_text = t("menu.balance", "am")
+        await dp.feed_update(bot, make_text_update(telegram_id, button_text))
+        await _settle()
+
+        assert len(session.sent) == 1
+        assert "ለጊዜው" in session.sent[0].text or "temporarily unavailable" in session.sent[0].text
+        assert (
+            metrics.telegram_command_blocked_total.labels(handler="cmd_balance")._value.get()
+            == blocked_before + 1
+        )
+    finally:
+        await command_registry_queries.update_command_admin(
+            pool, admin_id=admin_id, handler_name="cmd_balance", changes={"enabled": True},
+            reason="test cleanup", ip_address=None,
+        )
+        command_registry.set_cache({})

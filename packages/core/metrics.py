@@ -190,6 +190,20 @@ telegram_command_error_total = Counter(
     "telegram_command_error_total", "Bot handler invocations that raised", ["handler"]
 )
 
+# Telegram Command Center (Phase 2): a player still attempting a command
+# an admin has disabled via the bot_commands registry -- counted
+# separately from telegram_commands_total/_success_total/_error_total
+# (services/bot/command_registry.py's own gate middleware short-circuits
+# before perf_middleware even starts timing), so an admin disabling a
+# command doesn't silently pollute that command's own latency/error
+# stats, while still giving real visibility into "how many people hit
+# this while it was off".
+telegram_command_blocked_total = Counter(
+    "telegram_command_blocked_total",
+    "Command invocations rejected because an admin disabled that command",
+    ["handler"],
+)
+
 _LATENCY_BUCKETS = (0.01, 0.025, 0.05, 0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 3.0, 5.0, 8.0)
 
 telegram_command_latency_seconds = Histogram(

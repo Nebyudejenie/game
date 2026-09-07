@@ -266,6 +266,21 @@
           "refId": "D"
         }
       ]
+    },
+    {
+      "id": 16,
+      "title": "Commands blocked (admin-disabled), by handler",
+      "description": "Telegram Command Center: a player still attempting a command an admin has disabled via the bot_commands registry. Sustained non-zero traffic here after a deliberate disable is expected; a spike with no known admin action is worth investigating.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 54 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(telegram_command_blocked_total[5m])) by (handler)",
+          "legendFormat": "{{handler}}",
+          "refId": "A"
+        }
+      ]
     }
   ]
 }

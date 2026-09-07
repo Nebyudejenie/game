@@ -112,6 +112,20 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     # side-effect-free GET against Telegram's own API, not a control lever
     # that needs narrowing the way an actual configuration change would.
     "telegram:view_health": frozenset({"support", "finance", "ops", "superadmin"}),
+    # Telegram Command Center (Phase 2): viewing the command registry
+    # (which handlers exist, whether each is enabled, its own real
+    # latency/error/usage figures) is the same kind of broad operational
+    # visibility as telegram:view_health -- support needs to see "is
+    # /deposit currently disabled" just as much as ops does when
+    # triaging a ticket.
+    "telegram:commands_view": frozenset({"support", "finance", "ops", "superadmin"}),
+    # Enabling/disabling a command, or changing its cooldown/rate limit/
+    # sort order, is an operational control lever that can take a real
+    # feature away from every player at once -- same roles and reasoning
+    # as notifications:templates_manage/bot_content:manage (an
+    # operational, non-financial content/behavior change), narrower than
+    # telegram:commands_view's own read-only breadth.
+    "telegram:commands_manage": frozenset({"ops", "superadmin"}),
 }
 
 

@@ -139,8 +139,24 @@ async def test_retention_cohorts_counts_a_user_active_in_their_signup_week(pool,
     # date_trunc('week', ...) starts on Monday, not necessarily "today" --
     # find the one cohort that actually contains p1, rather than assuming
     # which calendar date that lands on.
+    #
+    # This shared, long-lived dev database was found (during an unrelated
+    # verification pass) to hold real historical users/rounds from
+    # earlier in this same session's own testing -- specifically an
+    # already-fully-elapsed prior week's cohort that *also* shows week-0
+    # activity (naturally: those users were active during their own,
+    # now-past, signup week too). matching[0] used to just take
+    # cohorts[0], which sorts oldest-cohort-first and silently picked
+    # that old, already-elapsed cohort instead of p1's own brand-new one
+    # -- a real, reproducible (not flaky) failure once enough historical
+    # data had accumulated, caught by this same launch-readiness pass's
+    # own required full-suite regression run. The row this test actually
+    # means to check is the *newest* matching cohort -- p1 and p2 were
+    # both just created moments ago, so their cohort_week cannot be
+    # anything but the most recent one.
     matching = [c for c in cohorts if c["weeks"][0]["active_users"] >= 1]
     assert matching, f"no cohort showed any week-0 activity: {cohorts}"
+    matching = [max(matching, key=lambda c: c["cohort_week"])]
     # This user's own signup week is still in progress (it only just
     # started) -- week 0 is real, honest activity-so-far, but not yet a
     # completed rate: more of this cohort could still become active

@@ -79,6 +79,7 @@
 
   "error.generic": "Something went wrong. Please try again.",
   "error.not_registered": "Please register first. Tap /start.",
+  "error.command_disabled": "This feature is temporarily unavailable. Please try again later.",
 
   "notify.deposit_confirmed": "✅ {amount} ETB deposited. Balance: {balance} ETB",
   "notify.withdrawal_succeeded": "✅ Your {amount} ETB withdrawal has been sent.",

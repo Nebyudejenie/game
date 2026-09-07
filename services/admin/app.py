@@ -29,6 +29,7 @@ from services.admin import (
     auth,
     bonus_queries,
     bot_content_queries,
+    command_registry_queries,
     notification_queries,
     queries,
     telegram_diagnostics,
@@ -1372,6 +1373,87 @@ async def telegram_webhook_health(
         "warning_threshold": telegram_diagnostics.PENDING_UPDATES_WARNING_THRESHOLD,
         "critical_threshold": telegram_diagnostics.PENDING_UPDATES_CRITICAL_THRESHOLD,
     }
+
+
+@app.get("/telegram/commands")
+async def list_telegram_commands(
+    admin: Annotated[AdminSession, Depends(require("telegram:commands_view"))],
+) -> list[dict[str, Any]]:
+    settings = get_settings()
+    return await command_registry_queries.list_commands_admin(
+        app.state.pool, bot_metrics_url=settings.bot_metrics_url
+    )
+
+
+class UpdateCommandRequest(BaseModel):
+    changes: dict[str, Any]
+    reason: str | None = None
+
+
+@app.patch("/telegram/commands/{handler_name}")
+async def update_telegram_command(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("telegram:commands_manage"))],
+    handler_name: str,
+    body: UpdateCommandRequest,
+) -> dict[str, Any]:
+    try:
+        return await command_registry_queries.update_command_admin(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            handler_name=handler_name,
+            changes=body.changes,
+            reason=body.reason,
+            ip_address=_client_ip(request),
+        )
+    except command_registry_queries.UnknownBotCommand as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (
+        command_registry_queries.CommandNotAdminManaged,
+        command_registry_queries.InvalidCommandField,
+    ) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/telegram/commands/{handler_name}/preview")
+async def preview_telegram_command(
+    admin: Annotated[AdminSession, Depends(require("telegram:commands_view"))],
+    handler_name: str,
+    language: str = "am",
+) -> dict[str, Any]:
+    try:
+        return await command_registry_queries.preview_command_content_admin(
+            app.state.pool, handler_name=handler_name, language=language
+        )
+    except (command_registry_queries.UnknownBotCommand, command_registry_queries.MissingContentKey) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class SendTestCommandRequest(BaseModel):
+    target_telegram_id: int
+    language: str = "am"
+
+
+@app.post("/telegram/commands/{handler_name}/send-test")
+async def send_test_telegram_command(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("telegram:commands_manage"))],
+    handler_name: str,
+    body: SendTestCommandRequest,
+) -> dict[str, str]:
+    try:
+        sent_text = await command_registry_queries.send_test_command_admin(
+            app.state.pool,
+            app.state.redis,
+            admin_id=admin.admin_id,
+            handler_name=handler_name,
+            target_telegram_id=body.target_telegram_id,
+            language=body.language,
+            ip_address=_client_ip(request),
+        )
+    except (command_registry_queries.UnknownBotCommand, command_registry_queries.MissingContentKey) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"sent_text": sent_text}
 
 
 # --- audit log ---------------------------------------------------------

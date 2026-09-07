@@ -109,6 +109,18 @@ class Settings(BaseSettings):
     # are all still safe to make (OpenTelemetry's own no-op default
     # tracer), just discarded rather than exported anywhere.
     otel_exporter_endpoint: str = ""
+    # Telegram Command Center (Phase 2): the admin process is a separate
+    # service from the bot (services/bot/app.py), so real per-command
+    # P50/P95/P99 shown in the admin Commands screen requires fetching
+    # the bot's own /metrics endpoint over HTTP rather than sharing an
+    # in-process Prometheus registry -- see services/admin/
+    # bot_metrics_client.py. Empty means the admin Commands screen shows
+    # "NO DATA" for every metric column rather than guessing a URL that
+    # might not resolve in this environment (the same "explain what's
+    # actually true" discipline as payments/availability.py's own
+    # empty-config gates). services/bot/app.py's own DEFAULT_PORT is
+    # 8003, so a real deployment sets this to e.g. http://bot:8003/metrics.
+    bot_metrics_url: str = ""
 
     # Telebirr SMS-evidence deposits -- bearer token the MacroDroid device
     # (services/payments/app.py's POST /internal/telebirr/ingest) must
