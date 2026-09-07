@@ -11211,3 +11211,156 @@ nothing yet refuses to dispatch a job a node's version can't handle);
 feature flags; policy/template/audience versioning and snapshotting;
 tenant self-service provisioning and white-labeling; a dedicated
 security-hardening pass; and commercial/billing-plan readiness.
+
+---
+
+## 2026-09-07 — SMS Control Plane production-gate audit on `d995dc3`: two real concurrency bugs, found and fixed by direct testing, not assumed safe
+
+A follow-up directive asked for a rigorous production-readiness audit of
+the Phase 1+2 baseline (`d995dc3`) rather than new features — explicitly:
+prove correctness, don't assume it; a check-then-act capacity guard is
+not "tested" until a genuine concurrent-request test has actually tried
+to break it. That instruction was taken literally, and it paid off
+immediately.
+
+**The headline finding**: every prior test of `claim_next_message()` in
+this codebase — Phase 1's and Phase 2's own — called it *sequentially*
+on a single connection, including the tests that verified priority
+ordering, fairness, and capacity. None of that can ever reveal a race,
+because a race requires two genuinely concurrent transactions on separate
+connections. The very first real concurrency test written for this audit
+(`asyncio.gather` of two `claim_next_message()` calls, each on its own
+pooled connection) reproduced **the same row claimed twice** —
+`attempt_count` incremented to 2 on one message while a second, equally
+eligible message sat untouched — 100% of the time, across every variant
+tried.
+
+**Root cause, isolated empirically, not theorized**: `SELECT ... FOR
+UPDATE SKIP LOCKED` does not provide real mutual exclusion in PostgreSQL
+15.19 when the locked row's identity is resolved through a CTE reference
+— confirmed by testing the *simplest possible* reduction (a bare
+`WITH ranked AS (SELECT ... LEFT JOIN ...) UPDATE ... WHERE id = (SELECT
+FROM ranked ... FOR UPDATE SKIP LOCKED)`, no window function at all) and
+getting a duplicate claim on 8/8 trials. The exact same logic written as
+a direct subquery against the base table (no CTE — this codebase's
+original, pre-fairness claim query, and the same shape already used
+elsewhere in this repo for round/room claiming) was clean on every trial
+across multiple 8-20-trial runs. This means Phase 2's own fairness
+rewrite (the `WITH ranked AS (... ROW_NUMBER() ...) UPDATE ...` shape
+documented in this file's own prior entry as "verified directly against
+Postgres") was *not actually safe under concurrency* — the earlier
+verification only ever exercised it sequentially, which the CTE-locking
+gotcha is invisible to.
+
+**Fix — split the read from the lock, never combine a CTE with the
+locking clause**: `claim_next_message()` now runs two statements inside
+its one transaction: (1) a plain **read-only** query (no `FOR UPDATE` at
+all) computing the fairness/eligibility ranking via the CTE + window
+function exactly as before, returning a shortlist of up to 20 candidate
+IDs; (2) a plain, single-table `UPDATE sms_messages ... WHERE id = (SELECT
+id FROM sms_messages WHERE id = ANY($ids) AND status = 'queued' ORDER BY
+array_position($ids, id) FOR UPDATE SKIP LOCKED LIMIT 1)` — the exact
+proven-safe shape, now doing the actual claim. A candidate that a
+concurrent request claims in the gap between the two steps is simply
+absent (`status <> 'queued'`) by the time step 2 looks for it, correctly
+skipped. Re-verified with 20-trial concurrency tests: 0 duplicates, 0
+under-claims, both now permanent regression tests
+(`test_concurrent_claims_never_double_claim_the_same_message`).
+
+**Re-introduced, then re-fixed, the exact bug from the earlier Phase 2
+entry**: splitting the query into two steps, the first draft of the new
+read-only ranking query put `AND m2.status = 'queued'` back inside the
+CTE's own `WHERE` clause — silently reintroducing the *original*
+"campaign_seq renumbers to 1 every time a campaign's front message is
+claimed" fairness bug this same file already documented and fixed once.
+Caught immediately by the very fairness regression test written to catch
+it the first time (`claimed_campaign_ids[:2]` came back `[A, A]` again,
+not `[A, B]`). Fixed the same way as before: filter to `queued` in the
+*outer* `SELECT`, rank over the CTE's full (unfiltered-by-status) result.
+**Lesson worth keeping explicitly**: a query-shape bug that was already
+found and fixed once can resurface silently during an unrelated
+refactor if the fix's *reason* isn't re-checked, not just its current
+symptom — the regression test catching it a second time immediately is
+exactly why "prove it with a test, not a one-off manual check" matters
+even for a fix already believed done.
+
+**A second, independent concurrency bug in the same function**: the
+capacity gate (`current_assigned_count(node) >= max_concurrent_jobs`) is
+a textbook check-then-act race — two concurrent requests for the *same*
+node can both observe capacity as available before either has claimed
+anything. Reproduced directly: two concurrent claims against a
+`max_concurrent_jobs = 1` node both succeeded. Fixed with the smallest
+architecture-compatible change: `SELECT 1 FROM sms_delivery_nodes WHERE
+id = $1 FOR UPDATE` at the very start of `claim_next_message()`, before
+the capacity check — this is a plain base-table lock (not a CTE, so the
+bug above doesn't apply), and it only serializes claim attempts *for
+that one node*; other nodes claiming concurrently are unaffected, since
+each has its own row. Re-verified with 20 concurrent-trial pairs: 0
+capacity violations. Also verified: a genuine duplicate `report_result`
+callback (a node retrying after never receiving its own successful
+response) is safely rejected (`NotOwnedByNode`, since a `delivered`
+result already cleared `assigned_node_id`), never double-processed —
+this was already true by construction, confirmed rather than assumed.
+
+**Database audit, real `EXPLAIN (ANALYZE, BUFFERS)`, not assumed
+efficient**: at the current real (~1,150-row) table size, the fairness
+ranking query's sequential scan is the *planner's correct choice* (in-
+memory sort of the ~50 tenant-matching rows beats an index scan across
+everything) — a real, honest, deferred scaling note, not fixed now,
+since adding an index nothing yet demonstrates a need for would violate
+this same directive's own "do not add indexes blindly" instruction. The
+per-node in-flight capacity count, by contrast, **is** a demonstrated hot
+path (called on every single claim attempt) doing a full sequential scan
+with zero index support — a real, justified finding, fixed with a new
+partial index (`ix_sms_messages_node_in_flight (assigned_node_id) WHERE
+status IN ('assigned','sending')`, migration `b306793309da`), confirmed
+via a second `EXPLAIN` to flip the plan from a ~41-cost seq scan to an
+~8-cost index-only scan.
+
+**Security / authorization audit**: every route in `services/sms/app.py`
+was enumerated programmatically (not eyeballed) and confirmed to carry a
+real server-side authorization dependency (`Depends(require(...))` for
+admin routes, `CurrentNode` for the node protocol) with exactly two
+correct exceptions — `/auth/login` (the login endpoint itself) and
+`/metrics` (unauthenticated Prometheus scraping, matching the existing
+`services/admin/app.py`/`services/payments/app.py` convention; carries
+only aggregate counters, no PII or message content).
+
+**Tenant isolation**: verified at the level that actually matches this
+system's real shape — every domain query is `tenant_id`-scoped by
+construction, and `test_cross_tenant_isolation_a_node_cannot_claim_
+another_tenants_message` proves a node genuinely cannot claim another
+tenant's queued message even when both exist in the same claim query's
+search space. A full HTTP-level "two concurrent tenants, two admin
+sessions" test was not written, honestly, because the deployed system
+doesn't have a second tenant to test against yet (one seeded tenant,
+`app.state.tenant_id` fixed at startup) — that test becomes meaningful
+once tenant self-service provisioning (already an explicitly deferred
+Phase 1 item) exists.
+
+**Deployment review**: the `sms` compose service (`docker-compose.prod.yml`)
+correctly reuses `*app-env`/`*app-depends-on` (waits on the same
+`migrate` one-shot job as every other service, so it can never start
+against a schema it doesn't match) and needs zero SMS-specific secrets
+(node credentials are generated and hashed at runtime, not
+environment-configured). One pre-existing, platform-wide gap noted
+honestly rather than fixed here (out of this audit's scope, since it
+predates and is not specific to the SMS work): no application-level
+Docker healthcheck exists for *any* service in this compose file
+(gateway/admin/payments/bot/engine-worker/payout-worker included) — only
+Postgres and Redis have one.
+
+**Verification**: mypy `--strict` clean (126 files, +1 for the new
+index migration). 5 new tests (2 concurrency, 1 duplicate-callback
+idempotency, plus fixes to 2 pre-existing tests that the query rewrite
+broke) — 58 SMS tests total, all passing. Full existing suite and E2E
+re-run standalone per this project's own standing discipline before
+declaring anything done.
+
+**Release verdict**: see the audit's own final report (delivered
+directly to the user in this pass, per the directive's required format)
+for the full classified findings list and RELEASE CANDIDATE decision —
+summarized here for the durable record: the two concurrency bugs were
+the only P0/P1-class findings, both fixed and proven with regression
+tests before this entry was written; nothing else discovered rose above
+P2 (deferred, honest, non-blocking).

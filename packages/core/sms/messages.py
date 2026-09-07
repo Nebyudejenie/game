@@ -84,6 +84,16 @@ _MESSAGE_COLUMNS = (
 )
 
 
+# How many fairness-ranked candidates to shortlist before attempting the
+# actual claim (see claim_next_message's own docstring for why this is a
+# separate, unlocked read followed by a plain single-table claim rather
+# than one CTE-driven FOR UPDATE statement). A candidate that gets claimed
+# by a concurrent request between the two steps is simply skipped by the
+# claim step's own SKIP LOCKED/status check -- a larger shortlist only
+# matters under heavy concurrent contention on the same tenant's queue.
+CLAIM_CANDIDATE_SHORTLIST_SIZE = 20
+
+
 async def claim_next_message(conn: AsyncpgConnection, *, tenant_id: int, node: DeliveryNode) -> Message | None:
     """Atomically claims a message for this tenant that this specific node
     is eligible for, applying two real claim-time decisions (Phase 2 --
@@ -103,12 +113,38 @@ async def claim_next_message(conn: AsyncpgConnection, *, tenant_id: int, node: D
     Also enforces this node's own advertised `max_concurrent_jobs` --
     computed live from real in-flight message rows, not a self-reported
     count a node could lie about.
+
+    **Two real concurrency bugs were found here by direct testing under
+    genuine concurrent load (two real connections, `asyncio.gather`, not
+    sequential calls on one connection) and are the reason this function
+    is shaped the way it is -- see DECISIONS.md's Phase 2 production-gate
+    audit entry for the full empirical proof:**
+
+    1. `SELECT ... FOR UPDATE SKIP LOCKED` does **not** provide real mutual
+       exclusion in PostgreSQL 15 when the locked row's identity comes
+       from a CTE reference (reproduced 100% of the time, with or without
+       a window function or join present in the CTE) -- two concurrent
+       claimers could both "win" and update the identical row. The fix:
+       compute the fairness/eligibility ranking as a plain read-only query
+       (no lock at all), then claim from that candidate shortlist with a
+       plain, single-table `UPDATE ... WHERE id = (SELECT ... FOR UPDATE
+       SKIP LOCKED)` -- the exact shape already proven safe by this same
+       codebase's original (pre-fairness) claim query.
+    2. The capacity check (`current_assigned_count` vs.
+       `max_concurrent_jobs`) is a classic check-then-act race: two
+       concurrent requests for the *same* node can both observe capacity
+       as available before either has claimed anything, and collectively
+       exceed it. The fix: lock the node's own row first
+       (`SELECT ... FOR UPDATE`), which serializes concurrent claim
+       attempts *for that one node* (other nodes are unaffected -- each
+       has its own row) without needing a lock on the whole queue.
     """
+    await conn.fetchval("SELECT 1 FROM sms_delivery_nodes WHERE id = $1 FOR UPDATE", node.id)
     in_flight = await current_assigned_count(conn, node_id=node.id)
     if in_flight >= node.max_concurrent_jobs:
         return None
 
-    row = await conn.fetchrow(
+    candidates = await conn.fetch(
         f"""
         WITH ranked AS (
             SELECT m2.id, m2.priority, m2.campaign_id, m2.status,
@@ -117,24 +153,37 @@ async def claim_next_message(conn: AsyncpgConnection, *, tenant_id: int, node: D
             LEFT JOIN sms_campaigns c ON c.id = m2.campaign_id
             WHERE m2.tenant_id = $1
               AND (c.id IS NULL OR c.status <> 'paused')
-              AND (c.id IS NULL OR c.required_fleet_group IS NULL OR c.required_fleet_group = $3)
+              AND (c.id IS NULL OR c.required_fleet_group IS NULL OR c.required_fleet_group = $2)
         )
+        SELECT id FROM ranked
+        WHERE status = 'queued'
+        ORDER BY {_priority_rank_sql('priority')}, campaign_seq, id
+        LIMIT {CLAIM_CANDIDATE_SHORTLIST_SIZE}
+        """,
+        tenant_id,
+        node.fleet_group,
+    )
+    candidate_ids = [r["id"] for r in candidates]
+    if not candidate_ids:
+        return None
+
+    row = await conn.fetchrow(
+        f"""
         UPDATE sms_messages m
-        SET status = 'assigned', assigned_node_id = $2, assigned_at = now(),
+        SET status = 'assigned', assigned_node_id = $1, assigned_at = now(),
             attempt_count = attempt_count + 1, updated_at = now()
         WHERE m.id = (
-            SELECT ranked.id FROM ranked
-            WHERE ranked.status = 'queued'
-            ORDER BY {_priority_rank_sql('ranked.priority')}, ranked.campaign_seq, ranked.id
-            LIMIT 1
+            SELECT id FROM sms_messages
+            WHERE id = ANY($2::bigint[]) AND status = 'queued'
+            ORDER BY array_position($2::bigint[], id)
             FOR UPDATE SKIP LOCKED
+            LIMIT 1
         )
         RETURNING {_MESSAGE_COLUMNS},
             (SELECT c.required_fleet_group FROM sms_campaigns c WHERE c.id = m.campaign_id) AS required_fleet_group
         """,
-        tenant_id,
         node.id,
-        node.fleet_group,
+        candidate_ids,
     )
     if row is None:
         return None

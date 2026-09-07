@@ -3,6 +3,7 @@ mocks anywhere in this file. See DECISIONS.md (2026-09-07) for the
 Enterprise SMS Control Plane's scoping.
 """
 
+import asyncio
 import itertools
 import random
 from datetime import timedelta, timezone, datetime
@@ -684,3 +685,134 @@ async def test_sms_admin_mutation_writes_a_real_audit_log_row(conn, tenant_id, p
     assert row is not None
     assert row["action"] == "sms.campaigns.create"
     assert row["admin_id"] == admin_id
+
+
+# --- Production-gate audit (2026-09-07): two real concurrency bugs -----
+#
+# Both were found by direct testing under genuine concurrent load (two
+# real connections via asyncio.gather, never sequential calls sharing one
+# connection -- every other test in this file, and Phase 1's own tests,
+# only ever exercised claim_next_message() sequentially on one connection,
+# which cannot reveal either of these). See messages.py's own
+# claim_next_message() docstring and DECISIONS.md's Phase 2 production-
+# gate entry for the full empirical proof and the fix each test below
+# guards against regressing.
+
+
+async def test_concurrent_claims_never_double_claim_the_same_message(pool, tenant_id):
+    """Reproduces the real bug: a `FOR UPDATE SKIP LOCKED` target selected
+    via a CTE reference does not provide real mutual exclusion in
+    PostgreSQL 15 -- two concurrent claimers could both succeed against
+    the identical row. Uses two genuinely separate connections, not two
+    sequential calls on one connection (which cannot reproduce this).
+    """
+    async with pool.acquire() as conn:
+        node, _ = await nodes.create_node(
+            conn, tenant_id=tenant_id, name=f"concurrent-node-{random.randint(1, 10**9)}",
+            fleet_group="default", created_by_admin_id=None,
+        )
+        await nodes.approve_node(conn, node_id=node.id)
+        # Capacity is deliberately not the thing under test here (that's
+        # test_concurrent_claims_never_exceed_node_capacity below) -- set
+        # high enough that 20 trials x 2 never-freed in-flight messages
+        # can't spuriously trip the capacity gate and mask what this test
+        # actually checks.
+        await nodes.record_heartbeat(conn, node_id=node.id, app_version=None, capabilities={}, max_concurrent_jobs=1000)
+        node = await nodes.get_node(conn, node_id=node.id)
+
+    async def claim_attempt():
+        async with pool.acquire() as c:
+            async with c.transaction():
+                return await messages.claim_next_message(c, tenant_id=tenant_id, node=node)
+
+    for trial in range(20):
+        async with pool.acquire() as conn:
+            for i in range(2):
+                await conn.execute(
+                    "INSERT INTO sms_messages (tenant_id, phone_e164, body, idempotency_key) VALUES ($1, $2, 'x', $3)",
+                    tenant_id, unique_sms_phone(), f"concurrent-{trial}-{i}-{random.randint(1, 10**9)}",
+                )
+        results = await asyncio.gather(claim_attempt(), claim_attempt())
+        claimed_ids = [r.id for r in results if r is not None]
+        assert len(claimed_ids) == len(set(claimed_ids)), (
+            f"trial {trial}: the same message was claimed by two concurrent requests: {claimed_ids}"
+        )
+        assert len(claimed_ids) == 2, f"trial {trial}: expected both concurrent claims to succeed, got {claimed_ids}"
+
+
+async def test_concurrent_claims_never_exceed_node_capacity(pool, tenant_id):
+    """Reproduces the real bug: checking current_assigned_count() and then
+    claiming is a classic check-then-act race -- two concurrent requests
+    for the *same* node can both observe capacity as available before
+    either has claimed anything. Proves the node-row-lock fix holds
+    max_concurrent_jobs=1 to exactly one concurrent in-flight message
+    even when two claims race.
+    """
+    async with pool.acquire() as conn:
+        node, _ = await nodes.create_node(
+            conn, tenant_id=tenant_id, name=f"capacity-race-node-{random.randint(1, 10**9)}",
+            fleet_group="default", created_by_admin_id=None,
+        )
+        await nodes.approve_node(conn, node_id=node.id)
+        await nodes.record_heartbeat(conn, node_id=node.id, app_version=None, capabilities={}, max_concurrent_jobs=1)
+        node = await nodes.get_node(conn, node_id=node.id)
+
+    async def claim_attempt():
+        async with pool.acquire() as c:
+            async with c.transaction():
+                return await messages.claim_next_message(c, tenant_id=tenant_id, node=node)
+
+    for trial in range(20):
+        async with pool.acquire() as conn:
+            for i in range(2):
+                await conn.execute(
+                    "INSERT INTO sms_messages (tenant_id, phone_e164, body, idempotency_key) VALUES ($1, $2, 'x', $3)",
+                    tenant_id, unique_sms_phone(), f"cap-race-{trial}-{i}-{random.randint(1, 10**9)}",
+                )
+        results = await asyncio.gather(claim_attempt(), claim_attempt())
+        claimed = [r for r in results if r is not None]
+        assert len(claimed) <= 1, (
+            f"trial {trial}: max_concurrent_jobs=1 but {len(claimed)} messages claimed concurrently: "
+            f"{[c.id for c in claimed]}"
+        )
+        # Free capacity for the next trial so a real claim was actually possible.
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE sms_messages SET status = 'delivered' WHERE assigned_node_id = $1 AND status = 'assigned'",
+                node.id,
+            )
+
+
+async def test_duplicate_report_result_after_success_is_rejected_not_reprocessed(conn, tenant_id):
+    """Idempotency/duplicate-callback audit: a node that never received its
+    own successful response (e.g. the connection dropped right after the
+    server committed) and retries the identical report_result call must
+    not have that retry silently reprocessed -- delivered clears
+    assigned_node_id, so a second call for the same node finds it no
+    longer owns the message and is rejected, not double-counted.
+    """
+    node, _ = await nodes.create_node(conn, tenant_id=tenant_id, name=f"dup-node-{random.randint(1, 10**9)}", fleet_group="default", created_by_admin_id=None)
+    await nodes.approve_node(conn, node_id=node.id)
+    key = f"dup-callback-{random.randint(1, 10**9)}"
+    await conn.execute(
+        "INSERT INTO sms_messages (tenant_id, phone_e164, body, idempotency_key) VALUES ($1, $2, 'x', $3)",
+        tenant_id, unique_sms_phone(), key,
+    )
+    claimed = await messages.claim_next_message(conn, tenant_id=tenant_id, node=node)
+    assert claimed is not None
+
+    first = await messages.report_result(
+        conn, message_id=claimed.id, node_id=node.id, outcome="delivered", error_class=None, raw_provider_response=None,
+    )
+    assert first.status == "delivered"
+
+    with pytest.raises(NotOwnedByNode):
+        await messages.report_result(
+            conn, message_id=claimed.id, node_id=node.id, outcome="delivered", error_class=None, raw_provider_response=None,
+        )
+
+    # The message's real terminal state is exactly what the first call set
+    # -- the rejected duplicate changed nothing.
+    row = await conn.fetchrow("SELECT status, assigned_node_id FROM sms_messages WHERE id = $1", claimed.id)
+    assert row["status"] == "delivered"
+    assert row["assigned_node_id"] is None

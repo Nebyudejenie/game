@@ -369,9 +369,28 @@ async def test_campaign_required_fleet_group_restricts_delivery_over_http(sms_se
         assert our_message["status"] == "queued"
         assert our_message["assigned_node_id"] is None
 
-        vip_fetch = await client.post(
-            f"{sms_server}/v1/nodes/fetch-job", headers={"Authorization": f"Bearer {vip_node.json()['token']}"}
-        )
-    job = vip_fetch.json()["job"]
+        # A node's own fleet_group restricts it to *matching or unrestricted*
+        # campaigns, not exclusively to campaigns that require its group --
+        # a real 'vip' node is also eligible for any older, unrelated
+        # required_fleet_group=NULL message already sitting in this shared
+        # 'default' tenant. Drain those first (same discipline as
+        # test_sms_console_e2e.py's own drain step) so the eventual real
+        # fetch is guaranteed to reach this test's own message, not stray
+        # debris -- but stop as soon as *our* message itself comes back,
+        # rather than dead-lettering it along with everything else.
+        vip_headers = {"Authorization": f"Bearer {vip_node.json()['token']}"}
+        job = None
+        for _ in range(50):
+            fetch = await client.post(f"{sms_server}/v1/nodes/fetch-job", headers=vip_headers)
+            candidate = fetch.json()["job"]
+            if candidate is None:
+                break
+            if candidate["message_id"] == our_message["id"]:
+                job = candidate
+                break
+            await client.post(
+                f"{sms_server}/v1/nodes/jobs/{candidate['message_id']}/result",
+                headers=vip_headers, json={"outcome": "failed", "error_class": "permanent"},
+            )
     assert job is not None
     assert job["message_id"] == our_message["id"]

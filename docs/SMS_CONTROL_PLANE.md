@@ -162,6 +162,38 @@ deferred until a second real strategy actually needs to exist.
   the campaign's `required_fleet_group` — a real, queryable answer to
   "why did this node get this job."
 
+## Concurrency safety (production-gate audit, 2026-09-07)
+
+`claim_next_message()` is deliberately shaped around two real bugs a
+genuine concurrency test found — not theoretical, reproduced 100% of the
+time — see DECISIONS.md's audit entry for the full empirical trail:
+
+1. **A CTE-driven `FOR UPDATE SKIP LOCKED` does not provide real mutual
+   exclusion in PostgreSQL 15.** Two concurrent claim attempts could both
+   "win" and update the identical row. Fixed by never combining a CTE
+   with the locking clause: fairness/eligibility ranking is now a plain
+   *read-only* query producing a candidate shortlist; the actual claim is
+   a plain, single-table `UPDATE ... WHERE id = (SELECT ... FOR UPDATE
+   SKIP LOCKED)` — the same shape this codebase already used safely
+   elsewhere for round/room claiming.
+2. **The per-node capacity check is a check-then-act race.** Fixed by
+   locking the node's own row (`SELECT ... FOR UPDATE`) before checking
+   or claiming — this serializes concurrent attempts for *that one node*
+   without affecting other nodes' throughput.
+
+Both are covered by permanent regression tests in `test_sms_core.py`
+(`test_concurrent_claims_never_double_claim_the_same_message`,
+`test_concurrent_claims_never_exceed_node_capacity`) that use genuinely
+separate pooled connections via `asyncio.gather` — a sequential call on
+one connection, which every prior test in this file used, cannot reveal
+either bug.
+
+**Rule this codebase should not relitigate**: never select the target
+row of a `FOR UPDATE SKIP LOCKED` claim through a CTE reference. If a
+future routing decision needs a multi-step computation (ranking,
+eligibility, scoring), compute it as a plain read first, then claim from
+the resulting candidate list with a direct, single-table locking query.
+
 ## Retry and reconciliation
 
 Six named error classes (`temporary`, `permanent`, `network`, `timeout`,
