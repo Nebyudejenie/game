@@ -447,7 +447,7 @@ async def test_manual_deposit_flow_submits_a_real_review_request(gateway_server,
     # regardless of Chapa's own state.
     destination_row = await conn.fetchrow(
         "INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name, instructions) "
-        "VALUES ('telebirr', '0911000000', 'Jo Bingo PLC', 'Reference your player id') RETURNING id"
+        "VALUES ('telebirr', '0911000000', 'Arada Bingo PLC', 'Reference your player id') RETURNING id"
     )
 
     telegram_id = next_telegram_id()
@@ -559,7 +559,7 @@ async def test_wallet_shows_only_manual_when_chapa_deposit_is_disabled(gateway_s
     try:
         destination_row = await conn.fetchrow(
             "INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name) "
-            "VALUES ('telebirr', '0911000000', 'Jo Bingo PLC') RETURNING id"
+            "VALUES ('telebirr', '0911000000', 'Arada Bingo PLC') RETURNING id"
         )
 
         telegram_id = next_telegram_id()
@@ -636,7 +636,7 @@ async def test_full_lifecycle_registration_through_withdrawal_using_the_manual_r
     try:
         destination_row = await conn.fetchrow(
             "INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name) "
-            "VALUES ('telebirr', '0911000000', 'Jo Bingo PLC') RETURNING id"
+            "VALUES ('telebirr', '0911000000', 'Arada Bingo PLC') RETURNING id"
         )
         admin_id, *_ = await create_test_admin(pool)
 

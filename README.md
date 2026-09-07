@@ -1,4 +1,4 @@
-# Jo Bingo
+# Arada Bingo
 
 Real-money multiplayer bingo on Telegram for the Ethiopian market. The full
 product/architecture spec lives in [`idea.md`](idea.md) (see especially the

@@ -84,7 +84,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.pool.close()
 
 
-app = FastAPI(lifespan=lifespan, title="Jo Bingo SMS Control Plane API")
+app = FastAPI(lifespan=lifespan, title="Arada Bingo SMS Control Plane API")
 
 
 async def current_admin(request: Request, authorization: str = Header(default="")) -> AdminSession:

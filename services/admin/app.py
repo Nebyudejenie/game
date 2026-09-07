@@ -55,7 +55,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.pool.close()
 
 
-app = FastAPI(lifespan=lifespan, title="Jo Bingo Admin API")
+app = FastAPI(lifespan=lifespan, title="Arada Bingo Admin API")
 
 
 def _client_ip(request: Request) -> str:

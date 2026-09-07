@@ -144,7 +144,7 @@
   "connection.connect_failed": "Unable to connect to the game server. Tap to retry.",
   "connection.retry": "Try Again",
   "error.not_in_telegram_title": "Open this from Telegram",
-  "error.not_in_telegram_body": "Jo Bingo is a Telegram Mini App. Please open it from the bot's own menu button inside Telegram, not directly in a web browser.",
+  "error.not_in_telegram_body": "Arada Bingo is a Telegram Mini App. Please open it from the bot's own menu button inside Telegram, not directly in a web browser.",
 
   "error.generic": "Something went wrong. Please try again.",
   "error.room_unavailable": "This room isn't available right now.",

@@ -24,7 +24,7 @@ def _settings(**overrides: object) -> Settings:
 
 def _fake_bot(*, username: str = "aradabbot", menu_button: object) -> AsyncMock:
     bot = AsyncMock()
-    bot.get_me.return_value = User(id=8988277728, is_bot=True, first_name="Jo Bingo", username=username)
+    bot.get_me.return_value = User(id=8988277728, is_bot=True, first_name="Arada Bingo", username=username)
     bot.get_chat_menu_button.return_value = menu_button
     return bot
 

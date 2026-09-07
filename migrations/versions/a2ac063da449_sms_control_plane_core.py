@@ -41,7 +41,7 @@ def upgrade() -> None:
           created_at    timestamptz NOT NULL DEFAULT now()
         );
 
-        INSERT INTO sms_tenants (slug, name) VALUES ('default', 'Jo Bingo');
+        INSERT INTO sms_tenants (slug, name) VALUES ('default', 'Arada Bingo');
 
         CREATE TABLE sms_contacts (
           id                bigserial PRIMARY KEY,

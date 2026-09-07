@@ -1312,7 +1312,7 @@ async def test_photo_attaches_to_the_players_most_recent_pending_manual_deposit(
 
     destination_row = await conn.fetchrow(
         "INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name) "
-        "VALUES ('telebirr', '0911000000', 'Jo Bingo PLC') RETURNING id"
+        "VALUES ('telebirr', '0911000000', 'Arada Bingo PLC') RETURNING id"
     )
     intent = await manual.create_manual_deposit_request(
         pool,
