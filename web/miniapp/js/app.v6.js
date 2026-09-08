@@ -1091,16 +1091,48 @@ function applyWalletTheme() {
   }
 }
 
+// The three balance figures the server ever sends (cash/bonus/locked) are
+// always rendered as-is, verbatim strings straight from the backend --
+// never recomputed here. Total/available are a *display-only* sum of
+// those same three authoritative numbers (matching packages/core/ledger
+// .py's own available() -- (cash+bonus)-locked -- exactly), computed
+// fresh every time this runs so they can never drift from what the
+// breakdown row right below them shows. This function is the one place
+// all three call sites (initial open, a Telebirr redemption's own
+// refresh, and the live balance_update push) update the balance UI, so a
+// future field can never be added to just one of them by mistake.
+function renderWalletBalances(data) {
+  el("wallet-cash").textContent = `${data.cash} ETB`;
+  el("wallet-bonus").textContent = `${data.bonus} ETB`;
+  el("wallet-locked").textContent = `${data.locked} ETB`;
+
+  const cash = Number(data.cash) || 0;
+  const bonus = Number(data.bonus) || 0;
+  const locked = Number(data.locked) || 0;
+  const total = cash + bonus + locked;
+  const available = cash + bonus - locked;
+  el("wallet-total").textContent = `${total.toFixed(2)} ETB`;
+  el("wallet-available").textContent = `${available.toFixed(2)} ETB`;
+
+  const pill = el("wallet-status-toggle");
+  const isActive = locked <= 0;
+  el("wallet-available-status").textContent = t(isActive ? "wallet.status_active" : "wallet.status_locked");
+  pill.classList.toggle("status-locked", !isActive);
+}
+
+function toggleWalletBreakdown() {
+  const breakdown = el("wallet-breakdown");
+  const expanded = breakdown.classList.toggle("hidden") === false;
+  el("wallet-status-toggle").setAttribute("aria-expanded", String(expanded));
+}
+
 async function openWallet() {
   showScreen("wallet");
   applyWalletTheme();
   try {
     const response = await fetch("/api/me", { headers: authHeader() });
     if (response.ok) {
-      const data = await response.json();
-      el("wallet-cash").textContent = `${data.cash} ETB`;
-      el("wallet-bonus").textContent = `${data.bonus} ETB`;
-      el("wallet-locked").textContent = `${data.locked} ETB`;
+      renderWalletBalances(await response.json());
     }
   } catch {
     /* wallet screen just shows whatever it already had */
@@ -1199,6 +1231,7 @@ document.querySelectorAll(".wallet-tab").forEach((tabEl) => {
 
 el("open-wallet-btn").addEventListener("click", openWallet);
 el("wallet-back-btn").addEventListener("click", () => showScreen("rooms"));
+el("wallet-status-toggle").addEventListener("click", toggleWalletBreakdown);
 
 // --- deposit ---------------------------------------------------------
 // Spec 2.6: "On return: 'Confirming your deposit…' with live polling,
@@ -1334,10 +1367,7 @@ el("deposit-telebirr-submit-btn").addEventListener("click", async () => {
     el("deposit-telebirr-reference-input").value = "";
     const meResponse = await fetch("/api/me", { headers: authHeader() });
     if (meResponse.ok) {
-      const me = await meResponse.json();
-      el("wallet-cash").textContent = `${me.cash} ETB`;
-      el("wallet-bonus").textContent = `${me.bonus} ETB`;
-      el("wallet-locked").textContent = `${me.locked} ETB`;
+      renderWalletBalances(await meResponse.json());
     }
   } catch {
     setWalletStatus("deposit-telebirr-status", "wallet.error.generic", "error");
@@ -1613,9 +1643,7 @@ ws.on("balance_update", (msg) => {
   const state = getState();
   if (state.user) setState({ user: { ...state.user, balance: msg.cash } });
   if (getState().screen === "wallet") {
-    el("wallet-cash").textContent = `${msg.cash} ETB`;
-    el("wallet-bonus").textContent = `${msg.bonus} ETB`;
-    el("wallet-locked").textContent = `${msg.locked} ETB`;
+    renderWalletBalances(msg);
   }
   if (getState().screen === "lobby") {
     el("lobby-balance-amount").textContent = `${msg.cash} ETB`;

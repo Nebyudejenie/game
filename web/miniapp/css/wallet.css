@@ -70,10 +70,32 @@
 /* --- balance pane: a hero card + secondary figures, replacing the old
    plain label/value rows --- */
 
+/* #wallet-pane-balance is the one place in this file that intentionally
+   does NOT lean on applyWalletTheme()'s Telegram-theme overrides -- a
+   glowing branded hero for the two headline balance figures reads as
+   dead/flat under an arbitrary light themeParams background, so these
+   two hero cards pin their own colors instead. Everything else in this
+   pane (the breakdown row, tabs, deposit/withdraw/history panes) still
+   follows the player's own Telegram theme exactly as before. */
+
 .balance-hero {
   display: flex;
   align-items: center;
   gap: 14px;
+  background: #0F1420;
+  border: 1px solid var(--border);
+}
+
+.balance-hero-total {
+  background:
+    radial-gradient(120% 160% at 0% 0%, color-mix(in srgb, var(--accent) 22%, transparent), transparent 60%),
+    #0F1420;
+}
+
+.balance-hero-available {
+  background:
+    radial-gradient(120% 160% at 0% 0%, color-mix(in srgb, var(--call) 20%, transparent), transparent 60%),
+    #0F1420;
 }
 
 .balance-hero .balance-icon {
@@ -81,35 +103,80 @@
   height: 48px;
   border-radius: 14px;
   background: var(--surface-2); /* fallback for engines without color-mix() */
-  background: color-mix(in srgb, var(--call) 20%, transparent);
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 24px;
   flex-shrink: 0;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.balance-hero .balance-icon.balance-icon-available {
+  background: var(--call);
+  color: #06210f;
+  box-shadow: 0 0 16px color-mix(in srgb, var(--call) 55%, transparent);
 }
 
 .balance-hero .balance-figures {
   min-width: 0;
+  flex: 1;
 }
 
 .balance-hero .balance-label {
   color: var(--muted);
   font-size: var(--fs-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  margin-top: 2px;
 }
 
 .balance-hero .balance-value {
   font-family: var(--font-display);
   font-size: var(--fs-xl);
-  color: var(--call);
+  font-weight: 700;
+  color: var(--text);
   font-variant-numeric: tabular-nums;
+}
+
+.balance-status-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: color-mix(in srgb, var(--call) 16%, transparent);
+  color: var(--call);
+  border: none;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.balance-status-pill .status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 6px currentColor;
+}
+
+.balance-status-pill .status-chevron {
+  font-size: var(--fs-sm);
+  line-height: 1;
+  transition: transform 0.15s ease;
+}
+
+.balance-status-pill[aria-expanded="true"] .status-chevron {
+  transform: rotate(90deg);
+}
+
+.balance-status-pill.status-locked {
+  background: color-mix(in srgb, var(--near) 18%, transparent);
+  color: var(--near);
 }
 
 .balance-secondary {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
   gap: 10px;
   margin-top: 14px;
 }

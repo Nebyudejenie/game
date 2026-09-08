@@ -845,3 +845,46 @@ async def test_telebirr_reference_redemption_flow_credits_the_wallet(gateway_ser
             pool, admin_id=admin_id, provider="telebirr_sms", direction="in", enabled=False,
             reason="test cleanup", ip_address=None,
         )
+
+
+async def test_balance_pane_shows_total_and_available_with_breakdown_toggle(gateway_server, browser, pool, conn):
+    """Total = cash+bonus+locked, Available = (cash+bonus)-locked -- the
+    exact same math packages/core/ledger.py::available() already uses,
+    computed client-side from the same three authoritative numbers the
+    breakdown row shows, never a separate/divergent source. The breakdown
+    itself starts collapsed and the status pill toggles it open.
+    """
+    from packages.core import bonuses
+
+    telegram_id = next_telegram_id()
+    page, console_errors = await prepare_page(browser, telegram_id)
+    http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+    await page.goto(http_base + "/")
+    await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+
+    user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+    assert user_row is not None
+    user_id = user_row["id"]
+    await fund_user(conn, user_id, Decimal("100.00"))
+    await bonuses.grant_bonus(
+        conn, user_id=user_id, idempotency_key=f"test-wallet-hero-bonus-{user_id}",
+        amount=Decimal("25.00"), wagering_required=Decimal("0.00"),
+    )
+
+    await _open_wallet_tab(page, "balance")
+    await page.wait_for_function(
+        "document.getElementById('wallet-total').textContent.includes('125.00')", timeout=10000
+    )
+    assert "125.00" in await page.text_content("#wallet-available")
+    assert (await page.text_content("#wallet-available-status")).strip() != ""
+
+    assert await page.is_hidden("#wallet-breakdown")
+    await page.click("#wallet-status-toggle")
+    await page.wait_for_selector("#wallet-breakdown:not(.hidden)", timeout=5000)
+    assert "100.00" in await page.text_content("#wallet-cash")
+    assert "25.00" in await page.text_content("#wallet-bonus")
+    assert "0.00" in await page.text_content("#wallet-locked")
+
+    assert console_errors == [], f"JS errors on the wallet balance pane: {console_errors}"
+    await page.screenshot(path="/tmp/miniapp-wallet-balance-hero.png")
+    await page.close()

@@ -312,14 +312,36 @@
     </div>
 
     <div id="wallet-pane-balance" class="wallet-pane">
-      <div class="wallet-card balance-hero">
+      <div class="wallet-card balance-hero balance-hero-total">
         <div class="balance-icon">💰</div>
         <div class="balance-figures">
-          <div class="balance-label" data-i18n="wallet.cash"></div>
-          <div class="balance-value" id="wallet-cash">0.00 ETB</div>
+          <div class="balance-value" id="wallet-total">0.00 ETB</div>
+          <div class="balance-label" data-i18n="wallet.total_balance"></div>
         </div>
       </div>
-      <div class="balance-secondary">
+      <div class="wallet-card balance-hero balance-hero-available">
+        <div class="balance-icon balance-icon-available">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" aria-hidden="true">
+            <path d="M3 7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" stroke="currentColor" stroke-width="1.6"/>
+            <path d="M16 12.5h2.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+            <path d="M3 9h18" stroke="currentColor" stroke-width="1.6"/>
+          </svg>
+        </div>
+        <div class="balance-figures">
+          <div class="balance-value" id="wallet-available">0.00 ETB</div>
+          <div class="balance-label" data-i18n="wallet.available_balance"></div>
+        </div>
+        <button type="button" id="wallet-status-toggle" class="balance-status-pill" aria-expanded="false">
+          <span class="status-dot"></span>
+          <span id="wallet-available-status"></span>
+          <span class="status-chevron" aria-hidden="true">&#8250;</span>
+        </button>
+      </div>
+      <div class="balance-secondary hidden" id="wallet-breakdown">
+        <div class="balance-secondary-item">
+          <div class="label" data-i18n="wallet.cash"></div>
+          <div class="value" id="wallet-cash">0.00 ETB</div>
+        </div>
         <div class="balance-secondary-item">
           <div class="label" data-i18n="wallet.bonus"></div>
           <div class="value" id="wallet-bonus">0.00 ETB</div>
