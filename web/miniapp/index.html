@@ -151,7 +151,14 @@
       </div>
       <div class="header-actions">
         <button id="voice-settings-btn" class="icon-fab">🔊</button>
-        <button id="open-wallet-btn" class="deposit-fab">+</button>
+        <button id="open-wallet-btn" class="wallet-fab">
+          <svg class="wallet-fab-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
+            <path d="M3 7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" stroke="currentColor" stroke-width="1.6"/>
+            <path d="M16 12.5h2.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+            <path d="M3 9h18" stroke="currentColor" stroke-width="1.6"/>
+          </svg>
+          <span class="wallet-fab-label" data-i18n="wallet.title"></span>
+        </button>
       </div>
     </div>
     <div id="voice-settings-panel" class="voice-settings-panel hidden">

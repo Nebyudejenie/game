@@ -38,13 +38,30 @@
   font-family: var(--font-display);
 }
 
-.deposit-fab {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background: var(--accent);
-  font-size: var(--fs-lg);
+.wallet-fab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 14px 0 10px;
+  border-radius: 999px;
+  background:
+    radial-gradient(120% 160% at 0% 0%, color-mix(in srgb, #fff 22%, transparent), transparent 60%),
+    var(--accent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 55%, transparent);
+  color: #fff;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.01em;
   line-height: 1;
+}
+
+.wallet-fab-icon {
+  flex-shrink: 0;
+}
+
+.wallet-fab-label {
+  white-space: nowrap;
 }
 
 .header-actions {
