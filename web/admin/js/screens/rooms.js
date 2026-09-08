@@ -70,7 +70,7 @@ export async function render(container) {
     <form id="create-room-form" class="detail-panel">
       <div class="detail-grid">
         <label>Code <input type="text" name="code" required /></label>
-        <label>Stake (ETB) <input type="text" name="stake" required placeholder="20.00" /></label>
+        <label>Stake (ETB) <input type="text" name="stake" required value="20.00" /></label>
         <label>House cut (bps) <input type="number" name="house_cut_bps" value="2000" /></label>
         <label>Min players <input type="number" name="min_players" value="2" /></label>
         <label>Max players <input type="number" name="max_players" value="100" /></label>

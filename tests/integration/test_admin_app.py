@@ -136,6 +136,51 @@ async def test_adjust_balance_over_http_rejects_a_missing_request_id(admin_serve
     assert response.status_code == 422
 
 
+async def test_create_room_rejects_a_malformed_stake_with_a_clean_error(admin_server, pool):
+    # A real bug this reproduces: Decimal(str) raises decimal
+    # .InvalidOperation, not ValueError -- create_room()'s own
+    # `except ValueError` never caught it, so any malformed stake (an
+    # empty string, a stray space, a comma instead of a decimal point --
+    # all reachable through the console's own create-room form) fell
+    # through as an unhandled exception and surfaced as an opaque 500,
+    # not the clean 422 every other validation error on this route gives.
+    headers = await _auth_headers(admin_server, pool, role="superadmin")
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{admin_server}/rooms",
+            headers=headers,
+            json={"code": f"bad-stake-{id(pool)}", "stake": "20,00"},
+        )
+    assert response.status_code == 422, response.text
+    assert "decimal" in response.json()["detail"].lower()
+
+
+async def test_update_room_rejects_a_malformed_stake_with_a_clean_error(admin_server, pool):
+    # Same underlying gap as the create-room test above, on the edit
+    # path: the console's edit form sends stake as a plain FormData
+    # string, and update_room_admin() passed it straight through to the
+    # UPDATE statement with no conversion at all -- asyncpg raises its
+    # own DataError (also not a ValueError) for a non-numeric string
+    # bound to a numeric column, equally uncaught before this fix.
+    headers = await _auth_headers(admin_server, pool, role="superadmin")
+    async with httpx.AsyncClient() as client:
+        create = await client.post(
+            f"{admin_server}/rooms",
+            headers=headers,
+            json={"code": f"bad-stake-edit-{id(pool)}", "stake": "20.00"},
+        )
+        assert create.status_code == 200, create.text
+        room_id = create.json()["room_id"]
+
+        response = await client.patch(
+            f"{admin_server}/rooms/{room_id}",
+            headers=headers,
+            json={"changes": {"stake": ""}, "reason": "testing malformed input"},
+        )
+    assert response.status_code == 422, response.text
+    assert "decimal" in response.json()["detail"].lower()
+
+
 async def test_rbac_support_cannot_set_kyc_level_over_http(admin_server, pool, conn):
     headers = await _auth_headers(admin_server, pool, role="support")
     user_id = await create_funded_user(conn)

@@ -683,11 +683,15 @@ async def create_room(
     body: CreateRoomRequest,
 ) -> dict[str, int]:
     try:
+        stake = Decimal(body.stake)
+    except InvalidOperation as exc:
+        raise HTTPException(status_code=422, detail="stake must be a decimal number") from exc
+    try:
         room_id = await queries.create_room_admin(
             app.state.pool,
             admin_id=admin.admin_id,
             code=body.code,
-            stake=Decimal(body.stake),
+            stake=stake,
             house_cut_bps=body.house_cut_bps,
             min_players=body.min_players,
             max_players=body.max_players,

@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
@@ -946,6 +946,21 @@ async def update_room_admin(
         return False
     if "min_winning_lines" in changes:
         _validate_min_winning_lines(changes["min_winning_lines"])
+    if "stake" in changes:
+        # The edit form sends this as a plain string (FormData, not a
+        # typed number input) -- caught here, before it ever reaches the
+        # UPDATE below, for the same reason create_room_admin's own
+        # caller validates stake up front: asyncpg raises a raw
+        # DataError (not a ValueError) for a non-numeric string bound to
+        # a numeric column, which nothing here or in the endpoint's own
+        # except ValueError catches, so a malformed edit (an empty
+        # field, a stray space, a comma instead of a decimal point)
+        # would otherwise surface as an opaque 500 instead of a clean,
+        # actionable validation error.
+        try:
+            changes["stake"] = Decimal(str(changes["stake"]))
+        except InvalidOperation as exc:
+            raise ValueError("stake must be a decimal number") from exc
 
     async with pool.acquire() as conn:
         async with conn.transaction():

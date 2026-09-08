@@ -1851,6 +1851,90 @@ async def test_max_players_cap_holds_under_real_concurrent_joins(pool, redis, ca
         await asyncio.wait_for(task, timeout=10)
 
 
+async def test_two_different_stake_rooms_run_fully_concurrently_and_independently(
+    pool, redis, card_pool, conn
+):
+    """The real, product-level question this proves end to end, not just
+    by reading worker.py's own "one asyncio task per room" docstring:
+    can a 10 ETB room and a 20 ETB room actually run live at the same
+    time, each with its own players, with zero cross-talk? Every active
+    room already gets its own independent RoundEngine task in real
+    production (services/engine/worker.py::run_active_rooms) -- this
+    constructs two such engines directly, the same way every other test
+    in this file constructs one, and runs them concurrently via
+    asyncio.gather so both rounds are genuinely in flight at once, not
+    just sequentially exercised one after the other.
+
+    Also proves per-room card isolation: card_no is scoped to *this
+    engine's own* self._entries, not shared across rooms (see
+    round_engine.py's own comment on why that dict is keyed by
+    (user_id, card_no)), so the exact same card_no can be legitimately
+    held by two different players in two different rooms at once.
+    """
+    cheap_room_id = await create_room(conn, stake=Decimal("10.00"), min_players=2)
+    pricey_room_id = await create_room(conn, stake=Decimal("20.00"), min_players=2)
+    cheap_engine = await make_engine(pool, redis, card_pool, cheap_room_id)
+    pricey_engine = await make_engine(pool, redis, card_pool, pricey_room_id)
+    cheap_task = asyncio.create_task(cheap_engine.run_forever())
+    pricey_task = asyncio.create_task(pricey_engine.run_forever())
+    try:
+        cheap_p1 = await create_funded_user(conn, Decimal("100.00"))
+        cheap_p2 = await create_funded_user(conn, Decimal("100.00"))
+        pricey_p1 = await create_funded_user(conn, Decimal("100.00"))
+        pricey_p2 = await create_funded_user(conn, Decimal("100.00"))
+
+        # Same card_no (1 and 2) taken in both rooms at once, by entirely
+        # different players -- would collide if card assignment were
+        # global instead of per-room.
+        results = await asyncio.gather(
+            cheap_engine.join(cheap_p1, 1),
+            cheap_engine.join(cheap_p2, 2),
+            pricey_engine.join(pricey_p1, 1),
+            pricey_engine.join(pricey_p2, 2),
+        )
+        assert all(r.ok for r in results), results
+
+        await asyncio.gather(
+            wait_until(lambda: cheap_engine.status == "running", timeout=5),
+            wait_until(lambda: pricey_engine.status == "running", timeout=5),
+        )
+
+        # Independent round rows, independent stakes -- neither room's
+        # config leaked into the other's round.
+        assert cheap_engine.round_id != pricey_engine.round_id
+        cheap_round = await pool.fetchrow(
+            "SELECT stake FROM rounds WHERE id = $1", cheap_engine.round_id
+        )
+        pricey_round = await pool.fetchrow(
+            "SELECT stake FROM rounds WHERE id = $1", pricey_engine.round_id
+        )
+        assert cheap_round["stake"] == Decimal("10.00")
+        assert pricey_round["stake"] == Decimal("20.00")
+
+        # Each player was debited their own room's stake, not the other
+        # room's -- real ledger balances, not just in-memory bookkeeping.
+        for user_id in (cheap_p1, cheap_p2):
+            cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
+            assert await ledger.balance(conn, cash.id) == Decimal("90.00")
+        for user_id in (pricey_p1, pricey_p2):
+            cash = await ledger.get_or_create_account(conn, user_id, "user_cash")
+            assert await ledger.balance(conn, cash.id) == Decimal("80.00")
+
+        # Both engines are genuinely calling numbers concurrently, not
+        # one blocking the other -- each room's own call_index advances
+        # on its own schedule.
+        cheap_calls_before = len(cheap_engine._called)  # noqa: SLF001
+        pricey_calls_before = len(pricey_engine._called)  # noqa: SLF001
+        await wait_until(
+            lambda: len(cheap_engine._called) > cheap_calls_before  # noqa: SLF001
+            and len(pricey_engine._called) > pricey_calls_before,  # noqa: SLF001
+            timeout=10,
+        )
+    finally:
+        await asyncio.gather(cheap_engine.stop(), pricey_engine.stop())
+        await asyncio.wait_for(asyncio.gather(cheap_task, pricey_task), timeout=15)
+
+
 async def test_insufficient_balance_join_rejected_no_partial_state(pool, redis, card_pool, conn):
     room_id = await create_room(conn, stake=Decimal("500.00"), min_players=2)
     engine = await make_engine(pool, redis, card_pool, room_id)
