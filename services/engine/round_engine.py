@@ -274,6 +274,15 @@ class RoundEngine:
                         await self._wait_before_next_round()
                         if self._stop_requested or not self._lock.is_held():
                             break
+                        if not await self._room_is_still_active():
+                            # An admin deactivated (or emergency-stopped)
+                            # this room while this same engine instance
+                            # was still alive -- honor that at the one
+                            # point it's always safe to: between rounds,
+                            # never abandoning a round already in
+                            # progress. See _room_is_still_active()'s own
+                            # docstring for the gap this closes.
+                            break
                     async with self._round_start_lock:
                         if self._status == "idle":
                             await self._start_new_round()
@@ -289,6 +298,27 @@ class RoundEngine:
     async def stop(self) -> None:
         self._stop_requested = True
         self._round_active_event.set()
+
+    async def _room_is_still_active(self) -> bool:
+        """A real, previously-unverified gap this closes: rooms.is_active
+        was only ever read by services/engine/worker.py's own claim scan
+        (`WHERE is_active = true`), deciding whether to *start* a new
+        engine task for a room -- nothing in this class's own run_forever()
+        loop ever re-checked it, so an admin's Deactivate or even the
+        emergency Stop Room action (services/admin/queries.py::
+        stop_room_admin, which does correctly halt the *current* round and
+        durably sets is_active = false) had no way to reach an engine that
+        was still alive and still holding this room's lock: it would just
+        go on proactively starting another round, silently contradicting
+        the admin console's own displayed promise ("...cannot restart
+        automatically"). self._room itself is a frozen snapshot loaded
+        once at claim time (see RoomConfig's own docstring reasoning
+        elsewhere in this file), so this deliberately re-reads the live
+        column each time instead of trusting that snapshot.
+        """
+        return bool(
+            await self._pool.fetchval("SELECT is_active FROM rooms WHERE id = $1", self._room.id)
+        )
 
     # --- player actions --------------------------------------------------
 

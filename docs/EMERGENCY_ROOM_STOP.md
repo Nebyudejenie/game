@@ -25,6 +25,26 @@ test_emergency_room_stop.py` pass. This document's own scenario table in
 §9 was already accurate; nothing here was downgraded or is being
 re-upgraded now.
 
+**Status note (real gap found and closed)**: §5's own "Worker restart"
+bullet below understated what it actually guaranteed — `is_active =
+false` durably stopped a *future* worker restart from re-claiming a
+stopped room, but nothing ever reached an engine that was still alive
+and still holding the room's lock at the moment of the stop. Proven
+directly: the same still-running `RoundEngine` instance, never told to
+`.stop()`, went right on proactively starting round #2 in a room an
+operator had just told it to stop — silently contradicting this
+console's own displayed promise ("...cannot restart automatically").
+Fixed by `RoundEngine._room_is_still_active()`, a fresh, un-cached
+`rooms.is_active` read `run_forever()`'s own loop now performs before
+every round after the first (never mid-round — only at the one point
+it's always safe to, between rounds). `test_stop_room_makes_the_same_
+still_live_engine_exit_instead_of_starting_another_round` and `test_
+deactivating_a_room_lets_the_same_live_engine_finish_its_round_then_exit`
+(both in `test_emergency_room_stop.py`) prove the fix for the hard stop
+and the plain Deactivate path respectively, with no `engine.stop()` call
+anywhere in either test.
+re-upgraded now.
+
 ## 1. Complete lifecycle audit
 
 Traced directly from `services/engine/round_engine.py`, not assumed:

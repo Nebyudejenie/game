@@ -1300,9 +1300,15 @@ async def test_an_empty_room_automatically_opens_the_next_round_with_no_join_at_
     round exists. min_players=2 and zero joins guarantees every round in
     this test voids as underfilled; no_player_next_round_delay_seconds=1
     (conftest's own fast-test default) keeps this quick without needing to
-    fake the clock.
+    fake the clock. is_active=True is required now that run_forever()'s
+    loop actually re-checks it before starting a second round (see
+    RoundEngine._room_is_still_active()) -- conftest's own create_room()
+    otherwise defaults it False (a real, unrelated dev-database-hygiene
+    fix, not a statement that this test's room shouldn't be active).
     """
-    room_id = await create_room(conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=1)
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=1, is_active=True
+    )
     engine = await make_engine(pool, redis, card_pool, room_id)
     task = asyncio.create_task(engine.run_forever())
     try:
@@ -1418,9 +1424,16 @@ async def test_a_genuinely_empty_round_still_goes_active_and_calls_real_numbers(
     no-op over zero rows) -- this is the exact path two real players
     already take when nobody happens to win, just reached now with zero
     players from the very start instead.
+
+    is_active=True is required for the second-round assertion below now
+    that run_forever() re-checks it before starting a new round (see
+    RoundEngine._room_is_still_active()) -- conftest's create_room()
+    otherwise defaults it False for unrelated dev-database-hygiene
+    reasons, not because this test's room shouldn't be active.
     """
     room_id = await create_room(
         conn, stake=Decimal("10.00"), min_players=1, lobby_seconds=1, call_interval_ms=10,
+        is_active=True,
     )
     engine = await make_engine(pool, redis, card_pool, room_id)
     task = asyncio.create_task(engine.run_forever())

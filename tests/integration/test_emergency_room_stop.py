@@ -162,6 +162,133 @@ async def test_stop_running_room_refunds_and_halts_number_calling(pool, redis, c
         await asyncio.wait_for(task, timeout=15)
 
 
+async def test_stop_room_makes_the_same_still_live_engine_exit_instead_of_starting_another_round(
+    pool, redis, card_pool, conn
+):
+    """A real gap this closes: stop_room_admin() durably sets
+    rooms.is_active = false and halts the *current* round's number-calling
+    (proven above), and is_active = false correctly stops a *future*
+    worker restart from re-claiming the room (services/engine/worker.py's
+    own run_active_rooms()) -- but nothing previously reached an engine
+    that was still alive, still holding the room's Redis lock, at the
+    moment of the stop. Confirmed directly before this fix: the very same
+    engine instance, never told to stop(), went right on proactively
+    starting round #2 in a room an operator had just told it to stop,
+    silently contradicting the admin console's own displayed promise
+    ("...cannot restart automatically"). RoundEngine._room_is_still_
+    active() now re-checks the real column before every round after the
+    first, so this same still-running engine must exit run_forever() on
+    its own -- releasing its lock -- rather than opening a second round,
+    with no explicit .stop() call from this test at all.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("20.00"), min_players=2, call_interval_ms=200,
+        no_player_next_round_delay_seconds=1, is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        admin_id, *_ = await create_test_admin(pool)
+        p1 = await create_funded_user(conn, Decimal("50.00"))
+        p2 = await create_funded_user(conn, Decimal("50.00"))
+        assert (await engine.join(p1, 1)).ok
+        assert (await engine.join(p2, 2)).ok
+        await wait_until(lambda: engine.status == "running", timeout=5)
+        first_round_id = engine.round_id
+
+        result = await queries.stop_room_admin(
+            pool, redis, admin_id=admin_id, room_id=room_id,
+            reason="proving the same live engine now honors this",
+            confirmation="STOP", ip_address="10.0.0.1",
+        )
+        assert result["stopped_round_id"] == first_round_id
+
+        # No engine.stop() call anywhere in this test -- if the fix
+        # didn't work, this task would run forever (or at least far
+        # longer than this timeout), since nothing else would ever tell
+        # it to stop.
+        await asyncio.wait_for(task, timeout=10)
+
+        rows = await pool.fetch(
+            "SELECT id, status FROM rounds WHERE room_id = $1 ORDER BY seq", room_id
+        )
+        assert len(rows) == 1, "a second round must never have been created"
+        assert rows[0]["status"] == "voided"
+
+        room_row = await conn.fetchrow("SELECT is_active FROM rooms WHERE id = $1", room_id)
+        assert room_row["is_active"] is False
+    finally:
+        await engine.stop()
+        if not task.done():
+            await asyncio.wait_for(task, timeout=15)
+
+
+async def test_deactivating_a_room_lets_the_same_live_engine_finish_its_round_then_exit(
+    pool, redis, card_pool, conn
+):
+    """The gentler counterpart to the test above: a plain Deactivate
+    (rooms:manage's PATCH, not the superadmin-only emergency Stop Room)
+    must never abandon a round already in progress with real money
+    staked -- update_room_admin() itself does nothing to any in-flight
+    round (see its own docstring), and this must stay true. What *should*
+    change now: once that round finishes on its own (a real win here,
+    settled normally, no admin intervention), the same still-live engine
+    must notice the room went inactive and stop there, instead of
+    proactively opening a second round nobody asked for anymore.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("15.00"), min_players=2, call_interval_ms=15,
+        no_player_next_round_delay_seconds=1, is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    try:
+        admin_id, *_ = await create_test_admin(pool)
+        winner = await create_funded_user(conn, Decimal("50.00"))
+        other = await create_funded_user(conn, Decimal("50.00"))
+        assert (await engine.join(winner, 1, auto_mark=False)).ok
+        assert (await engine.join(other, 2, auto_mark=False)).ok
+        await wait_until(lambda: engine.status == "running", timeout=5)
+        first_round_id = engine.round_id
+
+        winning_grid = card_pool[1]
+        await wait_until(
+            lambda: bingo.has_won(winning_grid, engine._called, room.win_patterns),  # noqa: SLF001
+            timeout=15,
+        )
+        claim_result = await engine.claim(winner, 1)
+        assert claim_result.ok is True, claim_result
+
+        # A plain deactivate, mid-round -- must not touch this round at
+        # all (no refund, no interruption of a real, already-in-progress
+        # win being settled).
+        updated = await queries.update_room_admin(
+            pool, admin_id=admin_id, room_id=room_id,
+            changes={"is_active": False}, reason="testing plain deactivate", ip_address=None,
+        )
+        assert updated is True
+
+        # Let the already-in-flight round settle for real, undisturbed.
+        await wait_until(lambda: engine.status == "idle", timeout=10)
+        round_row = await conn.fetchrow("SELECT status FROM rounds WHERE id = $1", first_round_id)
+        assert round_row["status"] == "done", "deactivate must never void a round already winning"
+        winner_cash = await ledger.get_or_create_account(conn, winner, "user_cash")
+        assert await ledger.balance(conn, winner_cash.id) > Decimal("50.00")  # the win actually paid
+
+        # No engine.stop() call -- the engine must exit on its own now
+        # that the room it just finished a round in is inactive.
+        await asyncio.wait_for(task, timeout=10)
+
+        rows = await pool.fetch("SELECT id FROM rounds WHERE room_id = $1", room_id)
+        assert len(rows) == 1, "a second round must never have been created after deactivation"
+    finally:
+        await engine.stop()
+        if not task.done():
+            await asyncio.wait_for(task, timeout=15)
+
+
 async def test_stop_after_round_already_settled_does_not_touch_the_winner(
     pool, redis, card_pool, conn
 ):
