@@ -60,46 +60,40 @@ async def _language_for(pool: asyncpg.Pool, telegram_id: int) -> str:
 
 
 def _miniapp_direct_link(settings: Settings) -> str | None:
-    """A t.me/<bot>/<short_name> direct link -- a second, independent
-    launch surface alongside the web_app button both main_menu_keyboard()
-    calls already send. A real production incident found the persistent
-    menu button and keyboard button (both the same raw setChatMenuButton/
-    web_app API mechanism) delivered no initData at all for some clients
-    until the Mini App was also registered via BotFather's /newapp; this
-    direct link uses that same registered app and is confirmed to work
-    even when a button-based launch doesn't. None when the short name
-    isn't configured -- never construct a link nobody set up.
+    """A t.me/<bot>/<short_name> direct link -- an independent launch
+    surface alongside the bot's chat-menu button (both the Mini App's
+    real launch surfaces now that main_menu_keyboard() carries no
+    web_app button of its own). A real production incident found the
+    persistent menu button and a since-removed web_app keyboard button
+    (both the same raw setChatMenuButton/web_app API mechanism) delivered
+    no initData at all for some clients until the Mini App was also
+    registered via BotFather's /newapp; this direct link uses that same
+    registered app and is confirmed to work even when a button-based
+    launch doesn't. None when the short name isn't configured -- never
+    construct a link nobody set up.
     """
     if not settings.telegram_bot_username or not settings.telegram_miniapp_short_name:
         return None
     return f"https://t.me/{settings.telegram_bot_username}/{settings.telegram_miniapp_short_name}"
 
 
-async def _send_refreshed_main_menu(
-    notifier: Notifier, chat_id: int, text: str, language: str, settings: Settings
-) -> None:
+async def _send_refreshed_main_menu(notifier: Notifier, chat_id: int, text: str, language: str) -> None:
     """A real, live production incident: a player's persistent keyboard
-    kept showing a plain "Play" button that just sent text (routing to
-    on_menu_text() -> cmd_play() again, an unhelpful loop) instead of
-    opening the Mini App directly -- even after MINIAPP_URL was fully
-    configured and this exact chat had been sent a fresh
-    main_menu_keyboard() with a real web_app button attached. Telegram's
-    own client only ever redraws a chat's persistent ReplyKeyboardMarkup
-    when it decides one is needed; a keyboard that already looks the
-    same (identical button labels) to one already on screen isn't
-    guaranteed to be replaced even though the web_app attribute
-    underneath actually changed -- this player's client had been holding
-    onto the very first keyboard this bot ever sent it, from before
-    MINIAPP_URL existed at all, when Play truly was a plain text button.
-    An explicit ReplyKeyboardRemove sent first forces the client to
-    genuinely discard whatever it was showing before the real keyboard
-    (with its real web_app button) replaces it, rather than trusting the
-    client to notice the difference on its own.
+    kept showing a stale button from before this exact chat had been sent
+    a freshly-relabeled main_menu_keyboard(). Telegram's own client only
+    ever redraws a chat's persistent ReplyKeyboardMarkup when it decides
+    one is needed, and a keyboard that looks close enough to one already
+    on screen isn't guaranteed to be replaced. An explicit
+    ReplyKeyboardRemove sent first forces the client to genuinely discard
+    whatever it was showing before the real, current keyboard replaces
+    it, rather than trusting the client to notice the difference on its
+    own -- still the right defense now that this keyboard's buttons are
+    plain text (e.g. Start/Support) rather than a web_app button, since a
+    label-only change is exactly the kind of "looks close enough" diff a
+    client can decide not to redraw.
     """
     await notifier.send(chat_id, text, reply_markup=ReplyKeyboardRemove())
-    await notifier.send(
-        chat_id, text, reply_markup=main_menu_keyboard(language, miniapp_url=settings.miniapp_url)
-    )
+    await notifier.send(chat_id, text, reply_markup=main_menu_keyboard(language))
 
 
 @router.message(CommandStart())
@@ -132,7 +126,7 @@ async def cmd_start(
         return
 
     await _send_refreshed_main_menu(
-        notifier, chat_id, t("welcome.back", language, name=user.display_name), language, settings
+        notifier, chat_id, t("welcome.back", language, name=user.display_name), language
     )
     direct_link = _miniapp_direct_link(settings)
     if direct_link:
@@ -190,7 +184,7 @@ async def on_contact(
     await notifier.send(
         chat_id,
         t("register.success", language, name=user.display_name),
-        reply_markup=main_menu_keyboard(language, miniapp_url=settings.miniapp_url),
+        reply_markup=main_menu_keyboard(language),
     )
 
 
@@ -202,9 +196,7 @@ async def cmd_play(message: Message, pool: asyncpg.Pool, notifier: Notifier, set
         await notifier.send(message.chat.id, t("error.not_registered", language))
         return
     if settings.miniapp_url:
-        await _send_refreshed_main_menu(
-            notifier, message.chat.id, t("play.open", language), language, settings
-        )
+        await _send_refreshed_main_menu(notifier, message.chat.id, t("play.open", language), language)
         direct_link = _miniapp_direct_link(settings)
         if direct_link:
             await notifier.send(message.chat.id, t("play.direct_link", language, link=direct_link))
@@ -732,12 +724,19 @@ async def on_menu_text(message: Message, pool: asyncpg.Pool, redis: Redis, notif
     registered = user is not None
 
     mapping = {
-        t("menu.play", language): (MenuAction.PLAY, True),
+        t("menu.start", language): (MenuAction.START, False),
         t("menu.balance", language): (MenuAction.BALANCE, False),
         t("menu.deposit", language): (MenuAction.DEPOSIT, True),
-        t("menu.withdraw", language): (MenuAction.WITHDRAW, True),
+        t("menu.support", language): (MenuAction.SUPPORT, False),
         t("menu.invite", language): (MenuAction.INVITE, False),
         t("menu.rules", language): (MenuAction.RULES, False),
+        # main_menu_keyboard() no longer ships Play/Withdraw buttons (they
+        # were replaced by Start/Support), but a client that's still
+        # showing an older cached keyboard can still send this exact
+        # text -- keep routing it to the real handler instead of letting
+        # it fall through to "unrecognized".
+        t("menu.play", language): (MenuAction.PLAY, True),
+        t("menu.withdraw", language): (MenuAction.WITHDRAW, True),
     }
 
     matched = mapping.get(text)
@@ -772,6 +771,8 @@ async def on_menu_text(message: Message, pool: asyncpg.Pool, redis: Redis, notif
         MenuAction.WITHDRAW: cmd_withdraw,
         MenuAction.INVITE: cmd_invite,
         MenuAction.RULES: cmd_rules,
+        MenuAction.START: cmd_start,
+        MenuAction.SUPPORT: cmd_support,
     }
     handler_name = handler_by_action[action].__name__
     if not command_registry.is_enabled(handler_name):
@@ -793,6 +794,11 @@ async def on_menu_text(message: Message, pool: asyncpg.Pool, redis: Redis, notif
         await cmd_invite(message, pool, notifier, settings)
     elif action == MenuAction.RULES:
         await cmd_rules(message, pool, notifier)
+    elif action == MenuAction.START:
+        empty_command = CommandObject(command="start", args="")
+        await cmd_start(message, empty_command, pool, redis, notifier, settings)
+    elif action == MenuAction.SUPPORT:
+        await cmd_support(message, pool, notifier)
 
 
 @router.message()

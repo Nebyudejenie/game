@@ -16,6 +16,8 @@
   "menu.withdraw": "⬆️ ወጪ ያድርጉ",
   "menu.invite": "👥 ጋብዙ",
   "menu.rules": "📖 ህጎች",
+  "menu.start": "▶️ ይጀምሩ",
+  "menu.support": "🆘 ድጋፍ",
 
   "balance.summary": "ካሽ: {cash} ብር\nቦነስ: {bonus} ብር\nየተያዘ: {locked} ብር",
 

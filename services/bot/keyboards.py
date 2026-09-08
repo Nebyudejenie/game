@@ -30,6 +30,8 @@ class MenuAction(Enum):
     WITHDRAW = "withdraw"
     INVITE = "invite"
     RULES = "rules"
+    START = "start"
+    SUPPORT = "support"
 
 
 def registration_keyboard(language: str) -> ReplyKeyboardMarkup:
@@ -66,22 +68,18 @@ def open_wallet_keyboard(language: str, *, miniapp_url: str) -> InlineKeyboardMa
     )
 
 
-def main_menu_keyboard(language: str, *, miniapp_url: str = "") -> ReplyKeyboardMarkup:
-    # Telegram requires a valid HTTPS URL for a web_app button -- until the
-    # Mini App (Phase 4) is deployed and MINIAPP_URL is configured, Play is
-    # a plain button whose handler honestly says the game screen isn't open
-    # yet, rather than shipping a button that would error or point nowhere.
-    play_button = (
-        KeyboardButton(text=t("menu.play", language), web_app=WebAppInfo(url=miniapp_url))
-        if miniapp_url
-        else KeyboardButton(text=t("menu.play", language))
-    )
+def main_menu_keyboard(language: str) -> ReplyKeyboardMarkup:
+    # Launching the Mini App no longer lives on this keyboard at all: the
+    # bot's own chat-menu button (services/bot/verify_menu_button.py) and
+    # the /play command are the real launch surfaces now, so this row's
+    # first button is a plain text button, same shape as every other
+    # button here.
     return ReplyKeyboardMarkup(
         keyboard=[
-            [play_button, KeyboardButton(text=t("menu.balance", language))],
+            [KeyboardButton(text=t("menu.start", language)), KeyboardButton(text=t("menu.balance", language))],
             [
                 KeyboardButton(text=t("menu.deposit", language)),
-                KeyboardButton(text=t("menu.withdraw", language)),
+                KeyboardButton(text=t("menu.support", language)),
             ],
             [
                 KeyboardButton(text=t("menu.invite", language)),

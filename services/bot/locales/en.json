@@ -16,6 +16,8 @@
   "menu.withdraw": "⬆️ Withdraw",
   "menu.invite": "👥 Invite",
   "menu.rules": "📖 Rules",
+  "menu.start": "▶️ Start",
+  "menu.support": "🆘 Support",
 
   "balance.summary": "Cash: {cash} ETB\nBonus: {bonus} ETB\nLocked: {locked} ETB",
 

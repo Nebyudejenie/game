@@ -31,7 +31,7 @@ async def test_set_override_then_refresh_changes_what_the_bot_would_send(pool):
     before_label = before_keyboard.keyboard[0][0].text
 
     await bot_content_queries.set_bot_content_override_admin(
-        pool, admin_id=admin_id, key="menu.play", language="am", value="ጨዋታ ጀምር", ip_address=None
+        pool, admin_id=admin_id, key="menu.start", language="am", value="ጨዋታ ጀምር", ip_address=None
     )
     await bot_content_sync.refresh_once(pool)
 

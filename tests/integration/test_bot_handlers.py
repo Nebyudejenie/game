@@ -297,6 +297,30 @@ async def test_start_command_also_sends_a_direct_link_fallback_when_short_name_i
     assert "https://t.me/jobingo_bot/arada" in session.sent[2].text
 
 
+async def test_start_button_press_welcomes_back_an_already_registered_user(pool, bot_ctx):
+    # main_menu_keyboard()'s first button is now "Start" (replacing the
+    # old web_app "Play" button -- launching the Mini App moved to the
+    # bot's chat-menu button and the /play command instead). Pressing it
+    # must behave exactly like typing /start for an already-registered
+    # user: on_menu_text() dispatches MenuAction.START to the real
+    # cmd_start() handler via a synthetic CommandObject, not a
+    # reimplementation of the welcome-back logic.
+    from services.bot.i18n import t
+
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+
+    # _register leaves the user's language at "am" (make_contact_update's
+    # fake sender carries no language_code).
+    button_text = t("menu.start", "am")
+    await dp.feed_update(bot, make_text_update(telegram_id, button_text))
+    await _settle(messages=2)
+
+    assert len(session.sent) == 2
+    assert "እንኳን ደህና መጡ" in session.sent[0].text
+    assert "እንኳን ደህና መጡ" in session.sent[1].text
+
+
 async def test_referral_credit_survives_a_failed_registration_attempt(pool, bot_ctx):
     # Regression: a real code review pass caught that the pending referral
     # was popped (deleted from Redis) *before* attempting registration,
@@ -1189,6 +1213,39 @@ async def test_support_command_sends_the_support_contact(bot_ctx):
     await _settle()
     assert len(session.sent) == 1
     assert "@jobingo_support" in session.sent[0].text
+
+
+async def test_support_button_press_sends_the_support_contact(bot_ctx):
+    # main_menu_keyboard()'s deposit row now ends in "Support" (replacing
+    # the old "Withdraw" button -- withdrawing still works via the
+    # /withdraw command). Pressing it must dispatch to the real
+    # cmd_support() handler, same as typing /support.
+    from services.bot.i18n import t
+
+    dp, bot, session = bot_ctx
+    telegram_id = next_telegram_id()
+    button_text = t("menu.support", "am")
+    await dp.feed_update(bot, make_text_update(telegram_id, button_text))
+    await _settle()
+    assert len(session.sent) == 1
+    assert "@jobingo_support" in session.sent[0].text
+
+
+async def test_stale_cached_keyboard_play_and_withdraw_button_text_still_routes(bot_ctx):
+    # A client that hasn't redrawn its ReplyKeyboardMarkup yet can still
+    # send the old "Play"/"Withdraw" button text after this relabeling --
+    # on_menu_text() deliberately keeps routing both to their real
+    # handlers (see its own mapping dict comment) instead of leaving a
+    # stale client's taps silently unrecognized.
+    from services.bot.i18n import t
+
+    dp, bot, session = bot_ctx
+    telegram_id = await _register(dp, bot, session)
+
+    await dp.feed_update(bot, make_text_update(telegram_id, t("menu.withdraw", "am")))
+    await _settle()
+    assert len(session.sent) == 1
+    assert "መጠን" in session.sent[0].text  # cmd_withdraw's usage prompt (no amount/args supplied)
 
 
 async def test_language_command_with_no_args_shows_the_prompt(bot_ctx):

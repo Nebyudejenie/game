@@ -1,13 +1,14 @@
 """Tests for services/bot/keyboards.py. Had zero test coverage anywhere
 in the codebase before this file (confirmed by grep). Pure functions, no
-I/O -- but two real behaviors worth pinning down: registration_keyboard's
+I/O -- but one real behavior worth pinning down: registration_keyboard's
 button must actually request_contact=True (the entire contact-mismatch
 check in services/bot/registration.py depends on the contact having come
-through Telegram's own share-contact UI, not a typed number), and
-main_menu_keyboard's Play button must never ship a web_app pointing at an
-empty URL (Telegram itself would error on that, which is exactly why
-services/bot/keyboards.py's own comment says an empty MINIAPP_URL falls
-back to a plain button instead).
+through Telegram's own share-contact UI, not a typed number).
+
+main_menu_keyboard() no longer carries a web_app button at all -- Start/
+Support replaced the old Play/Withdraw pair, and launching the Mini App
+now lives entirely on the bot's chat-menu button and the /play command
+(see services/bot/verify_menu_button.py and handlers.py::cmd_play).
 """
 
 from services.bot.keyboards import (
@@ -32,21 +33,14 @@ def test_registration_keyboard_has_a_second_row_with_no_contact_request() -> Non
     assert not instructions_button.request_contact
 
 
-def test_main_menu_keyboard_play_button_has_no_web_app_when_miniapp_url_is_empty() -> None:
-    kb = main_menu_keyboard("en", miniapp_url="")
-    play_button = kb.keyboard[0][0]
-    assert play_button.web_app is None
-
-
-def test_main_menu_keyboard_play_button_uses_the_real_miniapp_url_when_set() -> None:
-    kb = main_menu_keyboard("en", miniapp_url="https://app.example.test/")
-    play_button = kb.keyboard[0][0]
-    assert play_button.web_app is not None
-    assert play_button.web_app.url == "https://app.example.test/"
+def test_main_menu_keyboard_start_button_has_no_web_app() -> None:
+    kb = main_menu_keyboard("en")
+    start_button = kb.keyboard[0][0]
+    assert start_button.web_app is None
 
 
 def test_main_menu_keyboard_has_all_six_menu_buttons() -> None:
-    kb = main_menu_keyboard("en", miniapp_url="")
+    kb = main_menu_keyboard("en")
     labels = [button.text for row in kb.keyboard for button in row]
     assert len(labels) == 6
     assert len(set(labels)) == 6  # no duplicate button
@@ -65,7 +59,7 @@ def test_keyboards_render_in_amharic_too() -> None:
     # discipline this codebase's i18n key-set parity checks enforce
     # elsewhere, applied to the one place that hasn't been checked yet.
     reg_kb = registration_keyboard("am")
-    menu_kb = main_menu_keyboard("am", miniapp_url="")
+    menu_kb = main_menu_keyboard("am")
     dep_kb = deposit_checkout_keyboard("am", checkout_url="https://pay.example.test/x", amount="50.00")
 
     assert reg_kb.keyboard[0][0].text != ""
