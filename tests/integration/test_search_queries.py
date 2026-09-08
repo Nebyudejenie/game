@@ -53,6 +53,32 @@ async def test_finds_a_room_by_exact_id_and_by_code(pool, conn):
     assert any(r["id"] == room_id for r in by_code["rooms"])
 
 
+async def test_exact_id_match_is_never_crowded_out_by_newer_fuzzy_matches(pool, conn):
+    """Real bug this reproduces (caught by CI on a fresh database, where
+    enough other test-created rooms' codes happened to fuzzy-match the
+    same digits): _RESULT_LIMIT is only 10, and an exact `id = $n` match
+    was ranked purely by recency/active-status alongside fuzzy `code
+    ILIKE` matches -- so a guaranteed-relevant exact match could be pushed
+    out of the top 10 by enough newer, merely-coincidental substring
+    matches. An exact id match must always survive that crowding.
+    """
+    room_id = await create_room(conn, stake=Decimal("10.00"))
+    # 15 decoys, each created *after* (higher id) and *active* (both
+    # tiebreakers the old ordering favored), whose code contains the
+    # target's own digits purely by construction -- more than
+    # _RESULT_LIMIT (10), so the old ordering could never surface the
+    # real match at all.
+    for i in range(15):
+        await conn.execute(
+            "INSERT INTO rooms (code, stake, is_active) VALUES ($1, 10.00, true)",
+            f"decoy-{room_id}-{i}",
+        )
+
+    result = await search_queries.global_search(pool, query=str(room_id), role="superadmin")
+    assert "rooms" in result
+    assert any(r["id"] == room_id for r in result["rooms"])
+
+
 async def test_finds_a_command_by_partial_name(pool):
     result = await search_queries.global_search(pool, query="balance", role="superadmin")
     assert "commands" in result

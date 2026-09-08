@@ -48,12 +48,16 @@ async def _search_users(pool: asyncpg.Pool, query: str, numeric: int | None) -> 
         params.append(phone_lookup_hash(normalized_phone))
         conditions.append(f"phone_lookup_hash = ${len(params)}")
 
+    # An exact id/telegram_id match must never be crowded out of the
+    # LIMIT window by newer fuzzy username/display_name matches -- ranked
+    # first, ahead of recency, whenever one exists.
+    exact_order = "(id = $2 OR telegram_id = $3) DESC, " if numeric is not None else ""
     rows = await pool.fetch(
         f"""
         SELECT id, telegram_id, username, display_name, status
         FROM users
         WHERE {' OR '.join(conditions)}
-        ORDER BY id DESC
+        ORDER BY {exact_order}id DESC
         LIMIT {_RESULT_LIMIT}
         """,
         *params,
@@ -76,12 +80,16 @@ async def _search_rooms(pool: asyncpg.Pool, query: str, numeric: int | None) -> 
     if numeric is not None:
         params.append(numeric)
         conditions.append(f"id = ${len(params)}")
+    # Same reasoning as _search_users: an exact id match is a guaranteed-
+    # relevant result and must outrank recency/active-status, not compete
+    # with however many other rooms' codes happen to fuzzy-match too.
+    exact_order = "(id = $2) DESC, " if numeric is not None else ""
     rows = await pool.fetch(
         f"""
         SELECT id, code, stake, is_active
         FROM rooms
         WHERE {' OR '.join(conditions)}
-        ORDER BY is_active DESC, id DESC
+        ORDER BY {exact_order}is_active DESC, id DESC
         LIMIT {_RESULT_LIMIT}
         """,
         *params,
@@ -129,12 +137,13 @@ async def _search_payments(pool: asyncpg.Pool, query: str, numeric: int | None) 
     if numeric is not None:
         params.append(numeric)
         conditions.append(f"p.id = ${len(params)}")
+    exact_order = "(p.id = $2) DESC, " if numeric is not None else ""
     rows = await pool.fetch(
         f"""
         SELECT p.id, p.direction, p.provider, p.amount, p.status, p.our_ref, u.display_name
         FROM payments p JOIN users u ON u.id = p.user_id
         WHERE {' OR '.join(conditions)}
-        ORDER BY p.id DESC
+        ORDER BY {exact_order}p.id DESC
         LIMIT {_RESULT_LIMIT}
         """,
         *params,
@@ -208,12 +217,13 @@ async def _search_notifications(pool: asyncpg.Pool, query: str, numeric: int | N
     if numeric is not None:
         params.append(numeric)
         conditions.append(f"id = ${len(params)}")
+    exact_order = "(id = $2) DESC, " if numeric is not None else ""
     rows = await pool.fetch(
         f"""
         SELECT id, internal_name, status
         FROM notification_campaigns
         WHERE {' OR '.join(conditions)}
-        ORDER BY id DESC
+        ORDER BY {exact_order}id DESC
         LIMIT {_RESULT_LIMIT}
         """,
         *params,
@@ -240,12 +250,13 @@ async def _search_audit(pool: asyncpg.Pool, query: str, numeric: int | None) -> 
     if numeric is not None:
         params.append(numeric)
         conditions.append(f"id = ${len(params)}")
+    exact_order = "(id = $2) DESC, " if numeric is not None else ""
     rows = await pool.fetch(
         f"""
         SELECT id, action, target_type, target_id, reason, created_at
         FROM admin_audit_log
         WHERE {' OR '.join(conditions)}
-        ORDER BY id DESC
+        ORDER BY {exact_order}id DESC
         LIMIT {_RESULT_LIMIT}
         """,
         *params,
