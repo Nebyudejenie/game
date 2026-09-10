@@ -20,10 +20,10 @@ from redis.asyncio import Redis
 
 from packages.core import bingo, ledger, metrics
 from packages.core.notifications import notify_user
+from packages.core.phone import normalize_ethiopian_phone
 from packages.core.phone_crypto import decrypt_phone, phone_lookup_hash
 from packages.core.referrals import maybe_grant_referral_bonus, maybe_grant_welcome_bonus
 from services.admin import audit, auth, rbac
-from services.bot.phone import normalize_ethiopian_phone
 from services.engine.refunds import TERMINAL_STATUSES, refund_round_in_transaction
 from services.payments.withdrawals import enqueue_payout
 

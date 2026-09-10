@@ -20,7 +20,7 @@ from typing import Annotated, Any, Literal
 
 import asyncpg
 import structlog
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request, Response, UploadFile
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
@@ -31,8 +31,10 @@ from packages.core.redis_conn import get_redis
 from packages.core.sms import campaigns as campaigns_module
 from packages.core.sms import messages as messages_module
 from packages.core.sms import nodes as nodes_module
+from packages.core.sms import csv_import as csv_import_module
 from packages.core.sms.audience import InvalidAudienceFilter
 from packages.core.sms.campaigns import CampaignNotFound, InvalidTransition
+from packages.core.sms.csv_import import CsvImportError, ImportFormat, MAX_CSV_SIZE_BYTES
 from packages.core.sms.messages import MessageNotFound, NotOwnedByNode
 from packages.core.sms.nodes import NodeNotFound
 from services.admin import auth
@@ -191,6 +193,7 @@ def _campaign_to_dict(campaign: campaigns_module.Campaign) -> dict[str, Any]:
         "started_at": campaign.started_at.isoformat() if campaign.started_at else None,
         "completed_at": campaign.completed_at.isoformat() if campaign.completed_at else None,
         "required_fleet_group": campaign.required_fleet_group,
+        "import_job_id": campaign.import_job_id,
     }
 
 
@@ -221,6 +224,11 @@ class CreateCampaignRequest(BaseModel):
     # fleet_group matches exactly (packages/core/sms/messages.py's claim
     # query enforces this).
     required_fleet_group: str | None = None
+    # Set to create this campaign from a completed CSV import
+    # (POST /import/csv) instead of the usual audience_filter -- see
+    # packages/core/sms/campaigns.py's own create_campaign() for the
+    # exact template_id/body_override requirement this relaxes.
+    import_job_id: int | None = None
 
 
 @app.post("/campaigns")
@@ -234,7 +242,7 @@ async def create_campaign(
             app.state.pool, tenant_id=app.state.tenant_id, admin_id=admin.admin_id, name=body.name,
             template_id=body.template_id, body_override=body.body_override,
             audience_filter=body.audience_filter, required_fleet_group=body.required_fleet_group,
-            ip_address=_client_ip(request),
+            import_job_id=body.import_job_id, ip_address=_client_ip(request),
         )
     except InvalidAudienceFilter as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -351,6 +359,112 @@ async def cancel_campaign(
     except InvalidTransition as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _campaign_to_dict(campaign)
+
+
+# --- CSV bulk import -------------------------------------------------------
+#
+# Gated by the exact same permissions campaign creation/sending already
+# use: uploading and previewing a CSV is "drafting a campaign" (sms:
+# campaigns:manage, the same permission POST /campaigns needs), and the
+# one thing that actually sends real messages -- POST /campaigns/{id}/
+# start -- is already gated by the narrower sms:campaigns:approve above.
+# A CSV import is simply another way to create a campaign; it never
+# needs its own permission namespace.
+
+
+async def _read_upload_bounded(file: UploadFile, *, max_bytes: int) -> bytes:
+    """Reads at most max_bytes + one chunk, aborting the instant that's
+    exceeded -- never lets a maliciously (or accidentally) huge upload
+    run to completion in memory before csv_import.py's own byte-count
+    check would otherwise fire (Section 19: "oversized uploads",
+    "memory exhaustion").
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(64 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(status_code=413, detail=f"file exceeds the {max_bytes:,} byte limit")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+@app.post("/import/csv")
+async def upload_csv(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("sms:campaigns:manage"))],
+    file: UploadFile,
+    format: ImportFormat = Form(...),
+    # Required, not defaulted -- a missing/blank value would silently
+    # reopen the double-submission gap this exists to close (mirrors
+    # AdjustBalanceRequest.request_id's own comment in services/admin/
+    # app.py). The frontend generates one fresh UUID per upload attempt
+    # and resends the identical value on any retry of that same attempt.
+    idempotency_key: str = Form(...),
+) -> dict[str, Any]:
+    if not idempotency_key.strip():
+        raise HTTPException(status_code=422, detail="idempotency_key is required")
+    raw_bytes = await _read_upload_bounded(file, max_bytes=MAX_CSV_SIZE_BYTES)
+    try:
+        summary = await admin_queries.upload_csv_admin(
+            app.state.pool, tenant_id=app.state.tenant_id, admin_id=admin.admin_id,
+            raw_bytes=raw_bytes, original_filename=file.filename, format=format,
+            idempotency_key=idempotency_key.strip(), ip_address=_client_ip(request),
+        )
+    except CsvImportError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "job_id": summary.job_id, "format": summary.format, "total_rows": summary.total_rows,
+        "valid_rows": summary.valid_rows, "invalid_rows": summary.invalid_rows,
+        "duplicate_rows": summary.duplicate_rows, "suppressed_rows": summary.suppressed_rows,
+        "unsupported_columns": summary.unsupported_columns,
+        "will_send": summary.valid_rows,
+    }
+
+
+@app.get("/import/{job_id}")
+async def get_import_job(
+    admin: Annotated[AdminSession, Depends(require("sms:view"))], job_id: int
+) -> dict[str, Any]:
+    try:
+        summary = await csv_import_module.get_import_summary(
+            app.state.pool, job_id=job_id, tenant_id=app.state.tenant_id
+        )
+    except CsvImportError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "job_id": summary.job_id, "format": summary.format, "total_rows": summary.total_rows,
+        "valid_rows": summary.valid_rows, "invalid_rows": summary.invalid_rows,
+        "duplicate_rows": summary.duplicate_rows, "suppressed_rows": summary.suppressed_rows,
+    }
+
+
+_IMPORT_ROW_STATUSES = {"valid", "invalid", "duplicate", "suppressed"}
+
+
+@app.get("/import/{job_id}/rows")
+async def list_import_rows(
+    admin: Annotated[AdminSession, Depends(require("sms:view"))],
+    job_id: int,
+    status: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    if status is not None and status not in _IMPORT_ROW_STATUSES:
+        raise HTTPException(status_code=422, detail=f"status must be one of {sorted(_IMPORT_ROW_STATUSES)}")
+    if limit > 1000:
+        limit = 1000
+    try:
+        rows = await csv_import_module.list_import_rows(
+            app.state.pool, job_id=job_id, tenant_id=app.state.tenant_id,
+            status=status, limit=limit, offset=offset,  # type: ignore[arg-type]  # narrowed above
+        )
+    except CsvImportError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return rows
 
 
 # --- messages ------------------------------------------------------------

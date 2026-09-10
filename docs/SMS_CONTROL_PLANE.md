@@ -27,7 +27,8 @@ Admin browser ──▶ web/sms/ (static, /console) ──▶ services/sms/app.p
                                     ├── nodes.py          │  fleet lifecycle
                                     ├── audience.py       │  recipient resolution
                                     ├── compliance.py     │  suppression list
-                                    └── templates.py      │  render + segment count
+                                    ├── templates.py      │  render + segment count
+                                    └── csv_import.py     │  bulk CSV -> campaign
                                                         │
                                                    Postgres (sms_* tables)
                                                         ▲
@@ -219,6 +220,66 @@ excluded from `resolve_recipients()` unconditionally; a campaign whose
 entire audience is suppressed fails validation honestly (`0 resolvable
 recipients`) rather than silently succeeding with nothing to send.
 
+## CSV bulk import (2026-09-10)
+
+A CSV upload is genuinely just another way to create a campaign — no
+second queue, no second message table, no second suppression check.
+`packages/core/sms/csv_import.py` owns the whole pipeline; `campaigns.py`
+only gained one branch (on `Campaign.import_job_id`) in
+`validate_campaign()`/`start_campaign()` to resolve recipients from an
+import job instead of an `audience_filter`.
+
+```
+POST /import/csv (multipart) -> parse -> normalize -> validate
+    -> deduplicate -> suppression check -> persist sms_import_rows
+    -> GET /import/{id} / /import/{id}/rows (preview + error table)
+    -> POST /campaigns (import_job_id=...) -> POST /campaigns/{id}/validate
+    -> POST /campaigns/{id}/start -> sms_messages, exactly like any
+       other campaign, claimed by the existing pull protocol unchanged
+```
+
+Two supported shapes: `phone_number,message` (every row supplies its own
+final text — no template/`body_override` needed; `sms_campaigns`' own
+CHECK constraint was widened, migration `198d7fa10f43`, to accept
+`import_job_id IS NOT NULL` as a third valid case) and `phone_number`
+alone (sent through a template/`body_override` the campaign is created
+with, exactly like an audience-filter campaign).
+
+**Data model** — two new tables, both migration `198d7fa10f43`:
+`sms_import_jobs` (one row per upload; `UNIQUE (tenant_id,
+idempotency_key)` is the real double-submission defense — a retried
+upload with the same key returns the already-computed summary rather
+than re-parsing) and `sms_import_rows` (one row per parsed CSV row,
+kept permanently as a real forensic record and the preview screen's own
+paginated error table — the raw uploaded file itself is never persisted
+anywhere, only its parsed, validated rows).
+
+**Limits** (`packages/core/sms/csv_import.py`'s own constants, fixed
+today, not yet admin-configurable): 10 MB max upload
+(`MAX_CSV_SIZE_BYTES`), 50,000 max rows (`MAX_CSV_ROWS`), 500 rows per
+DB batch (`IMPORT_BATCH_SIZE`, bounding both memory and any one
+transaction's lock duration regardless of the file's total size), 10 SMS
+segments max per `phone_message`-format row (`MAX_MESSAGE_SEGMENTS`). An
+oversized upload is rejected in bounded 64 KB chunks
+(`services/sms/app.py::_read_upload_bounded`) — never fully read into
+memory before the size check fires.
+
+**Phone normalization** moved to `packages/core/phone.py` (previously
+duplicated via cross-service import from `services/bot/phone.py`) so the
+CSV importer's free-typed numbers and the bot's Telegram-contact numbers
+share the exact one implementation, per the directive's own explicit
+"do not duplicate phone-normalization logic across multiple services."
+
+**Security**: RBAC reuses existing permissions rather than inventing a
+namespace — uploading/previewing a CSV needs `sms:campaigns:manage` (the
+same permission creating any campaign draft needs), and the one route
+that actually sends real messages, `POST /campaigns/{id}/start`, is
+still gated by the narrower `sms:campaigns:approve` it always was. Both
+new read routes (`GET /import/{id}`, `GET /import/{id}/rows`) are
+tenant-scoped — a job id from a different tenant 404s, never returns
+another tenant's row counts or content (see DECISIONS.md, 2026-09-10, for
+the real gap this closes).
+
 ## RBAC
 
 `sms:view` (broad, all four roles — matches `payments:view`'s own
@@ -228,7 +289,9 @@ breadth reasoning) plus five narrower manage permissions
 deliberately superadmin-only gate, `sms:campaigns:approve` — the one
 action in this whole product that actually sends real messages to real
 people, mirroring `payments:approve`/`rooms:emergency_stop`'s own
-least-privilege reasoning for the single highest-leverage lever.
+least-privilege reasoning for the single highest-leverage lever. CSV
+import (above) deliberately reuses these two exact permissions rather
+than adding a third.
 
 ## Testing
 
@@ -249,6 +312,23 @@ least-privilege reasoning for the single highest-leverage lever.
   Chromium tab driving the actual frontend: login, add a contact,
   register and approve a node, create/validate/start a campaign, and
   confirm the delivered result renders back in the UI.
+- `tests/integration/test_sms_csv_import.py` — 31 tests: pure parsing/
+  normalization/validation (no DB), idempotent/concurrent upload
+  (`asyncio.gather`, two real pooled connections), the full import ->
+  campaign -> validate -> start -> real `sms_messages` flow for both CSV
+  shapes, suppression enforcement, double-start idempotency (sequential
+  and genuinely concurrent), and the cross-tenant IDOR regression test.
+- `tests/integration/test_sms_csv_import_app.py` — 9 tests over real
+  HTTP: RBAC, a real 413 on an oversized upload (rejected in bounded
+  chunks, not after a full read), a clean 422 on a malformed CSV,
+  idempotent re-upload, and the full campaign-to-delivery flow including
+  a real node claiming a CSV-created message.
+- `tests/integration/test_sms_csv_import_console_e2e.py` (`pytest -m
+  e2e`) — uploads a real file through a real `<input type="file">`,
+  reads the validation summary and error table back from the DOM,
+  creates a campaign from it, and drives it through the *existing*
+  Campaigns screen with zero import-specific UI of its own from that
+  point on.
 
 Each test file that touches the message queue gives itself a fresh,
 throwaway tenant (`test_sms_core.py`'s own `tenant_id` fixture) — the
@@ -273,3 +353,13 @@ tower, capacity forecasting, anomaly/alert engines), load/chaos testing
 at enterprise scale, node-protocol-version-gated rolling upgrades (the
 version is stored and visible; nothing yet refuses to dispatch to an
 incompatible version), and tenant self-service provisioning.
+
+CSV import specifically (2026-09-10) does not yet include: background-
+job/resumable-progress streaming beyond ~50,000 rows (the directive's
+own "1,000,000+" tier — a real, tested, documented limit today, not a
+scalability claim); SSE/WebSocket live campaign-progress updates (the
+existing polling-refresh pattern every other SMS screen already uses);
+a dedicated import-history console screen (fully auditable today via
+`admin_audit_log`/`sms_import_rows`, just not its own UI yet); CSV
+export of rejected rows; and admin-configurable per-tenant limits (the
+constants above are fixed module-level values today).

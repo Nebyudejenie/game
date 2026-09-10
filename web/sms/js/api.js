@@ -76,6 +76,44 @@ export async function api(path, { method = "GET", body } = {}) {
   return payload;
 }
 
+// A separate path from api() above, not a mode of it -- multipart/form
+// -data (a real file, not a JSON body) needs the browser to set its own
+// Content-Type (with the multipart boundary), which api()'s hardcoded
+// "application/json" header would otherwise silently break. Mirrors
+// api()'s own auth-header/401-handling exactly, so an expired session
+// during a CSV upload behaves identically to every other request.
+export async function uploadFile(path, formData) {
+  const token = getToken();
+  const headers = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const response = await fetch(path, { method: "POST", headers, body: formData });
+
+  const text = await response.text();
+  let payload = null;
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = text;
+    }
+  }
+
+  if (response.status === 401 && token) {
+    clearToken();
+    clearRole();
+    window.dispatchEvent(new CustomEvent("sms:unauthorized"));
+  }
+
+  if (!response.ok) {
+    const detail = payload && typeof payload === "object" && "detail" in payload
+      ? payload.detail
+      : payload || `request failed (${response.status})`;
+    throw new ApiError(response.status, detail);
+  }
+  return payload;
+}
+
 // Every jsonb column comes back from asyncpg as a raw JSON string unless
 // a codec is registered for it -- callers that render a jsonb field pass
 // it through this first rather than assuming it's already an object

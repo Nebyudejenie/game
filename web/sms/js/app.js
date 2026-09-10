@@ -3,6 +3,7 @@ import { renderError } from "./ui.js";
 import * as loginScreen from "./screens/login.js";
 import * as overviewScreen from "./screens/overview.js";
 import * as campaignsScreen from "./screens/campaigns.js";
+import * as importScreen from "./screens/import.js";
 import * as templatesScreen from "./screens/templates.js";
 import * as contactsScreen from "./screens/contacts.js";
 import * as nodesScreen from "./screens/nodes.js";
@@ -12,6 +13,7 @@ import * as suppressionsScreen from "./screens/suppressions.js";
 const SCREENS = {
   overview: overviewScreen,
   campaigns: campaignsScreen,
+  import: importScreen,
   templates: templatesScreen,
   contacts: contactsScreen,
   nodes: nodesScreen,

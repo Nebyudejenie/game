@@ -15,9 +15,10 @@ import asyncpg
 
 from services.admin import audit
 from packages.core.sms import campaigns as campaigns_module
-from packages.core.sms import compliance, nodes, templates as templates_module
+from packages.core.sms import compliance, csv_import, nodes, templates as templates_module
 from packages.core.sms.campaigns import Campaign
 from packages.core.sms.compliance import Suppression
+from packages.core.sms.csv_import import ImportFormat, ImportSummary
 from packages.core.sms.nodes import DeliveryNode
 
 
@@ -32,18 +33,22 @@ async def create_campaign_admin(
     audience_filter: dict[str, Any],
     ip_address: str | None,
     required_fleet_group: str | None = None,
+    import_job_id: int | None = None,
 ) -> Campaign:
     async with pool.acquire() as conn:
         async with conn.transaction():
             campaign = await campaigns_module.create_campaign(
                 conn, tenant_id=tenant_id, name=name, template_id=template_id,
                 body_override=body_override, audience_filter=audience_filter, created_by_admin_id=admin_id,
-                required_fleet_group=required_fleet_group,
+                required_fleet_group=required_fleet_group, import_job_id=import_job_id,
             )
             await audit.record(
                 conn, admin_id=admin_id, action="sms.campaigns.create", target_type="sms_campaign",
                 target_id=str(campaign.id), before=None,
-                after={"name": name, "status": campaign.status, "required_fleet_group": required_fleet_group},
+                after={
+                    "name": name, "status": campaign.status, "required_fleet_group": required_fleet_group,
+                    "import_job_id": import_job_id,
+                },
                 ip_address=ip_address,
             )
     return campaign
@@ -130,6 +135,42 @@ async def cancel_campaign_admin(
                 ip_address=ip_address,
             )
     return campaign
+
+
+async def upload_csv_admin(
+    pool: asyncpg.Pool,
+    *,
+    tenant_id: int,
+    admin_id: int,
+    raw_bytes: bytes,
+    original_filename: str | None,
+    format: ImportFormat,
+    idempotency_key: str,
+    ip_address: str | None,
+) -> ImportSummary:
+    """Never records raw CSV content in the audit trail (Section 18:
+    "never log ... unnecessary message content") -- only the summary
+    counts, exactly what an operator reviewing the audit log actually
+    needs to know happened.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            summary = await csv_import.create_import_job(
+                conn, tenant_id=tenant_id, admin_id=admin_id, raw_bytes=raw_bytes,
+                original_filename=original_filename, format=format, idempotency_key=idempotency_key,
+            )
+            await audit.record(
+                conn, admin_id=admin_id, action="sms.imports.upload", target_type="sms_import_job",
+                target_id=str(summary.job_id), before=None,
+                after={
+                    "original_filename": original_filename, "format": format,
+                    "total_rows": summary.total_rows, "valid_rows": summary.valid_rows,
+                    "invalid_rows": summary.invalid_rows, "duplicate_rows": summary.duplicate_rows,
+                    "suppressed_rows": summary.suppressed_rows,
+                },
+                ip_address=ip_address,
+            )
+    return summary
 
 
 async def create_template_admin(

@@ -11449,3 +11449,153 @@ case-insensitive sweep for "jo bingo"/"jo-bingo"/"jo_bingo" was run
 before starting and again after finishing; every remaining hit is one of
 the intentional exclusions listed above, individually confirmed, not
 assumed.
+
+## 2026-09-10 — CSV bulk SMS import: a real vertical slice on top of the existing campaign/message model, not a parallel system
+
+A "production go-live" directive asked for a full enterprise bulk-SMS
+operations platform on top of the SMS Control Plane's existing Phase
+1/2 baseline (`a6cfb1a`, `d995dc3`, `71e5c81`): CSV upload with
+streaming/chunked processing at a "1,000,000+ row" scale, a fully
+reactive live-updating operations dashboard (SSE/WebSocket), full
+observability/alerting, a configurable per-tenant rate-limit UI, and a
+verified public `https://sms.arada.fun` deployment — 31 sections in
+total. Same scoping discipline this whole project has applied to every
+oversized directive since Telegram Phase 1: one real, complete,
+end-to-end vertical slice (the directive's own core diagram: CSV →
+validate → preview → explicit confirm → existing campaign/message model
+→ existing pull-based claim engine → existing capacity/fairness/
+suppression → existing delivery nodes → existing retry/reconciliation →
+real delivery state → auditable dashboard), not shallow scaffolding
+across all 31 sections, and not a claim of enterprise scale never
+actually tested.
+
+**Reused, not rebuilt**: the entire existing campaign lifecycle state
+machine, `sms_messages`/the pull-based node protocol/`FOR UPDATE SKIP
+LOCKED` claiming, suppression enforcement, retry/dead-letter/
+reconciliation, admin auth/RBAC/audit, and the production subdomain
+routing config (`sms.arada.fun → sms:8006` already existed in
+`deploy/cloudflared/config.yml.example` and the `sms` docker-compose
+service from Phase 1 — confirmed by reading both before assuming
+anything needed to be added). A CSV import is genuinely just another
+way to create a campaign: two new tables (`sms_import_jobs`,
+`sms_import_rows`, migration `198d7fa10f43`) plus one nullable
+`sms_campaigns.import_job_id` column, no second queue, no second
+message table, no second suppression check.
+
+**A real design choice, not obvious in advance**: the directive's own
+two CSV shapes (`phone_number,message` — each row's own text — and
+`phone_number` alone, sent through a shared template) don't fit
+identically onto the existing model. `phone_number,message` needed
+`sms_campaigns`' existing `CHECK (template_id IS NOT NULL OR
+body_override IS NOT NULL)` widened to also accept
+`import_job_id IS NOT NULL` (a real campaign with neither, because each
+recipient already carries its own final message). `phone_number`-only
+still needs a template/override exactly like today's audience-filter
+campaigns; `create_campaign()` now checks the import job's own format
+before accepting either shape, rather than trusting the caller.
+
+**Phone normalization was duplicated across three call sites before
+this** (`services/bot/phone.py`, imported cross-service by
+`services/admin/queries.py` and `services/admin/search_queries.py`) —
+the directive's own Section 6 explicitly forbids a second
+implementation for the CSV importer's free-typed phone numbers, so the
+one real implementation moved to `packages/core/phone.py` (packages/core
+never imports from services/*, so the promotion is also the only
+architecturally correct fix, not just deduplication) and all four call
+sites plus its test were repointed. Byte-for-byte identical logic,
+proven by re-running its own existing unit tests unchanged.
+
+**Real risks proven, not assumed**: fan-out to many simultaneous
+delivery-node connections on one queue was already proven at 1,000
+sockets (`test_gateway_fanout.py` — Bingo's own, but the same
+`FanoutHub`-shaped concern) and no-double-claim correctness at 1,000-way
+concurrent contention (`test_concurrent_claims_never_double_claim_the_
+same_message`) before this pass ever started; new to this pass:
+concurrent CSV uploads sharing one idempotency key create exactly one
+job (`asyncio.gather`, two real pooled connections, not sequential calls
+on one — the same distinction Phase 2's own claim-concurrency tests
+insist on), concurrent campaign starts never double-enqueue, and a
+malicious/oversized upload is rejected in bounded chunks
+(`_read_upload_bounded`) before ever fully materializing in memory, not
+just checked after the fact.
+
+**A real gap found and fixed along the way, not shipped**:
+`get_import_summary()`/`list_import_rows()` originally selected by bare
+job id with no tenant check at all — harmless today only because this
+deployment has never had a second real tenant, and directly
+contradicting this same feature's own documented invariant
+(`docs/SMS_CONTROL_PLANE.md`: "tenant_id is ... genuinely enforced in
+every query"). Fixed (both now require the caller's tenant_id and 404
+on a cross-tenant job id, exactly like a real IDOR defense should) and
+proven with a real cross-tenant regression test, not left as a
+should-be-fine assumption. Note for whoever eventually adds a second
+tenant for real: `GET /campaigns/{id}` and `GET /messages` (pre-existing,
+unrelated to this pass) have the identical latent gap and were
+deliberately not touched here — flagged, not silently expanded into an
+unrelated fix.
+
+**A real cross-test pollution bug this pass both hit and caused**:
+`test_sms_app.py`'s HTTP tests share one session-scoped `sms_server`
+fixture, and therefore one real, never-truncated 'default' tenant's
+message queue — already a known, accepted characteristic of this test
+file. This pass's first versions of both new node-claiming tests (the
+Bulk Import browser e2e test and `test_sms_csv_import_app.py`'s own full
+-delivery HTTP test) made it measurably worse in two different ways: the
+browser test clicked through to Start (creating a real queued message)
+but never drove that message to a terminal state and left
+`required_fleet_group` unset (any node eligible) — an orphaned,
+permanently-queued message a *different*, unrelated pre-existing HTTP
+test then picked up instead of its own, breaking that test. The HTTP
+test *did* scope `required_fleet_group` to a private, randomly-unique
+value, but that alone only stops *other* tests' default-fleet nodes from
+claiming *this* test's message — it does nothing to stop this test's own
+private-fleet node from claiming an older, still-queued message some
+*other* test left with `required_fleet_group=NULL` (any fleet eligible,
+including a private one), which is exactly what then happened to it.
+Fixed by giving both their own private fleet group **and** draining any
+stray any-fleet messages through the real node protocol immediately
+after registering that fleet's own node but *before* creating either
+test's own message (not just after) — the same complete-delivery
+discipline `test_sms_console_e2e.py`'s own comment already documents,
+applied to both the point *before* a message could be stolen and the
+point *after* the test's own message must not be left behind either. The
+handful of already-orphaned messages this caused in the shared dev
+database, plus a further ~17 pre-existing ones from `test_sms_app.py`'s
+own tests (unrelated to this
+pass, left `assigned` by tests that deliberately never report a result),
+were drained via the real node/claim/report-result protocol, never a
+raw `UPDATE` — the dev database was left in a real, verified clean state
+(zero non-terminal messages in the 'default' tenant), not just the new
+code's own leftovers.
+
+**Deployment**: `sms.arada.fun`'s DNS record does not exist yet —
+confirmed directly (a live external `host sms.arada.fun` from outside
+the production network returns `NXDOMAIN`; only `admin.arada.fun`
+currently resolves of the five configured subdomains). This is a
+one-time `cloudflared tunnel route dns jobingo sms.arada.fun` command
+against the real tunnel, requiring the production Cloudflare/server
+access this session does not hold and does not take on for a
+real-money-adjacent production system — handed to the user as an exact
+command rather than assumed done or attempted.
+
+**What's deliberately not built this pass** (on top of Phase 1/2's own
+already-documented list): background-job/resumable-progress streaming
+for imports beyond ~50,000 rows (a real, tested, documented limit, not
+a claim of the directive's own "1,000,000+" tier); SSE/WebSocket live
+campaign-progress updates (the existing polling-refresh dashboard
+pattern every other SMS screen already uses is what this pass extends,
+not a new live-transport layer); a dedicated import-history/audit
+screen (imports are fully auditable via `admin_audit_log` and
+`sms_import_rows` today, just not yet surfaced as their own console
+screen); CSV export of rejected rows (Section 7's "allow download" —
+deferred, and with it, formula-injection hardening for an export path
+that does not exist yet); and per-tenant configurable rate limits
+(today's limits — file size, row count, message segment length — are
+fixed module constants, documented in `packages/core/sms/csv_import.py`
+itself, not admin-configurable).
+
+**Verification**: mypy `--strict` clean (129 files, up from 126 —
+`packages/core/phone.py` and `packages/core/sms/csv_import.py` are new).
+Full suite: 1395 passed / 0 failed. SMS e2e standalone: 4 passed / 0
+failed (2 pre-existing, 2 new). 97 SMS-suite tests re-run clean after
+every fix in this entry, not just once at the end.

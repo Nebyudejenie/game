@@ -95,7 +95,7 @@ def phone_lookup_hash(plaintext_e164: str) -> str:
     hash, which is exactly what makes this safe to put a UNIQUE index on
     and query with `WHERE phone_lookup_hash = $1` without ever comparing
     ciphertext. Callers must pass an already-normalized E.164 string (see
-    services/bot/phone.py) -- this function does no normalization of its
+    packages/core/phone.py) -- this function does no normalization of its
     own, so "+251912345678" and "0912345678" hash differently even though
     they're the same number.
     """

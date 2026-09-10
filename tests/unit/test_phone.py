@@ -1,4 +1,4 @@
-from services.bot.phone import normalize_ethiopian_phone
+from packages.core.phone import normalize_ethiopian_phone
 
 
 def test_plus_251_format_accepted():

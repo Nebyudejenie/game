@@ -42,9 +42,9 @@ from dataclasses import dataclass
 
 import asyncpg
 
+from packages.core.phone import normalize_ethiopian_phone
 from packages.core.phone_crypto import decrypt_phone, encrypt_phone, phone_lookup_hash
 from services.bot.i18n import resolve_language
-from services.bot.phone import normalize_ethiopian_phone
 
 
 class ContactMismatch(Exception):

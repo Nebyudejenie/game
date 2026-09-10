@@ -20,8 +20,8 @@ from typing import Any, Awaitable, Callable
 
 import asyncpg
 
+from packages.core.phone import normalize_ethiopian_phone
 from services.admin.rbac import has_permission
-from services.bot.phone import normalize_ethiopian_phone
 
 _RESULT_LIMIT = 10
 
