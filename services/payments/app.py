@@ -26,8 +26,9 @@ from packages.core.config import get_settings
 from packages.core.db_pool import create_pool
 from packages.core.redis_conn import get_redis
 from packages.core.tracing import configure_tracing
-from services.payments import agent_auth, deposits
+from services.payments import agent_auth, deposits, device_registry
 from services.payments.chapa import ChapaProvider
+from services.payments.device_registry import DeviceIdentity
 from services.payments.provider import InvalidSignature
 from services.payments.telebirr_ingest import SOURCE_MACRODROID, ingest_sms_evidence
 from services.payments.withdrawals import PAYOUT_STREAM
@@ -71,39 +72,95 @@ class TelebirrIngestRequest(BaseModel):
     device_id: str
 
 
-def _check_macrodroid_token(authorization: str) -> None:
-    """A thin, single-purpose bearer check -- MacroDroid is a thin adapter
-    (section 114) with no financial logic of its own, so its only job here
-    is proving it's really our configured device before the real pipeline
-    (ingest_sms_evidence) ever sees the payload. hmac.compare_digest avoids
-    a timing side-channel on the comparison, same discipline packages/core/
-    telegram_auth.py already uses for the Telegram HMAC check.
-    """
-    settings = get_settings()
-    if not settings.macrodroid_ingest_token:
-        raise HTTPException(status_code=503, detail="telebirr ingestion is not configured")
+def _extract_bearer_token(authorization: str) -> str:
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="missing bearer token")
-    token = authorization[len("Bearer ") :]
-    if not hmac.compare_digest(token, settings.macrodroid_ingest_token):
-        raise HTTPException(status_code=401, detail="invalid bearer token")
+    return authorization[len("Bearer ") :]
+
+
+async def _authenticate_ingest_request(authorization: str) -> DeviceIdentity | None:
+    """Two credentials are accepted, checked strongest-first -- MacroDroid
+    is a thin adapter (section 114) with no financial logic of its own, so
+    its only job here is proving it's really a trusted device before the
+    real pipeline (ingest_sms_evidence) ever sees the payload:
+
+    1. A per-device token (services/admin/queries.py's
+       create_ingestion_device_admin, migrations/versions/e3a7c9f01b2d) --
+       the preferred credential going forward: identifies exactly which
+       phone this is, is independently revocable, and gets its own health
+       counters updated by the caller. Returns the resolved identity.
+    2. The legacy single shared settings.macrodroid_ingest_token -- kept
+       working exactly as before (same env var, same hmac.compare_digest
+       check, same 401/503 semantics) so a phone configured before this
+       device registry existed is never broken by its introduction.
+       Returns None (no specific device to attribute health counters to).
+
+    A token that matches a real but *revoked* device is never allowed to
+    silently fall through to the legacy check -- a revoked credential
+    must stay revoked even if a legacy shared token also happens to be
+    configured.
+    """
+    token = _extract_bearer_token(authorization)
+
+    auth_result = await device_registry.authenticate_device(app.state.pool, token)
+    if auth_result.identity is not None:
+        return auth_result.identity
+    if auth_result.revoked_device_pk is not None:
+        await device_registry.record_auth_failure(app.state.pool, device_pk=auth_result.revoked_device_pk)
+        raise HTTPException(status_code=401, detail="device revoked")
+
+    settings = get_settings()
+    if settings.macrodroid_ingest_token and hmac.compare_digest(token, settings.macrodroid_ingest_token):
+        return None
+
+    if not settings.macrodroid_ingest_token:
+        # Genuinely nothing configured (neither a legacy token nor any
+        # registered device) -- a server-side setup gap, not a bad
+        # credential; distinguished from the 401 below exactly the way
+        # this route always has, so an operator knows whether to check
+        # their own token or ask an admin to finish configuring the
+        # feature at all.
+        any_device_registered = await app.state.pool.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM ingestion_devices)"
+        )
+        if not any_device_registered:
+            raise HTTPException(status_code=503, detail="telebirr ingestion is not configured")
+    metrics.ingestion_device_auth_failures_total.labels(reason="unknown_token").inc()
+    raise HTTPException(status_code=401, detail="invalid bearer token")
 
 
 @app.post("/internal/telebirr/ingest")
 async def telebirr_ingest(
     body: TelebirrIngestRequest, authorization: Annotated[str, Header()] = ""
 ) -> dict[str, str | int | None]:
-    _check_macrodroid_token(authorization)
+    device = await _authenticate_ingest_request(authorization)
     if not body.raw_sms.strip():
         raise HTTPException(status_code=422, detail="raw_sms_required")
+
+    # A device's own registered device_id is authoritative once a
+    # per-device token authenticated the request -- the client-supplied
+    # body.device_id is never trusted as identity on its own (it's a
+    # label, not a secret; the bearer token is what was actually
+    # verified), only used as-is on the legacy shared-token path, where
+    # it always has been.
+    source_ref = device.device_id if device is not None else body.device_id
     outcome = await ingest_sms_evidence(
-        app.state.pool, raw_sms=body.raw_sms, source=SOURCE_MACRODROID, source_ref=body.device_id
+        app.state.pool, raw_sms=body.raw_sms, source=SOURCE_MACRODROID, source_ref=source_ref
     )
+    if device is not None:
+        await device_registry.record_ingestion_outcome(
+            app.state.pool,
+            device_pk=device.id,
+            device_id=device.device_id,
+            outcome_status=outcome.status,
+            reason=outcome.reason,
+        )
     return {
         "status": outcome.status,
         "evidence_id": outcome.evidence_id,
         "external_reference": outcome.external_reference,
         "reason": outcome.reason,
+        "device_name": device.device_name if device is not None else None,
     }
 
 

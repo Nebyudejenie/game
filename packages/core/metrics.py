@@ -130,6 +130,25 @@ telebirr_evidence_by_status = Gauge(
     ["status"],
 )
 
+# Per-device labels are safe cardinality here -- a real deployment has a
+# handful of dedicated Android phones, not an unbounded set of callers
+# (unlike, say, per-user metrics elsewhere in this codebase, which are
+# deliberately never labeled this way).
+ingestion_device_auth_failures_total = Counter(
+    "ingestion_device_auth_failures_total",
+    "Telebirr ingestion requests rejected at authentication, by reason "
+    "(unknown_token, revoked_device)",
+    ["reason"],
+)
+
+ingestion_device_last_success_timestamp = Gauge(
+    "ingestion_device_last_success_timestamp",
+    "Unix timestamp of a registered ingestion device's last successful SMS ingestion -- "
+    "an alerting rule can compare this against time() to detect a device that has gone "
+    "quiet (see docs/TELEBIRR_MACRODROID_QUICK_SETUP.md's 'PRIMARY INGESTION DEGRADED' section)",
+    ["device_id"],
+)
+
 notification_campaign_deliveries_total = Counter(
     "notification_campaign_deliveries_total",
     "Notification Center campaign deliveries by terminal outcome "

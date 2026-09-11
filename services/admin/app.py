@@ -1007,6 +1007,87 @@ async def set_payment_agent_active(
     return {"updated": updated}
 
 
+# --- Telebirr ingestion devices (automated Android/MacroDroid path) -------
+
+
+@app.get("/ingestion-devices")
+async def list_ingestion_devices(
+    admin: Annotated[AdminSession, Depends(require("payments:view"))],
+) -> list[dict[str, Any]]:
+    return await queries.list_ingestion_devices(app.state.pool)
+
+
+class CreateIngestionDeviceRequest(BaseModel):
+    device_id: str
+    device_name: str
+
+
+@app.post("/ingestion-devices")
+async def create_ingestion_device(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("payments:configure"))],
+    body: CreateIngestionDeviceRequest,
+) -> dict[str, Any]:
+    if not body.device_id.strip() or not body.device_name.strip():
+        raise HTTPException(status_code=422, detail="device_id_and_device_name_required")
+    try:
+        result = await queries.create_ingestion_device_admin(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            device_id=body.device_id.strip(),
+            device_name=body.device_name.strip(),
+            ip_address=_client_ip(request),
+        )
+    except queries.DeviceIdAlreadyRegistered as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # The token is shown exactly once, in this one response body -- this
+    # route never logs it (queries.create_ingestion_device_admin's own
+    # audit.record() call only ever writes device_id/device_name, never
+    # the token or its hash), and it is never again retrievable afterward,
+    # only rotated.
+    return result
+
+
+class SetIngestionDeviceStatusRequest(BaseModel):
+    status: str
+
+
+@app.patch("/ingestion-devices/{device_pk}")
+async def set_ingestion_device_status(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("payments:configure"))],
+    device_pk: int,
+    body: SetIngestionDeviceStatusRequest,
+) -> dict[str, bool]:
+    try:
+        updated = await queries.set_ingestion_device_status_admin(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            device_pk=device_pk,
+            status=body.status,
+            ip_address=_client_ip(request),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail="device not found")
+    return {"updated": updated}
+
+
+@app.post("/ingestion-devices/{device_pk}/rotate-token")
+async def rotate_ingestion_device_token(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("payments:configure"))],
+    device_pk: int,
+) -> dict[str, Any]:
+    result = await queries.rotate_ingestion_device_token_admin(
+        app.state.pool, admin_id=admin.admin_id, device_pk=device_pk, ip_address=_client_ip(request)
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="device not found")
+    return result
+
+
 # --- admin account management (superadmin-only -- see rbac.py's own
 # comment on admin_users:manage) -----------------------------------------
 

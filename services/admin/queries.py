@@ -19,6 +19,7 @@ import asyncpg
 from redis.asyncio import Redis
 
 from packages.core import bingo, ledger, metrics
+from packages.core.device_auth import generate_device_token, hash_device_token
 from packages.core.notifications import notify_user
 from packages.core.phone import normalize_ethiopian_phone
 from packages.core.phone_crypto import decrypt_phone, phone_lookup_hash
@@ -1445,6 +1446,158 @@ async def set_payment_agent_active_admin(
                 ip_address=ip_address,
             )
     return True
+
+
+# --- Telebirr ingestion devices (per-device credentials for the automated
+# Android/MacroDroid path, migrations/versions/e3a7c9f01b2d) -- gated at
+# the same payments:view/payments:configure levels as manual payment
+# destinations and payment agents just above: viewing a device's health
+# is a normal payments:view concern, but minting or revoking a credential
+# that can inject financial evidence into the pipeline is a
+# payments:configure (superadmin-only) action, same reasoning rbac.py's
+# own comment already gives for that permission. -----------------------
+
+
+class DeviceIdAlreadyRegistered(ValueError):
+    pass
+
+
+# How long a registered, still-active device can go without a successful
+# ingestion before the console calls it "degraded" rather than "healthy"
+# -- a plain documented constant, the same shape this codebase's other
+# "how long before we consider something possibly dead" thresholds
+# already take (services/payments/payout_worker.py's CLAIM_STALE_AFTER_MS).
+_DEVICE_DEGRADED_AFTER_HOURS = 6
+
+
+async def list_ingestion_devices(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+    rows = await pool.fetch(
+        """
+        SELECT id, device_id, device_name, status, created_at, last_seen_at, last_success_at,
+               last_error_at, last_error_reason, success_count, duplicate_count, failure_count,
+               auth_failure_count,
+               CASE
+                 WHEN status = 'revoked' THEN 'revoked'
+                 WHEN last_success_at IS NULL THEN 'awaiting_first_ingestion'
+                 WHEN last_success_at < now() - ($1 * interval '1 hour') THEN 'degraded'
+                 ELSE 'healthy'
+               END AS health
+        FROM ingestion_devices
+        ORDER BY id
+        """,
+        _DEVICE_DEGRADED_AFTER_HOURS,
+    )
+    return [dict(r) for r in rows]
+
+
+async def create_ingestion_device_admin(
+    pool: asyncpg.Pool, *, admin_id: int, device_id: str, device_name: str, ip_address: str | None
+) -> dict[str, Any]:
+    """Returns {id, device_id, token} -- the plaintext token is visible
+    exactly this once (packages/core/device_auth.py's own docstring);
+    only its SHA-256 hash is ever persisted. The admin must copy it into
+    the phone's MacroDroid configuration immediately -- a lost token has
+    no recovery path, only rotate_ingestion_device_token_admin below.
+    """
+    token = generate_device_token()
+    token_hash = hash_device_token(token)
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            try:
+                row = await conn.fetchrow(
+                    "INSERT INTO ingestion_devices (device_id, device_name, token_hash, created_by_admin_id) "
+                    "VALUES ($1, $2, $3, $4) RETURNING id",
+                    device_id,
+                    device_name,
+                    token_hash,
+                    admin_id,
+                )
+            except asyncpg.UniqueViolationError as exc:
+                raise DeviceIdAlreadyRegistered(f"device_id already registered: {device_id!r}") from exc
+            assert row is not None
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="ingestion_devices.create",
+                target_type="ingestion_device",
+                target_id=str(row["id"]),
+                after={"device_id": device_id, "device_name": device_name},
+                ip_address=ip_address,
+            )
+    return {"id": row["id"], "device_id": device_id, "token": token}
+
+
+async def set_ingestion_device_status_admin(
+    pool: asyncpg.Pool, *, admin_id: int, device_pk: int, status: str, ip_address: str | None
+) -> bool:
+    if status not in ("active", "revoked"):
+        raise ValueError(f"unknown device status: {status!r}")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            before = await conn.fetchrow(
+                "SELECT status FROM ingestion_devices WHERE id = $1 FOR UPDATE", device_pk
+            )
+            if before is None:
+                return False
+            if status == "revoked":
+                await conn.execute(
+                    "UPDATE ingestion_devices SET status = 'revoked', revoked_by_admin_id = $2, "
+                    "revoked_at = now() WHERE id = $1",
+                    device_pk,
+                    admin_id,
+                )
+            else:
+                await conn.execute(
+                    "UPDATE ingestion_devices SET status = 'active', revoked_by_admin_id = NULL, "
+                    "revoked_at = NULL WHERE id = $1",
+                    device_pk,
+                )
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="ingestion_devices.set_status",
+                target_type="ingestion_device",
+                target_id=str(device_pk),
+                before={"status": before["status"]},
+                after={"status": status},
+                ip_address=ip_address,
+            )
+    return True
+
+
+async def rotate_ingestion_device_token_admin(
+    pool: asyncpg.Pool, *, admin_id: int, device_pk: int, ip_address: str | None
+) -> dict[str, Any] | None:
+    """Returns {id, device_id, token} (the new plaintext token, shown once
+    -- same guarantee as create_ingestion_device_admin) or None if the
+    device doesn't exist. The OLD token stops working the instant this
+    commits: token_hash is overwritten, not appended to, so there is
+    never a window where both the old and new token are simultaneously
+    valid. Use when a device's token may have leaked, without needing to
+    also re-register the device under a new device_id (which would lose
+    its whole health-counter history).
+    """
+    token = generate_device_token()
+    token_hash = hash_device_token(token)
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT device_id FROM ingestion_devices WHERE id = $1 FOR UPDATE", device_pk
+            )
+            if row is None:
+                return None
+            await conn.execute(
+                "UPDATE ingestion_devices SET token_hash = $2 WHERE id = $1", device_pk, token_hash
+            )
+            await audit.record(
+                conn,
+                admin_id=admin_id,
+                action="ingestion_devices.rotate_token",
+                target_type="ingestion_device",
+                target_id=str(device_pk),
+                ip_address=ip_address,
+            )
+    return {"id": device_pk, "device_id": row["device_id"], "token": token}
 
 
 # --- admin account management (services/admin/auth.py's own docstring

@@ -5,6 +5,31 @@ system, see `docs/TELEBIRR_SMS_OPERATIONS_GUIDE.md`. Give this page to
 the technician setting up the dedicated payment phone; nothing else is
 required for that specific job.
 
+## Which credential do I use?
+
+Two credentials work against the exact same URL and JSON body — pick
+the one that matches your situation, both send evidence into the same
+pipeline and show up identically on the admin console's Telebirr
+Evidence screen:
+
+- **A per-device token (recommended for every new phone).** Each phone
+  gets its own, independently revocable credential, and the admin
+  console's **Ingestion Devices** screen shows that phone's own health
+  (last seen, last successful ingestion, success/failure/duplicate
+  counts) — the only way to answer "is *this specific* phone still
+  working" once more than one exists. Get one from an admin (Ingestion
+  Devices screen → Register a device) before Step 2 below.
+- **The legacy shared token** (`MACRODROID_INGEST_TOKEN`). Still fully
+  supported — an already-configured phone from before per-device tokens
+  existed keeps working with zero changes. Fine for a single-phone setup
+  where per-device health tracking doesn't matter yet, but every phone
+  sharing this one token is indistinguishable from every other on the
+  admin console, and revoking it (a suspected leak) breaks every phone
+  using it at once, not just one.
+
+Everything below applies identically either way — only the Authorization
+header's value differs (Step 2).
+
 ## Before you start, you need
 
 - [ ] A dedicated Android phone (this phone's only job is receiving
@@ -18,9 +43,9 @@ required for that specific job.
       (DNS, Cloudflare Tunnel, Traefik, the real payments service),
       confirmed 2026-09-05 with real external requests: missing token →
       401, wrong token → 401, malformed body → 422.
-- [ ] The real `MACRODROID_INGEST_TOKEN` value (get this from an admin —
-      it is a secret, never write it anywhere other than this one macro's
-      configuration). Confirmed configured in production as of 2026-09-05.
+- [ ] Either credential from "Which credential do I use?" above — it is a
+      secret either way, never write it anywhere other than this one
+      macro's configuration.
 
 ## Step 1 — Prepare the phone
 
@@ -68,12 +93,16 @@ MacroDroid
           → Method: POST
           → URL: https://payments.arada.fun/internal/telebirr/ingest
           → Headers (add two):
-              Authorization  =  Bearer <MACRODROID_INGEST_TOKEN>
+              Authorization  =  Bearer <your token — the device token from
+                                 Ingestion Devices, or the legacy
+                                 MACRODROID_INGEST_TOKEN>
               Content-Type   =  application/json
           → Body: switch to raw/JSON mode, enter exactly:
               {
                 "raw_sms": "[sms_message]",
-                "device_id": "<pick a fixed name for this phone, e.g. shop-till-android>"
+                "device_id": "<the exact device_id you registered in Ingestion
+                               Devices, or any fixed name if using the legacy
+                               shared token, e.g. shop-till-android>"
               }
           → (optional) enable "Store response in variable" so you can see
             the result in MacroDroid's own log
@@ -82,6 +111,12 @@ MacroDroid
   → Save Macro
   → make sure the toggle at the top of the macro is ON
 ```
+
+If you're using a per-device token, the `device_id` in the JSON body is
+informational only — the server identifies the phone from the token
+itself, not from this field, so a mismatch or typo here doesn't break
+anything. Still set it to the real registered device_id for clarity in
+the phone's own MacroDroid log.
 
 `[sms_message]` is MacroDroid's own built-in variable that holds the
 complete text of whatever SMS just triggered the macro — select it from
@@ -111,8 +146,9 @@ own verification. Sending anything less will fail.
 | HTTP 200, `"status": "ingested_rejected"` | The SMS parsed fine, but its recipient doesn't match the configured Arada Bingo account. | Tell an admin — likely the recipient isn't configured yet, or this SMS is for a different account entirely. |
 | HTTP 200, `"status": "duplicate"` | This exact SMS was already ingested. | Nothing — this is safe and expected if the macro somehow fires twice for one message. |
 | HTTP 200, `"status": "unparseable"` | The server couldn't read a reference from this message at all. | Check the SMS is a real Telebirr payment confirmation, not something else that happened to contain the trigger phrase. |
-| HTTP 401 | Wrong or missing bearer token. | Double check the `Authorization` header value for typos/extra spaces; confirm the token hasn't been rotated (ask an admin). |
-| HTTP 503 | The server isn't configured to accept ingestion right now. | Tell an admin — this is a server-side configuration issue, not something fixable on the phone. |
+| HTTP 401, `"invalid bearer token"` | Wrong or missing bearer token. | Double check the `Authorization` header value for typos/extra spaces; confirm the token hasn't been rotated (ask an admin). |
+| HTTP 401, `"device revoked"` | This device's own token was intentionally revoked in the admin console (Ingestion Devices screen). | Tell an admin — either this was deliberate (the phone was decommissioned) or a mistake; either way a new token must be issued to resume. |
+| HTTP 503 | The server isn't configured to accept ingestion right now (no device registered and no legacy token configured). | Tell an admin — this is a server-side configuration issue, not something fixable on the phone. |
 | No response / timeout | Network issue on the phone, or the server is unreachable. | Check the phone's own internet connection first; if that's fine, tell whoever manages deployment the server may be down. |
 
 ## Retry on a failed request
@@ -157,6 +193,33 @@ loses power or restarts" — a phone that silently stopped forwarding SMS
 after a reboot is indistinguishable from a working one until someone
 checks.
 
+## PRIMARY INGESTION DEGRADED
+
+This is now the **primary** ingestion path once a device is set up — the
+Telegram payment-agent flow (an authorized Telegram account pasting SMS
+text directly to the bot) is the fallback if this phone goes down, not
+the other way around.
+
+If a registered device's admin-console row (Ingestion Devices screen)
+shows **degraded** — active, but no successful ingestion in the last few
+hours — that means either this phone stopped forwarding SMS (dead
+battery, lost signal, MacroDroid killed by battery optimization, a
+reboot the macro didn't survive) or genuinely no real Telebirr SMS has
+arrived in that window. It does **not** mean payments have stopped being
+accepted: the Telegram payment-agent path keeps working independently
+and is not affected by this phone's state at all. An admin/finance
+operator seeing "degraded":
+
+1. Check whether real Telebirr transactions are expected to have
+   happened in that window at all (no traffic isn't the same as broken).
+2. If transactions are expected, physically check the phone: charging,
+   has signal, MacroDroid's own log shows the macro firing.
+3. Walk this doc's own "Reboot survival" checklist below if the phone
+   was recently restarted.
+4. Confirm the Telegram payment-agent path remains available as a
+   fallback while this is investigated — no player-facing outage exists
+   purely because one phone went quiet.
+
 ## Ongoing care
 
 - Keep the phone charging at all times.
@@ -168,5 +231,9 @@ checks.
 - If the phone will be replaced or the SIM moved to a new device, repeat
   this entire guide on the new phone before decommissioning the old one.
 - If the phone is lost or the token may have leaked, **stop** — do not
-  keep using the old macro. Tell an admin immediately so the token can be
-  rotated (see the main operations guide, §4).
+  keep using the old macro. Tell an admin immediately: for a per-device
+  token, they can rotate it from the Ingestion Devices screen (the old
+  token stops working the instant they do, no need to re-register the
+  device from scratch) or revoke it outright if the phone is being
+  decommissioned; for the legacy shared token, see the main operations
+  guide, §4 — rotating it affects every phone still using it.

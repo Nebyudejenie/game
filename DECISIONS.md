@@ -11599,3 +11599,135 @@ itself, not admin-configurable).
 Full suite: 1395 passed / 0 failed. SMS e2e standalone: 4 passed / 0
 failed (2 pre-existing, 2 new). 97 SMS-suite tests re-run clean after
 every fix in this entry, not just once at the end.
+
+## 2026-09-11 — Automated Android/MacroDroid Telebirr ingestion: per-device credentials as a second door into the same pipeline, plus a real concurrency bug the new tests caught
+
+A directive asked for the existing MacroDroid ingestion route (a single
+shared `MACRODROID_INGEST_TOKEN`, live since 2026-09-04 but never
+successfully validated end-to-end against a real phone — see this
+session's own MacroDroid debugging history) to become the **primary**,
+hands-free ingestion path, with per-device authentication, health
+tracking, admin management, and a controlled-rollout guarantee that
+nothing about the existing manual/Telegram-agent path or the existing
+`ingest_sms_evidence()` business logic changes. Same discipline every
+oversized directive this session has gotten: read the real code first
+(services/payments/telebirr_ingest.py, telebirr_parser.py,
+telebirr_redemption.py, availability.py, services/gateway/app.py's
+redeem route, rbac.py, payout_worker.py, the existing Payment Agents
+admin screen) before deciding anything, then build the smallest design
+that satisfies the real requirement.
+
+**One canonical pipeline, a third thin adapter.** `ingest_sms_evidence()`
+remains the single place parsing/dedup/recipient-matching logic lives —
+this adds a new `services/payments/device_registry.py` (per-device
+token lookup + health counters) and extends the *existing*
+`POST /internal/telebirr/ingest` route's authentication rather than
+building a second endpoint: a per-device bearer token is tried first,
+falling back unchanged to the legacy shared token, so a phone configured
+before this landed needs zero changes. `payment_evidence.source` still
+just says `'macrodroid'` either way — which specific device sent it is a
+`ingestion_devices` join on `source_ref`, not a schema change to the
+evidence table itself. Migration `e3a7c9f01b2d` adds exactly one new
+table (`ingestion_devices`): device_id, device_name, a SHA-256
+`token_hash` (the plaintext token is generated with
+`secrets.token_urlsafe(32)`, shown to an admin exactly once, never
+persisted — `packages/core/device_auth.py`, deliberately a fast hash,
+not bcrypt, since a 256-bit random token has no dictionary-guessing risk
+the way a human password does and every single SMS ingestion would
+otherwise pay a slow-hash cost), status/revocation, and per-device
+success/duplicate/failure/auth-failure counters plus last-seen/last-
+success/last-error timestamps. Zero changes to `payment_evidence`,
+`payments`, `ledger_transactions`, or any redemption code.
+
+**A design decision made and not asked back to the user, per the
+directive's own instruction**: HMAC request signing (Part 4's other
+suggested option) was rejected in favor of a per-device static bearer
+token, because MacroDroid's HTTP Request action has no scripting/HMAC-
+computation capability without a paid add-on — a signing scheme the
+actual client can't produce isn't "more secure," it's undeployable.
+
+**A real gap checked and found to already be closed, not assumed**: the
+directive repeatedly demanded the `telebirr_sms` provider kill switch
+(`payment_provider_availability`) gate the new path. Grepping the
+existing redemption code first showed `ingest_sms_evidence()` itself
+never checks it — but `services/gateway/app.py`'s
+`POST /api/wallet/deposits/telebirr/redeem` (the only real caller of
+`redeem_evidence()`) already does, checked before this session's changes
+started and confirmed by an existing, unmodified test
+(`test_redeem_endpoint_is_disabled_by_default`). Evidence can be
+ingested from any source while the switch is off (harmless — no ledger
+entry exists until redemption), but redemption of it stays blocked
+exactly as designed regardless of which adapter produced the evidence. A
+new test (`test_redemption_kill_switch_blocks_evidence_from_the_device_
+path_too`) proves this holds for the new device path specifically,
+without touching `telebirr_redemption.py` at all.
+
+**A real, pre-existing concurrency bug, found by the exact test the
+directive asked for ("two identical requests arriving simultaneously
+must remain safe") and fixed, not worked around**: `payment_evidence`
+has two independent UNIQUE constraints (`external_reference` and
+`evidence_hash`), but the INSERT's `ON CONFLICT (external_reference) DO
+NOTHING` only names one of them. Two genuinely concurrent HTTP requests
+carrying the byte-identical SMS raced past the named-conflict guard and
+crashed with an unhandled `asyncpg.UniqueViolationError` on
+`evidence_hash` instead of resolving to a clean duplicate outcome — this
+predates today's change entirely (the legacy shared-token route has
+always been exposed to it; the existing test suite just never happened
+to submit two identical requests in true parallel, only sequentially).
+Fixed by isolating the INSERT in its own nested transaction (asyncpg
+promotes a `conn.transaction()` opened while already inside one to a
+real `SAVEPOINT`) and catching the violation there, falling through to
+the exact same existing "look the row up by external_reference and
+classify duplicate vs. conflicting" logic that already handles the
+named-constraint case. A three-line, fully isolated fix
+(`services/payments/telebirr_ingest.py`) — no change to any other
+ingestion behavior.
+
+**Admin console**: a new **Ingestion Devices** screen
+(`web/admin/js/screens/ingestion_devices.js`), gated at the exact same
+`payments:view`/`payments:configure` levels the existing Payment
+Destinations/Payment Agents screens already use (no new RBAC
+permissions needed) — register a device (token shown once, matching
+admin_users.js's own TOTP-secret-reveal pattern), see per-device health
+(`healthy` / `degraded` / `awaiting_first_ingestion` / `revoked`,
+computed server-side from a plain 6-hour-since-last-success constant,
+the same "just a documented threshold" shape payout_worker.py's
+`CLAIM_STALE_AFTER_MS` already uses), revoke, and rotate a token
+(old one stops working the instant the new one is issued — no dual-
+valid window).
+
+**Observability, deliberately not over-built**: two new Prometheus
+metrics (`ingestion_device_auth_failures_total`,
+`ingestion_device_last_success_timestamp`), and one new periodic sweep
+in the existing `payout_worker.py` process (`check_for_degraded_
+devices`, joining the six sweeps already running there) that only ever
+writes a structured log warning — existing log-based ops tooling can
+already alert on it. Deliberately **not** built: a new Telegram-to-admin
+alerting channel (the directive's own Part 15 offered this as optional;
+the Notification Center that exists today targets players, not ops
+staff, and repurposing it for operational alerts is a separately-scoped
+feature, not a few lines of glue like the Notification Center tie-in
+other features here have used).
+
+**What stayed exactly as it was, verified rather than assumed**:
+`ingest_sms_evidence()`, `telebirr_parser.py`, `telebirr_redemption.py`,
+the Telegram payment-agent flow (`on_agent_sms`), the legacy shared-token
+MacroDroid route's request/response contract, and every existing RBAC
+permission — nothing new was added to `rbac.py` at all, this reuses
+`payments:view`/`payments:configure` exactly as the Payment Agents and
+Manual Payment Destinations screens already do.
+
+**Verification**: mypy `--strict` clean across every changed/new file.
+Targeted suite (telebirr ingest/redemption/reconcile, admin telebirr,
+gateway telebirr, agent portal, parser, plus this feature's own 18 new
+tests across `tests/integration/test_ingestion_devices.py` and
+`tests/unit/test_device_auth.py`): 104 passed / 0 failed. Full suite:
+**1413 passed / 0 failed** (1395 pre-existing + 18 new, zero
+regressions). A real migration upgrade → downgrade → upgrade cycle run
+against a live Postgres, not just read for correctness.
+
+**Left exactly where the directive asked**: `payment_provider_
+availability.telebirr_sms` stays disabled in every environment this
+session touched — this feature does not enable it, and nothing here
+should be read as clearance to flip it on before a real, controlled
+end-to-end test with an actual phone.

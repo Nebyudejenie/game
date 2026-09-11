@@ -10,6 +10,7 @@ import * as manualWithdrawalsScreen from "./screens/manual_withdrawals.js";
 import * as paymentDestinationsScreen from "./screens/payment_destinations.js";
 import * as telebirrEvidenceScreen from "./screens/telebirr_evidence.js";
 import * as paymentAgentsScreen from "./screens/payment_agents.js";
+import * as ingestionDevicesScreen from "./screens/ingestion_devices.js";
 import * as providerAvailabilityScreen from "./screens/provider_availability.js";
 import * as roundsScreen from "./screens/rounds.js";
 import * as roomsScreen from "./screens/rooms.js";
@@ -35,6 +36,7 @@ const SCREENS = {
   payment_destinations: paymentDestinationsScreen,
   telebirr_evidence: telebirrEvidenceScreen,
   payment_agents: paymentAgentsScreen,
+  ingestion_devices: ingestionDevicesScreen,
   provider_availability: providerAvailabilityScreen,
   rounds: roundsScreen,
   rooms: roomsScreen,

@@ -189,36 +189,60 @@ async def _ingest_sms_evidence_impl(
             initial_status = "available" if recipient_ok else "rejected"
             reject_reason = None if recipient_ok else "recipient_not_recognized"
 
-            inserted = await conn.fetchrow(
-                """
-                INSERT INTO payment_evidence
-                    (source, source_ref, raw_sms, evidence_hash, external_reference, raw_reference,
-                     amount, fee, vat, payer_name, payer_phone, recipient_name, recipient_phone,
-                     receipt_url, direction, transaction_at, status, reject_reason, parser_version)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
-                ON CONFLICT (external_reference) DO NOTHING
-                RETURNING id
-                """,
-                source,
-                source_ref,
-                raw_sms,
-                evidence_hash,
-                parsed.external_reference,
-                parsed.raw_reference,
-                parsed.amount,
-                parsed.fee,
-                parsed.vat,
-                parsed.payer_name,
-                parsed.payer_phone,
-                parsed.recipient_name,
-                parsed.recipient_phone,
-                parsed.receipt_url,
-                parsed.direction,
-                parsed.transaction_at,
-                initial_status,
-                reject_reason,
-                PARSER_VERSION,
-            )
+            # Two real concurrent submissions of the byte-identical message
+            # (a MacroDroid retry racing the original request, or the same
+            # SMS arriving through two different ingestion sources at once)
+            # can both reach this INSERT before either commits. ON CONFLICT
+            # only names external_reference, but evidence_hash carries its
+            # own separate UNIQUE constraint -- Postgres raises a real,
+            # unhandled UniqueViolationError on THAT constraint before it
+            # ever gets to apply the named conflict target, so this must be
+            # caught too, not just the named-constraint path. Isolated in
+            # its own nested transaction (asyncpg promotes this to a real
+            # SAVEPOINT since a transaction is already open) so the failed
+            # INSERT can be rolled back without aborting the whole
+            # surrounding transaction the fallback lookup below still needs
+            # to run in.
+            try:
+                async with conn.transaction():
+                    inserted = await conn.fetchrow(
+                        """
+                        INSERT INTO payment_evidence
+                            (source, source_ref, raw_sms, evidence_hash, external_reference, raw_reference,
+                             amount, fee, vat, payer_name, payer_phone, recipient_name, recipient_phone,
+                             receipt_url, direction, transaction_at, status, reject_reason, parser_version)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+                        ON CONFLICT (external_reference) DO NOTHING
+                        RETURNING id
+                        """,
+                        source,
+                        source_ref,
+                        raw_sms,
+                        evidence_hash,
+                        parsed.external_reference,
+                        parsed.raw_reference,
+                        parsed.amount,
+                        parsed.fee,
+                        parsed.vat,
+                        parsed.payer_name,
+                        parsed.payer_phone,
+                        parsed.recipient_name,
+                        parsed.recipient_phone,
+                        parsed.receipt_url,
+                        parsed.direction,
+                        parsed.transaction_at,
+                        initial_status,
+                        reject_reason,
+                        PARSER_VERSION,
+                    )
+            except asyncpg.UniqueViolationError:
+                # A real SHA-256 collision on evidence_hash can only mean
+                # the exact same message was already inserted by whichever
+                # concurrent request won the race -- which necessarily
+                # carries the exact same external_reference, so the
+                # fallback lookup below (keyed on external_reference) finds
+                # it correctly regardless of which unique constraint fired.
+                inserted = None
 
             if inserted is not None:
                 logger.info(

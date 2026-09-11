@@ -56,6 +56,7 @@ from packages.core.redis_conn import get_redis
 from services.payments.bonus_sweep import sweep_bonus_wagering
 from services.payments.chapa import ChapaProvider
 from services.payments.deposits import poll_pending_deposits, run_provider_reconciliation
+from services.payments.device_registry import check_for_degraded_devices
 from services.payments.ledger_reconcile_sweep import sweep_ledger_reconciliation
 from services.payments.telebirr_reconcile import run_telebirr_reconciliation
 from services.payments.provider import PaymentProvider
@@ -414,6 +415,11 @@ WITHDRAWAL_SWEEP_INTERVAL_SECONDS = 60
 # rather than as an external cron job like packages/core/reconcile_job.py.
 PROVIDER_RECONCILE_INTERVAL_SECONDS = 3600
 BONUS_SWEEP_INTERVAL_SECONDS = 60
+# Cheap (one indexed query, no external calls) and purely observational
+# (structured-log only, see device_registry.check_for_degraded_devices's
+# own docstring) -- a short interval costs nothing and gets a real
+# operator to the "PRIMARY INGESTION DEGRADED" signal faster.
+DEVICE_HEALTH_SWEEP_INTERVAL_SECONDS = 300
 # Same cadence as the two provider-level reconciliation sweeps above --
 # reconciliation as a job class already has an established interval in
 # this codebase; reusing it rather than inventing a new number.
@@ -451,14 +457,17 @@ async def main_async() -> None:
     (the same hourly cadence, CTO directive sections 124-127),
     bonus_sweep.py's sweep_bonus_wagering() (the only thing that ever
     converts a sticky bonus grant into real cash, or expires an unwagered
-    one -- see packages/core/bonuses.py's own module docstring), and
+    one -- see packages/core/bonuses.py's own module docstring),
     ledger_reconcile_sweep.py's sweep_ledger_reconciliation() (the ledger-
     level "cached balance equals sum of ledger entries" check --
     packages/core/reconcile_job.py already built and tested this exact
     comparison as a standalone CLI, but never had a real scheduler; this
     reuses its comparison logic from a process that already runs on a
-    timer, instead of standing up a new one). All seven share one
-    process/provider rather than separate ones since none of them
+    timer, instead of standing up a new one), and device_registry.py's
+    check_for_degraded_devices() (the automated Telebirr ingestion
+    devices' own "has this phone gone quiet" signal -- purely a
+    structured log warning, never a financial action). All eight share
+    one process/provider rather than separate ones since none of them
     individually justifies its own container, and all are already
     designed to be safe under concurrent, independent invocation.
     """
@@ -518,6 +527,13 @@ async def main_async() -> None:
                 "sweep_ledger_reconciliation",
                 LEDGER_RECONCILE_INTERVAL_SECONDS,
                 lambda: sweep_ledger_reconciliation(pool),
+            )
+        ),
+        asyncio.create_task(
+            _run_periodic_sweep(
+                "check_for_degraded_devices",
+                DEVICE_HEALTH_SWEEP_INTERVAL_SECONDS,
+                lambda: check_for_degraded_devices(pool),
             )
         ),
     ]
