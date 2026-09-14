@@ -362,6 +362,7 @@
   padding: 12px 14px;
   border: 1.5px solid var(--accent);
   border-radius: var(--radius);
+  background: var(--surface); /* plain fallback for WebViews without color-mix() support */
   background: color-mix(in srgb, var(--accent) 8%, var(--bg));
   margin-bottom: 14px;
 }

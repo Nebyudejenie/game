@@ -1193,6 +1193,12 @@ async function applyPaymentAvailability() {
         el("deposit-telebirr-section").classList.remove("hidden");
         el("deposit-manual-section").classList.add("hidden");
         el("deposit-manual-toggle-btn").classList.toggle("hidden", !depositHasManual);
+        // Nothing to go "back" to -- Telebirr is the permanent default
+        // page here (Chapa is off, and Manual is hidden per the product
+        // decision above), not something reached by toggling away from
+        // another section, so a "Back" button pointing nowhere real
+        // would just be clutter on what's meant to be one clean page.
+        el("deposit-telebirr-back-btn").classList.add("hidden");
         if (!telebirrDestinationLoaded) {
           telebirrDestinationLoaded = true;
           await loadTelebirrDestination();
