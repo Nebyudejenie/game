@@ -128,6 +128,30 @@ async def test_deposit_flow_opens_a_checkout_link(gateway_server, browser, pool,
         gateway_app.state.chapa = original_provider
 
 
+async def test_deposit_deep_link_lands_directly_on_the_deposit_tab(gateway_server, browser):
+    # Real bug (2026-09-14): Telegram's client does not leave a web_app
+    # button's URL fragment alone -- opening one appends the client's own
+    # init-data params to it with "&" rather than replacing it, so the
+    # hash a player's browser actually sees is
+    # "#deposit&tgWebAppData=...&tgWebAppVersion=...&tgWebAppPlatform=..."
+    # -- never the bare "#deposit" that
+    # services/bot/keyboards.py::open_wallet_keyboard sends. An earlier
+    # version of app.v6.js's boot() checked `location.hash === "#deposit"`
+    # exactly, which silently never matched inside real Telegram (only in
+    # a plain browser tab with no client appending anything), so the
+    # deep link landed players back on the plain rooms/lobby screen
+    # instead of the wallet's Deposit tab. This drives a real Chromium
+    # tab at that exact real-shape URL to prove the fix holds.
+    telegram_id = next_telegram_id()
+    page, console_errors = await prepare_page(browser, telegram_id)
+    http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+    await page.goto(http_base + "/#deposit&tgWebAppData=fake&tgWebAppVersion=8.0&tgWebAppPlatform=ios")
+    await page.wait_for_selector("#screen-wallet.active", timeout=10000)
+    await page.wait_for_selector("#wallet-pane-deposit:not(.hidden)", timeout=5000)
+    assert console_errors == [], f"JS errors during deep-link boot: {console_errors}"
+    await page.close()
+
+
 async def test_deposit_flow_shows_a_translated_error(gateway_server, browser, pool, conn):
     original_provider = gateway_app.state.chapa
     gateway_app.state.chapa = FakePaymentProvider()

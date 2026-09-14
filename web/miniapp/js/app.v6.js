@@ -1946,11 +1946,21 @@ async function boot() {
   // to the Mini App URL so tapping it lands the player directly on the
   // Deposit tab -- not on Balance with a further, easy-to-miss tap still
   // needed (real confusion this exact session spent hours untangling
-  // came from players never finding the right screen at all). Cleared
-  // immediately via replaceState so it can never re-trigger on an
-  // in-app reload or re-fire if the player later switches away and
+  // came from players never finding the right screen at all).
+  //
+  // Telegram's own client does NOT leave that fragment alone: opening a
+  // web_app button appends its own init-data params to the URL fragment
+  // with "&" rather than replacing it, so inside real Telegram this is
+  // "#deposit&tgWebAppData=...&tgWebAppVersion=...&tgWebAppPlatform=..."
+  // -- never a bare "#deposit" (that only happens testing this file
+  // directly in a plain browser tab). An exact-equality check against
+  // "#deposit" silently never matched in production; matching just the
+  // leading token is what actually works both places.
+  //
+  // Cleared immediately via replaceState so it can never re-trigger on
+  // an in-app reload or re-fire if the player later switches away and
   // Telegram's own Back button brings them back to this same screen.
-  if (location.hash === "#deposit") {
+  if (/^#deposit(&|$)/.test(location.hash)) {
     history.replaceState(null, "", location.pathname + location.search);
     await openWallet();
     switchToWalletTab("deposit");
