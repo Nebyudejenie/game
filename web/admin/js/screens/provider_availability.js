@@ -3,7 +3,16 @@ import { renderError, toast } from "../ui.js";
 
 export const label = "Provider Availability";
 
-const PROVIDERS = ["chapa", "santimpay", "arifpay", "manual"];
+// telebirr_sms added 2026-09-14 -- this list is hardcoded rather than
+// derived from the API response, and was never updated when telebirr_sms
+// was added to payment_provider_availability back on 2026-09-04 (real
+// production gap found live: the row existed and was correctly seeded
+// disabled the whole time, but no admin could ever see or toggle it
+// through this screen). telebirr_sms has no 'out' (withdrawal) row at
+// all -- toggling that cell cleanly 404s ("unknown provider/direction")
+// rather than silently doing nothing, so it's safe to list here even
+// though only its "in" column will ever actually reflect real state.
+const PROVIDERS = ["chapa", "santimpay", "arifpay", "manual", "telebirr_sms"];
 const DIRECTIONS = ["in", "out"];
 const DIRECTION_LABEL = { in: "Deposits", out: "Withdrawals" };
 

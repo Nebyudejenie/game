@@ -15,7 +15,7 @@ for the full narrative; this file is the quick-reference matrix.
 | **Ops** (admin role) | Admin console role | `admin_users.role = 'ops'` |
 | **Finance** (admin role) | Admin console role | `admin_users.role = 'finance'` |
 | **Superadmin** (admin role) | Admin console role, full access | `admin_users.role = 'superadmin'` |
-| **MacroDroid device** | Not a role — a bearer-token-authenticated HTTP caller | `MACRODROID_INGEST_TOKEN` (single shared secret today, §4/§24 of the ops guide) |
+| **MacroDroid device** | Not a role — a bearer-token-authenticated HTTP caller | Either a per-device token (`ingestion_devices` table, one per phone, admin-managed) or the legacy shared `MACRODROID_INGEST_TOKEN` — §4/§24 of the ops guide |
 
 ## Full capability matrix
 
@@ -29,6 +29,8 @@ for the full narrative; this file is the quick-reference matrix.
 | Resolve evidence status (`POST /telebirr-evidence/{id}/resolve`) | NO | NO | NO | NO | **YES** | **YES** |
 | List payment agents (`GET /payment-agents`) | NO | NO | **YES** | **YES** | **YES** | **YES** |
 | Create/deactivate payment agents (`POST`/`PATCH /payment-agents`) | NO | NO | NO | NO | NO | **YES** |
+| List ingestion devices + health (`GET /ingestion-devices`) | NO | NO | **YES** | **YES** | **YES** | **YES** |
+| Register/revoke/reactivate/rotate an ingestion device (`POST`/`PATCH /ingestion-devices/...`) | NO | NO | NO | NO | NO | **YES** |
 | List manual/Telebirr destinations (`GET /manual-payment-destinations`) | NO | NO | **YES** | **YES** | **YES** | **YES** |
 | Create/edit the recognized recipient (`POST`/`PATCH /manual-payment-destinations`) | NO | NO | NO | NO | NO | **YES** |
 | View provider availability (`GET /payment-provider-availability`) | NO | NO | **YES** | **YES** | **YES** | **YES** |
@@ -74,6 +76,11 @@ the real gate, not the UI.
   blast radius); a compromised account with `payments:configure` could
   redirect the whole rail. This mirrors the exact same reasoning already
   applied to the pre-existing manual-deposit-destination configuration.
+  Provisioning/revoking an ingestion device's credential (2026-09-11)
+  falls under the same lever for the same reason — a device token is
+  another way to inject evidence into the pipeline, same shape as adding
+  a payment agent, so it reuses the exact same permission rather than
+  growing a new one.
 - **Payment Agent is not an admin role at all**: an agent's only
   capability is *submitting evidence for review* — they cannot see other
   players' data, cannot approve their own submission, cannot configure

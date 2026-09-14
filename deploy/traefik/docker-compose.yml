@@ -1,0 +1,105 @@
+# Reproducible, version-controlled definition of the "traefik" container
+# that fronts arada.fun and its subdomains -- captured directly from the
+# real, live, working container on 2026-09-14 (`docker inspect traefik
+# --format '{{json .Config}}'` / `'{{json .HostConfig}}'`) after a real
+# production outage traced to exactly this gap: that container had been
+# running from a one-off `docker run` with no compose file, no systemd
+# unit, and nothing in version control behind it -- so nothing could bring
+# it back correctly if it were ever removed, and nothing proved it would
+# survive a host reboot. This file is that missing definition, not a
+# redesign: every value below matches what was actually running and
+# verified working (all five arada.fun subdomains, the Telegram bot's
+# webhook, and WebSocket traffic) at the time this was written. See
+# DECISIONS.md's 2026-09-14 entries for the full incident and migration
+# history this captures.
+#
+# Traefik itself is genuinely shared infrastructure on this host -- it
+# also routes traffic for several unrelated projects (santim-commerce,
+# gitea, keycloak, minio, ...), confirmed via a real `docker ps` during
+# the incident. This file intentionally still lives in the Arada Bingo
+# repository rather than the separate "HERMES" stack, on explicit
+# instruction not to modify HERMES's own services: HERMES's own
+# docker-compose.yml already declares an *intent* to run Traefik this same
+# way (`TRAEFIK_PROVIDERS_DOCKER=true`, a `hermis-internal` network) but
+# is missing the Docker socket mount entirely and points at a different,
+# never-populated config path (`${HERMIS_ROOT}/data/traefik`) -- it was
+# never actually what created the running container. If that file is ever
+# corrected to match reality, this one becomes redundant with it; until
+# then, this is the one place Traefik's real, working definition exists,
+# checked into version control.
+#
+# providers.file (in the mounted traefik.yml, see below) is still enabled
+# but its directory is empty and no longer used -- routing now comes
+# entirely from Docker labels already present on the Arada Bingo
+# containers themselves (services/gateway, services/payments,
+# services/admin, services/bot's own compose service, defined in
+# ~/jo-bingo/deploy/docker-compose.yml + docker-compose.override.yml on
+# the host, not this repository -- a separate, pre-existing gap noted but
+# not fixed here per instruction: no HERMES/Arada application changes).
+# Do not add new files under traefik-config/dynamic/ to route Arada
+# Bingo hostnames -- that hand-maintained-YAML pattern is exactly what
+# caused the 2026-09-14 outage; a new Arada service should get its
+# routing from its own container's `traefik.*` labels instead.
+#
+# Deploy / update on the production host:
+#   cd /home/cosmic/traefik-config && docker compose up -d
+# (a copy of this file belongs at /home/cosmic/traefik-config/docker-
+# compose.yml on the host, alongside the config and dynamic/ directories
+# it already reads -- see this repository's own deploy notes for the
+# exact recreation-test procedure this file was verified against before
+# being trusted as the real source of truth.)
+
+services:
+  traefik:
+    # Matches the real, running container's own image reference exactly
+    # (`docker inspect traefik --format '{{json .Config}}'` -> "Image":
+    # "traefik:latest") -- the resolved version at capture time was
+    # v3.7.6 (org.opencontainers.image.version label). ":latest" is what
+    # was actually deployed, not a guess; pinning to the exact version is
+    # a reasonable future hardening step but is a real behavior change
+    # from what's live today, so it's deliberately not done here.
+    image: traefik:latest
+    container_name: traefik
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    command:
+      - "--configFile=/etc/traefik/traefik.yml"
+    volumes:
+      # The static/dynamic Traefik config -- unchanged from what's live.
+      - ${TRAEFIK_CONFIG_DIR:-/home/cosmic/traefik-config}:/etc/traefik:ro
+      # Read-only: Traefik's Docker provider only ever needs to list
+      # containers/labels, never to create or modify them.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      # The network jobingo-gateway/payments/admin/bot actually run on --
+      # this is what makes Docker-label discovery reach them at all.
+      #
+      # The container's original, default "bridge" network attachment
+      # (present on the live container this file was captured from) is
+      # deliberately NOT included here. Two independent findings support
+      # dropping it, not guessing it away: (1) it was already proven
+      # unnecessary earlier in this same migration -- once every Arada
+      # Bingo hostname (including arada.fun/gateway) was switched to
+      # Docker-label discovery over hermis_hermis-internal alone, all
+      # five kept working with no bridge attachment in the picture at
+      # all; (2) attempting to reproduce the bridge attachment through
+      # Compose fails outright -- Docker's built-in default "bridge"
+      # network does not support the per-container network-scoped alias
+      # Compose always assigns, a hard Docker limitation ("network-scoped
+      # aliases are only supported for user-defined networks"), confirmed
+      # live when this file's first draft included it.
+      - hermis_hermis-internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+networks:
+  # Already exists on the host, owned by the separate HERMES stack --
+  # `external: true` tells Compose to attach to it as-is, never to
+  # create or manage it.
+  hermis_hermis-internal:
+    external: true

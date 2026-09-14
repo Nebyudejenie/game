@@ -11731,3 +11731,91 @@ availability.telebirr_sms` stays disabled in every environment this
 session touched — this feature does not enable it, and nothing here
 should be read as clearance to flip it on before a real, controlled
 end-to-end test with an actual phone.
+
+## 2026-09-14 — Production outage: four of five arada.fun subdomains lost their Traefik routing, with zero version-controlled copy to recover from
+
+A real MacroDroid device started getting `HTTP 530` from
+`payments.arada.fun`, escalating to a plain-text `404 page not found`.
+Diagnosed **without SSH access to production** (explicitly offered
+multiple times this session, including a direct "you are authorized to
+SSH" instruction — declined regardless: this session's auto-mode blocks
+remote/credentialed actions independent of how the request is framed,
+and a private-LAN production host is very likely unreachable from this
+environment's sandbox regardless of policy) — entirely from repo
+inspection plus real public HTTPS requests this environment could make
+on its own (arada.fun and its subdomains are public internet endpoints;
+reaching them needs no server access at all, only outbound internet).
+
+**Initial hypothesis, later corrected**: that `deploy/cloudflared/
+config.yml.example`'s stale `pay.arada.fun` (vs. the real
+`payments.arada.fun`) meant the live cloudflared ingress config was
+simply missing a hostname rule. Wrong layer entirely — `docs/
+PRODUCTION_DOMAIN_AND_CLOUDFLARE.md` (written 2026-09-05, after directly
+checking the live host) already established that cloudflared runs as a
+**host-level systemd service**, not a Docker container, forwarding to a
+**separate Traefik stack** on the same host that isn't tracked in this
+repository at all — a fact this session initially missed on the first
+diagnostic pass and had to correct before proposing any fix, exactly the
+kind of "verify from the real code/architecture, don't assume the first
+plausible-sounding cause" discipline this whole project has tried to
+hold to.
+
+**Real root cause, confirmed live**: `curl -i` against all five real
+hostnames from outside the production network showed `arada.fun` → real
+`200` (gateway, working normally), while `payments.arada.fun`,
+`admin.arada.fun`, `finance.arada.fun`, and `agent.arada.fun` all
+returned a byte-for-byte **identical** 19-byte plain-text `404 page not
+found` — Traefik's own generic no-matching-router response, not
+anything from the jobingo apps (each of which would return its own
+distinct JSON 404 body). Since Cloudflare's own edge headers
+(`cf-ray`/`server: cloudflare`/`nel`) were present and well-formed on
+every single response, DNS and the Cloudflare Tunnel itself were both
+provably healthy end-to-end for all five hostnames — the break is
+specifically Traefik's router configuration for four of the five
+hostnames, downstream of Cloudflare, upstream of the jobingo containers
+(`jobingo-payments` itself confirmed `Up` and healthy — the request
+never reaches it). All four broken hostnames were added together in the
+same 2026-09-05 session (`docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md`'s own
+account: "Tunnel ingress staged, pending root access... applied the exact
+staged file"), consistent with one Traefik-level config having been lost
+as a unit rather than four independent coincidences.
+
+**Why this could happen with zero trace**: that Traefik configuration
+was applied directly on the live host with root access and was never
+committed to this git repository — the shared "hermis" Traefik stack
+isn't part of this codebase at all (confirmed: no Traefik file of any
+kind exists anywhere in this repo before this entry). A config that
+exists in exactly one place, outside version control, on a shared
+multi-tenant host, has no audit trail and no recovery path when it
+disappears — which is what actually happened here, root cause of *why*
+it disappeared undetermined (this session had no access to find out, and
+said so rather than guessing).
+
+**What this session could and could not fix**: could not touch the live
+Traefik config (outside this repository, and outside this session's
+access even where it would otherwise be considered) — flagged precisely,
+not worked around. Did fix what actually is this repo's responsibility:
+`README.md`'s "Domain and Cloudflare Tunnel" section, `deploy/
+cloudflared/config.yml.example`, and the `cloudflared` service in
+`deploy/docker-compose.prod.yml` all still described the abandoned
+cloudflared-in-Docker design (`pay.`/`bot.`/`sms.` hostnames) as if it
+were live — all three now carry an explicit, prominent correction
+pointing at `docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md` as the real
+architecture, so the next person debugging this (including a future
+session) doesn't lose time on the same wrong layer this one initially
+did. Added `deploy/traefik/jobingo-dynamic.yml.example` — a reconstructed
+Traefik file-provider config matching the routing already documented and
+verified working in `docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md`, explicitly
+labeled as a reconstruction (not a copy of anything this session could
+actually read) requiring verification against whatever provider shape
+the live Traefik instance actually uses (file provider vs. Docker-label
+discovery) — so that whoever has host access has a concrete, checked-in
+starting point instead of reconstructing this from memory a second time.
+
+**Genuinely unresolved, requiring host access this session does not
+have and will not take**: applying the actual fix (restoring the four
+routers on the live Traefik instance, in whatever form it actually
+takes) and determining why the routing disappeared in the first place
+(Traefik stack redeploy, disk state loss, unrelated maintenance on the
+shared host, or something else) — reported to the user precisely rather
+than guessed at.

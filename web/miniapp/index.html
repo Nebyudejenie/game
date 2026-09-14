@@ -371,8 +371,17 @@
         <button id="deposit-submit-btn" class="btn-primary" data-i18n="wallet.deposit_submit"></button>
         <p id="deposit-status" class="wallet-note"></p>
       </div>
+      <!-- Shown first and styled as the primary action whenever telebirr_sms
+           is available: it's the instant, no-review path, so a Telebirr
+           payer should land here before "Manual deposit" (always-review,
+           meant for the OTHER destinations in deposit-manual-destinations
+           -- bank transfers etc. -- not a redundant second way to submit
+           the exact same Telebirr payment). Ordered and styled this way
+           after a real live incident where players defaulted to Manual
+           for Telebirr payments purely because it was first and visually
+           equal-weighted; see DECISIONS.md, 2026-09-14. -->
+      <button type="button" id="deposit-telebirr-toggle-btn" class="btn-primary hidden" data-i18n="wallet.telebirr_deposit_toggle"></button>
       <button type="button" id="deposit-manual-toggle-btn" class="btn-secondary" data-i18n="wallet.manual_deposit_toggle"></button>
-      <button type="button" id="deposit-telebirr-toggle-btn" class="btn-secondary hidden" data-i18n="wallet.telebirr_deposit_toggle"></button>
 
       <div id="deposit-manual-section" class="hidden">
         <p class="wallet-note" data-i18n="wallet.manual_deposit_intro"></p>

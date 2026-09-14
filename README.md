@@ -231,6 +231,34 @@ ingress path onto a Proxmox VM with no public IP of its own.
 
 ### Domain and Cloudflare Tunnel
 
+**This section describes an aborted design, not what's actually
+deployed.** `docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md` confirmed directly
+against the live host on 2026-09-05 that the below (cloudflared running
+as one of this repo's own Docker containers, routing straight to each
+Compose service name) "was never actually implemented." **Read that file
+for the real architecture** before touching any tunnel/routing config —
+the summary: `cloudflared` runs as a **host-level systemd service**
+(outside Docker, outside this repo) forwarding into a **Traefik**
+instance from a separate, shared stack on the same host (also outside
+this repo), which does the real per-hostname routing. The real, live
+hostnames are `arada.fun`, `payments.arada.fun`, `agent.arada.fun`,
+`admin.arada.fun`, `finance.arada.fun` — not the `pay.`/`bot.`/`sms.`
+scheme this section originally described. `deploy/docker-compose.prod.
+yml`'s own `cloudflared` service and `deploy/cloudflared/config.yml.
+example` carry the same warning; neither reflects production traffic.
+
+**Why this matters operationally**: because that Traefik routing lives
+entirely outside git, a 2026-09-14 incident found all four of `payments`/
+`admin`/`finance`/`agent`'s routers had silently disappeared from the
+live host with zero version-controlled copy to recover from (`arada.fun`
+itself was unaffected — see `DECISIONS.md`'s entry from that date, and
+`deploy/traefik/jobingo-dynamic.yml.example`, a reconstructed reference
+of what that config should contain, added specifically so recovering
+from a repeat of this doesn't depend on tribal memory).
+
+<details>
+<summary>Original (superseded) design — kept for history, not as instructions</summary>
+
 This deploys to a local server (a Proxmox VM) with no public IP, reached
 through the domain **arada.fun** via a **Cloudflare Tunnel** — DNS and the
 tunnel are both managed through Cloudflare regardless of where the domain
@@ -276,6 +304,8 @@ same lifecycle as every other service in the stack, restarted automatically
 on failure (`restart: unless-stopped`), never profile-gated (unlike the
 dev compose file's optional observability services, this tunnel *is*
 production ingress, not an add-on).
+
+</details>
 
 **Verified against the real repo, not assumed:** a status-audit pass
 checked GitHub's own run history (`gh run list`) rather than trusting

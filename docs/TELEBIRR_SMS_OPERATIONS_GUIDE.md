@@ -44,7 +44,7 @@ flowchart TD
     B --> C[Telebirr SMS arrives]
     C --> D[MacroDroid]
     C --> E["Payment agent (manual, fallback path)"]
-    D -->|"HTTPS POST /internal/telebirr/ingest\nBearer MACRODROID_INGEST_TOKEN"| F[Ingestion pipeline]
+    D -->|"HTTPS POST /internal/telebirr/ingest\nBearer <per-device token or legacy shared token>"| F[Ingestion pipeline]
     E -->|"paste full SMS into private Telegram bot"| F
     F --> G["Parser (telebirr_parser.py)"]
     G --> H["Recipient validation\n(telebirr_ingest.py)"]
@@ -69,6 +69,7 @@ the exact same function, `ingest_sms_evidence()`.
 |---|---|---|
 | Android phone + SIM | Receives the real Telebirr SMS | (hardware, §3) |
 | MacroDroid | Forwards the complete SMS text over HTTPS | (device config, §3) |
+| Ingestion device registry | Per-device credential, revocation, health tracking (2026-09-11) | `services/payments/device_registry.py`, `ingestion_devices` table |
 | Telegram payment agent | Manual fallback: pastes the complete SMS into the bot | `services/bot/handlers.py` |
 | Ingestion pipeline | Parses, validates recipient, stores canonical record | `services/payments/telebirr_ingest.py` |
 | Parser | Extracts reference + exact amount (+ fee/VAT/recipient) | `services/payments/telebirr_parser.py` |
@@ -137,6 +138,9 @@ the *why* behind each step.
 ### 3.2 Preparation checklist
 
 ```text
+Register this phone as a device in the admin console, copy its
+  one-time token (§3.2a) -- do this BEFORE touching the phone
+  ↓
 Install SIM
   ↓
 Connect to internet (mobile data and/or Wi-Fi)
@@ -150,12 +154,37 @@ Disable battery optimization for MacroDroid
   ↓
 Enable background/auto-start permission (manufacturer-specific, see 3.1)
   ↓
-Configure the macro (§3.3)
+Configure the macro (§3.3), using the token from step 1
   ↓
 Send yourself a real or realistic-format test SMS
   ↓
 Confirm the payments service logged/stored the ingestion (§3.6, §15)
+  ↓
+Confirm the device's row in Ingestion Devices shows a real last_seen_at
 ```
+
+### 3.2a Registering the device (do this first, per phone)
+
+As of 2026-09-11, every new phone should get its **own** credential
+rather than reusing the legacy shared token (§4 explains why). In the
+admin console:
+
+1. Navigate to **Ingestion Devices** (nav bar).
+2. Fill in **Device id** — a fixed, unique, human-typable string for
+   this exact physical phone, e.g. `samsung-a15-shop-till`. This is a
+   *label*, not a secret (§4.1) — it can appear in logs freely.
+3. Fill in **Device name** — a human label for the console list, e.g.
+   `Shop till Android #1`.
+4. Click **Register device**. A panel shows the real bearer token
+   **exactly once** — copy it now into a temporary secure note. It
+   cannot be viewed again afterward (only rotated, §4.3).
+5. Use this exact token as the `Authorization: Bearer <token>` header
+   value in §3.3/3.4's macro, and this exact device id as the
+   `device_id` body field.
+
+Requires the `payments:configure` permission (superadmin only, same as
+every other payments-credential-provisioning action in this system —
+§6.1).
 
 ### 3.3 The macro
 
@@ -195,27 +224,34 @@ HTTP Request action:
   Method: POST
   URL:    https://<your-payments-domain>/internal/telebirr/ingest
   Headers:
-    Authorization: Bearer <MACRODROID_INGEST_TOKEN>
+    Authorization: Bearer <this device's token from §3.2a, or the
+                   legacy MACRODROID_INGEST_TOKEN -- §4>
     Content-Type: application/json
   Body (JSON):
     {
       "raw_sms": "[sms_message]",
-      "device_id": "<a fixed string identifying this phone>"
+      "device_id": "<this device's registered device_id from §3.2a,
+                     or any fixed string if using the legacy token>"
     }
   ↓
 Handle response:
   HTTP 200 → parse JSON, log "status" field
-  HTTP 401 → token wrong/missing (§4, §15)
+  HTTP 401 "invalid bearer token" → token wrong/missing (§4, §15)
+  HTTP 401 "device revoked" → this device's credential was revoked (§4.4, §15)
   HTTP 422 → raw_sms was empty (should not happen from a real trigger)
-  HTTP 503 → server-side: ingestion not configured (§4)
+  HTTP 503 → server-side: nothing configured at all (§4)
   ↓
 Optional: MacroDroid notification showing success/failure for the
   technician monitoring the phone
 ```
 
-`device_id` is any string you choose to identify this specific phone in
-logs/audit (e.g. `"phone-1"`, `"shop-till-android"`) — it is stored as
-`payment_evidence.source_ref` and is not otherwise validated.
+`device_id` is a string identifying this specific phone (e.g.
+`"phone-1"`, `"shop-till-android"`), stored as `payment_evidence.
+source_ref`. When a per-device token authenticates the request, the
+*token* is what actually establishes identity — the body's `device_id`
+is cosmetic in that case (a mismatch or typo here does not break
+anything, §4.1); it is only load-bearing on the legacy shared-token
+path, where it always has been.
 
 **Do not** have MacroDroid try to extract the reference or amount itself
 and send only those — the endpoint requires the **complete** SMS text
@@ -239,7 +275,7 @@ MacroDroid
       → HTTP Request
       → Method: POST
       → URL: https://<payments-domain>/internal/telebirr/ingest
-      → Headers: add "Authorization" = "Bearer <token>", "Content-Type" = "application/json"
+      → Headers: add "Authorization" = "Bearer <token from §3.2a or §4>", "Content-Type" = "application/json"
       → Body: switch to "Raw Text" / JSON mode, paste the JSON body above
         using MacroDroid's [sms_message] variable for raw_sms
       → Response handling: enable "Store result in variable" if you want
@@ -260,8 +296,9 @@ releases at the time of writing.
 | Variable | Purpose | Example | Secret? |
 |---|---|---|---|
 | `INGEST_URL` | The server's ingestion endpoint | `https://pay.arada.fun/internal/telebirr/ingest` | No |
-| `MACRODROID_INGEST_TOKEN` | Bearer token authenticating this device | `<generated secret>` | **YES — never store in plain view, never share, never commit** |
-| `device_id` | Identifies which phone sent this SMS | `"shop-till-android"` | No |
+| per-device token (§3.2a, §4.1) | Bearer token authenticating this one phone | `<generated secret, shown once>` | **YES — never store in plain view, never share, never commit** |
+| `MACRODROID_INGEST_TOKEN` (legacy, §4.2) | Bearer token shared by every phone still using it | `<generated secret>` | **YES — same care, but compromise/rotation affects every phone using it at once** |
+| `device_id` | Identifies which phone sent this SMS | `"shop-till-android"` | No — a label, never treated as a credential |
 | `[sms_message]` | MacroDroid's own built-in trigger variable holding the complete SMS body | (n/a — built-in) | The SMS itself is financial evidence; treat the device/app holding it with the same care as the token |
 
 Only these are required by the implemented endpoint. Do not configure a
@@ -269,22 +306,69 @@ sender-phone or amount variable — the endpoint does not accept them.
 
 ---
 
-## 4. The `MACRODROID_INGEST_TOKEN` Secret
+## 4. Device Credentials — the Full Runbook
+
+Two independent credential mechanisms authenticate `POST /internal/
+telebirr/ingest`, checked in this order on every request
+(`services/payments/app.py::_authenticate_ingest_request`):
+
+1. **Per-device token** (§4.1) — one credential per physical phone,
+   managed entirely through the admin console. **This is the credential
+   every new phone should use.**
+2. **Legacy shared token** (§4.2) — one credential for every phone still
+   using it, managed through the server's `.env`. Kept working
+   unmodified for whatever was configured before per-device tokens
+   existed (2026-09-11); not the recommended path for a new phone.
+
+Both reach the exact same `ingest_sms_evidence()` pipeline — nothing
+about parsing, recipient matching, or evidence storage differs by which
+credential authenticated the request.
+
+### 4.1 Per-device tokens (recommended)
 
 | Question | Answer |
 |---|---|
-| Where is it configured? | `packages/core/config.py`'s `Settings.macrodroid_ingest_token`, populated from the `MACRODROID_INGEST_TOKEN` environment variable. Empty by default — the ingest route returns `503 telebirr ingestion is not configured` until it is set. |
-| How is it generated? | `python -c "import secrets; print(secrets.token_hex(32))"` (documented directly in `config.py`'s own comment and `.env.example`). |
-| Where is it stored? | The server's `.env` file (never committed — see `.env.example` for the placeholder) and, on the phone, inside the MacroDroid macro's HTTP Request header configuration. |
-| How must it NOT be exposed? | Never in source control, never in a screenshot, never in a support chat log, never printed by the server (the route never logs the token itself — only "missing"/"invalid" outcomes). |
-| How to rotate it | Generate a new value with the command above, update the server's `.env`, restart the payments service, then update the MacroDroid macro's header on every device using the old token. There is exactly one token for all devices today — rotating it requires updating every device's macro. |
-| Phone lost | Rotate the token immediately (a lost phone with the macro configured is a live credential). Ingestion from that phone stops the moment the old token stops working. |
-| Token leaked | Rotate immediately. Until rotated, anyone with the token can submit fabricated `raw_sms` text — the parser and recipient check (§13, §14) still gate whether that produces a redeemable payment, but a leaked token should be treated as a real incident regardless. |
-| How to disable/revoke | Set `MACRODROID_INGEST_TOKEN` to empty (or any different value that no device is configured with) and restart the payments service — the route then rejects every request with `503`. |
-| Replacement token | Same generation command; there is no built-in multi-token/versioning mechanism today — this is a single shared secret, documented in §24 as a known limitation. |
+| Where is it configured? | The `ingestion_devices` table (`migrations/versions/e3a7c9f01b2d`), managed exclusively through the admin console — no env var, no server restart needed for any of the actions below. |
+| How is it generated? | `secrets.token_urlsafe(32)` (`packages/core/device_auth.py`) at the moment an admin clicks **Register device** or **Rotate token** — never typed in by a human. |
+| Where is it stored server-side? | Only its SHA-256 hash (`ingestion_devices.token_hash`). The plaintext is never persisted anywhere and cannot be recovered — only rotated. |
+| How is it shown to an admin? | Exactly once, in the response panel immediately after **Register device** or **Rotate token** — copy it into the phone's MacroDroid header immediately. Leaving that page loses it permanently (rotation is the only recovery). |
+| How to register a new device | Admin console → **Ingestion Devices** → fill in device id + device name → **Register device** (§3.2a). Requires `payments:configure`. |
+| How to rotate (suspected leak, or routine hygiene) | **Ingestion Devices** → find the device's row → **Rotate token**. The old token stops authenticating the instant this commits — there is never a window where both the old and new token work. Update the phone's MacroDroid header with the new value right away. Requires `payments:configure`. |
+| How to revoke (phone lost/decommissioned) | **Ingestion Devices** → find the device's row → **Revoke**. Immediate — the next request from that phone gets `401 "device revoked"`. Reversible (**Reactivate**) if revoked by mistake. Requires `payments:configure`. |
+| How to see a device's health | **Ingestion Devices** list — `last_seen_at`, `last_success_at`, `last_error_at`/`reason`, success/duplicate/failure/auth-failure counts, and a computed `health`: `healthy` / `degraded` (§17.1) / `awaiting_first_ingestion` (registered, never yet succeeded) / `revoked`. Requires `payments:view` (support/finance/ops/superadmin can all see this — only mutating a device needs `payments:configure`). |
+| How must it NOT be exposed? | Never logged (grepped every touched file — zero log call references it), never returned by the list/GET endpoint (which explicitly enumerates non-secret columns only), never re-displayed after the one-time creation/rotation panel. |
+| Phone lost | Revoke that device specifically (above) — every *other* phone keeps working untouched, unlike the legacy shared token. |
+| Token leaked | Rotate that device specifically — same isolation property. |
+| Multiple phones | Each gets its own row, its own token, its own health history — a Ingestion Devices list with 5 phones tells you which specific one has gone quiet, not just "ingestion overall looks fine on average." |
 
-Never put a real token value in this file or any other committed
-document. Always write `<MACRODROID_INGEST_TOKEN>`.
+### 4.2 The legacy shared `MACRODROID_INGEST_TOKEN`
+
+| Question | Answer |
+|---|---|
+| Where is it configured? | `packages/core/config.py`'s `Settings.macrodroid_ingest_token`, populated from the `MACRODROID_INGEST_TOKEN` environment variable. Empty by default. |
+| How is it generated? | `python -c "import secrets; print(secrets.token_hex(32))"` (documented directly in `config.py`'s own comment and `.env.example`). |
+| Where is it stored? | The server's `.env` file (never committed) and, on each phone using it, inside that phone's MacroDroid HTTP Request header. |
+| How to rotate it | Generate a new value, update the server's `.env`, restart the payments service, then update **every** device still configured with the old value — there is exactly one token for all such devices, so rotating it requires touching every one of their macros in the same maintenance window. |
+| Phone lost (using this token) | Rotate immediately — this breaks every other phone still using the shared token too; migrating them to individual per-device tokens (§4.1) first avoids this blast radius going forward. |
+| How to disable entirely | Set `MACRODROID_INGEST_TOKEN` to empty and restart the payments service. Per-device tokens (§4.1) are unaffected — they are a completely independent mechanism, so disabling this legacy path never disables any registered device. |
+
+### 4.3 Choosing between them
+
+New phone → always register a per-device token (§4.1). The legacy
+shared token exists only for continuity with whatever was configured
+before 2026-09-11; there is no reason to add a *new* phone to that
+shared pool today.
+
+### 4.4 What "device revoked" means to the phone
+
+MacroDroid sees a normal HTTP response, `401` with body `{"detail":
+"device revoked"}` — not a network error, not a timeout. The SMS itself
+is untouched in the phone's inbox (§15's retry guidance still applies);
+only forwarding stops until an admin either reactivates the device or
+issues a new one.
+
+Never put a real token value (either kind) in this file or any other
+committed document. Always write `<token>` / `<MACRODROID_INGEST_TOKEN>`.
 
 ---
 
@@ -296,15 +380,16 @@ Real code: `services/payments/app.py`.
 
 | | |
 |---|---|
-| Auth | `Authorization: Bearer <MACRODROID_INGEST_TOKEN>`, constant-time compared (`hmac.compare_digest`). |
+| Auth | `Authorization: Bearer <token>` — either a per-device token (looked up by its SHA-256 hash against `ingestion_devices`) or the legacy shared `MACRODROID_INGEST_TOKEN`, checked strongest-first (§4). Both compared without a timing side-channel. |
 | Required headers | `Authorization`, `Content-Type: application/json`. |
-| Request body | `{"raw_sms": "<complete SMS text>", "device_id": "<string>"}` |
-| Success response (200) | `{"status": "<see below>", "evidence_id": <int or null>, "external_reference": "<string or null>", "reason": "<string or null>"}` |
-| 401 | Missing or wrong bearer token. |
+| Request body | `{"raw_sms": "<complete SMS text>", "device_id": "<string>"}` — `device_id` is cosmetic once a per-device token authenticates (§3.3); load-bearing only on the legacy path. |
+| Success response (200) | `{"status": "<see below>", "evidence_id": <int or null>, "external_reference": "<string or null>", "reason": "<string or null>", "device_name": "<string or null>"}` — `device_name` is populated only when a per-device token authenticated the request. |
+| 401 `"invalid bearer token"` | Missing or wrong bearer token (neither mechanism matched). |
+| 401 `"device revoked"` | The presented token belongs to a real, registered device whose credential has been revoked (§4.4) — never silently falls through to the legacy token even if one is configured. |
 | 422 | `raw_sms` was empty/whitespace-only. |
-| 503 | `MACRODROID_INGEST_TOKEN` is not configured server-side. |
-| Rate limiting | None on this route specifically today (the caller is a single trusted device, not a public player) — see §24 for this as a known limitation if multiple untrusted devices are ever added. |
-| Logging | Every outcome is logged via structlog (`telebirr_ingest_new_evidence`, `telebirr_ingest_unparseable`, `telebirr_ingest_conflicting_duplicate`) with reference/evidence id/reason, never the bearer token. |
+| 503 | Nothing is configured server-side at all — no legacy token set AND zero devices registered. |
+| Rate limiting | None on this route specifically today — see §24 for this as a known limitation. |
+| Logging | Every outcome is logged via structlog (`telebirr_ingest_new_evidence`, `telebirr_ingest_unparseable`, `telebirr_ingest_conflicting_duplicate`) with reference/evidence id/reason, never the bearer token or the raw SMS text. |
 | Audit | The `payment_evidence` row itself (source, source_ref, timestamps, status, reject_reason) is the audit trail for ingestion — no separate `admin_audit_log` entry (that table is reserved for admin-triggered actions, see §14). |
 
 `status` is one of:
@@ -390,6 +475,7 @@ number (none of these fields exist in the request model either).
 | View the raw SMS text of one evidence row | Same screen, "View SMS" button | `payments:view_raw_evidence` (support/ops get a 403, shown as a toast, not a crash) |
 | Resolve evidence (`blocked`/`disputed`/`rejected` → `available`, `available` → `blocked`/`disputed`) | Same screen, per-row resolve buttons, requires a typed reason | `payments:approve` |
 | List/create/deactivate Telegram payment agents | `payment_agents.js` (nav: "Payment Agents") | list: `payments:view`; create/deactivate: `payments:configure` |
+| Register/revoke/reactivate/rotate a MacroDroid ingestion device, view its health | `ingestion_devices.js` (nav: "Ingestion Devices") | list/health: `payments:view`; register/revoke/reactivate/rotate: `payments:configure` |
 | Configure the recognized recipient (name, account, active window) | `payment_destinations.js` (nav: "Payment Destinations") — same screen the existing manual-deposit destinations already use, extended with **Valid from/Valid until** fields | list: `payments:view`; create/edit: `payments:configure` |
 | Enable/disable the `telebirr_sms` rail | `provider_availability.js` (existing screen, not Telebirr-specific) | `payments:configure` |
 | View admin audit log (who resolved what, who changed the recipient, who toggled availability) | `audit.js` (existing screen) | `audit:view` (superadmin only) |
@@ -571,6 +657,7 @@ list — i.e. it is invisible to players until an admin enables the rail.
 |---|---|---|---|---|---|---|
 | `telebirr_evidence.js` | "Telebirr Evidence" | Search/review ingested evidence | `payments:view` (list); `payments:view_raw_evidence` (raw SMS); `payments:approve` (resolve) | id, source, direction, reference, amount, fee/VAT, payer, recipient(+phone), status, received-at | View SMS, Resolve (→ available/blocked/disputed per the transition table) | 403 toast for insufficient role; 422 toast for an invalid transition; 404 toast for a stale id |
 | `payment_agents.js` | "Payment Agents" | Manage the Telegram agent allow-list | `payments:view` (list); `payments:configure` (create/deactivate) | Telegram user id, display name, active, added-at | Add agent, Activate/Deactivate | 403 toast; validation toast for a non-numeric id |
+| `ingestion_devices.js` | "Ingestion Devices" | Register/manage per-phone MacroDroid credentials (2026-09-11) | `payments:view` (list/health); `payments:configure` (register/revoke/reactivate/rotate) | device id/name, health (healthy/degraded/awaiting_first_ingestion/revoked), last seen/success, success/duplicate/failure/auth-failure counts | Register device (token shown once), Revoke, Reactivate, Rotate token (new token shown once) | 403 toast; 422 toast for a duplicate device id |
 | `payment_destinations.js` | "Payment Destinations" | Configure the recognized recipient(s) | `payments:view` (list); `payments:configure` (create/edit) | Method, account, name, instructions, **Valid from/Valid until** (new), active | Add, Edit, Activate/Deactivate | 403 toast |
 | `provider_availability.js` | (existing screen) | Enable/disable `telebirr_sms` deposits | `payments:configure` | provider/direction/enabled | Toggle | 403 toast |
 | `audit.js` | (existing screen) | View `admin_audit_log` (includes every `payment_evidence.*` and `payment_agents.*` action) | `audit:view` (superadmin only) | admin, action, target, before/after, reason, ip, timestamp | (read-only) | 403 |
@@ -593,6 +680,8 @@ Full detail in the standalone `docs/TELEBIRR_ROLES_AND_ACCESS.md`. Summary:
 | View raw SMS text | NO | NO (their own submission is not re-readable through the console) | NO | NO | YES | YES |
 | Resolve evidence status | NO | NO | NO | NO | YES | YES |
 | Manage payment agents | NO | NO | NO | NO | NO | YES |
+| View ingestion device list/health | NO | NO | YES | YES | YES | YES |
+| Register/revoke/reactivate/rotate an ingestion device | NO | NO | NO | NO | NO | YES |
 | Configure recognized recipient | NO | NO | NO | NO | NO | YES |
 | Enable/disable `telebirr_sms` | NO | NO | NO | NO | NO | YES |
 | View admin audit log | NO | NO | NO | NO | NO | YES |
@@ -750,12 +839,32 @@ Check in this order:
 
 ### Server says unauthorized (401)
 
-1. Confirm the exact bearer token value in the MacroDroid header (no
-   stray whitespace/newline).
-2. Confirm `MACRODROID_INGEST_TOKEN` on the server matches — a rotation
-   (§4) that wasn't pushed to every device is the most common cause.
-3. Confirm the environment variable actually loaded (a server restart is
-   required after changing `.env`).
+1. Read the response body's `detail` field first — it tells you which
+   case this is:
+   - `"invalid bearer token"` → wrong/missing token. Confirm the exact
+     bearer value in the MacroDroid header (no stray whitespace/newline),
+     and check **Ingestion Devices** in the admin console to confirm
+     this device's token hasn't been rotated without updating the phone.
+   - `"device revoked"` → this device's credential was deliberately or
+     accidentally revoked (§4.4). Check **Ingestion Devices** for its
+     status; **Reactivate** it there if this was a mistake, or issue a
+     fresh registration if the phone is being brought back into service
+     after being decommissioned.
+2. If using the legacy shared token: confirm `MACRODROID_INGEST_TOKEN`
+   on the server matches — a rotation (§4.2) that wasn't pushed to every
+   device sharing it is the most common cause, and confirm the
+   environment variable actually loaded (a server restart is required
+   after changing `.env`).
+
+### Device shows "degraded" in the admin console
+
+Means: registered, still active, but no successful ingestion in the last
+several hours (§17.1's threshold). This does **not** mean payments have
+stopped — the Telegram payment-agent path is completely independent and
+unaffected. Work through: is real Telebirr activity even expected in
+that window; is the phone charging/has signal; does MacroDroid's own log
+show the macro firing at all; walk the Reboot Survival checklist (§3) if
+the phone was recently restarted.
 
 ### SMS reaches the server but the payment is rejected
 
@@ -841,6 +950,8 @@ Real Prometheus metrics, scraped from the payments service's `/metrics`
 | `telebirr_redemption_outcomes_total{outcome}` | Counter | Redemption attempts (`credited` today; extend as needed). |
 | `telebirr_evidence_reconciliation_mismatch_count` | Gauge | Set hourly by the reconciliation sweep (§17.1) — must be `0`. |
 | `telebirr_evidence_by_status{status}` | Gauge | Current row count per status — the standing "every payment's lifecycle is explainable" account. |
+| `ingestion_device_auth_failures_total{reason}` | Counter | Rejected ingestion attempts by reason (`unknown_token`, `revoked_device`) — 2026-09-11. |
+| `ingestion_device_last_success_timestamp{device_id}` | Gauge | Unix timestamp of each registered device's last successful ingestion — the raw signal a future alert rule (`time() - this > threshold`) would page on. |
 
 Real alert rules (`deploy/prometheus/alerts.yml`, verified with a live
 `promtool check rules` run — 8 rules found, 2 of them Telebirr-specific):
@@ -850,10 +961,22 @@ Real alert rules (`deploy/prometheus/alerts.yml`, verified with a live
 | `TelebirrEvidenceReconciliationMismatch` | **CRITICAL** (page) | `telebirr_evidence_reconciliation_mismatch_count > 0` — a real no-source or double-credit signal. |
 | `TelebirrParserFailureSpike` | WARNING | More than 5 parse failures in 15 minutes — possible SMS format change or spam. |
 
-**NOT IMPLEMENTED**: an automated "ingestion stopped" alert. Deliberately
-not built — a naive `rate() == 0` alert would page constantly during
-normal quiet periods and while the feature is disabled, which is its
-default state. Documented as a known gap, not silently omitted (§24).
+**PARTIALLY IMPLEMENTED** (updated 2026-09-11): a whole-system "ingestion
+stopped" Prometheus alert is still not built, for the same reason as
+before — a naive `rate() == 0` alert would page constantly while the
+feature is disabled by default. What *does* now exist, scoped to each
+individual registered device rather than the system as a whole: a
+periodic sweep in `payout_worker.py` (`check_for_degraded_devices`,
+every 5 minutes) that logs a structured `ingestion_device_degraded`
+warning for any active device with no success in the last several hours
+(§17.1), the `ingestion_device_last_success_timestamp` gauge above for a
+future Prometheus alert rule to key off, and a live `degraded` badge on
+the **Ingestion Devices** admin screen. This does not false-page during
+the disabled-by-default state, because it only ever fires for a device
+that is registered and active — none exist until an admin registers one.
+Still not built: an actual `deploy/prometheus/alerts.yml` rule wired to
+the new gauge (the gauge and the structured log exist; a formal paging
+rule on top of them does not yet).
 
 ### 17.1 What "NORMAL / WARNING / CRITICAL" looks like day to day
 
@@ -863,6 +986,8 @@ default state. Documented as a known gap, not silently omitted (§24).
 | Parser failure rate | occasional, isolated | > 5 in 15 minutes | sustained, every real SMS failing (likely a template change) |
 | `rejected` evidence rate | occasional (recipient config lag) | a sudden batch of rejects right after a recipient config change (check the change was correct) | every single ingestion rejected (recipient config likely wrong) |
 | Payment agent bot replies | agents report success routinely | an agent reports repeated `unparseable` | no ingestion at all during known payment activity — check the device (§15) |
+| A registered device's health (Ingestion Devices) | `healthy` | `degraded` — no success in the last ~6 hours (`services/admin/queries.py::_DEVICE_DEGRADED_AFTER_HOURS`) | every registered device `degraded` simultaneously (likely a server-side or connectivity issue, not just one phone) |
+| `ingestion_device_auth_failures_total{reason="revoked_device"}` | `0` | any nonzero value | a sustained, repeating nonzero rate (a decommissioned phone still trying, or a real credential-misuse attempt worth investigating) |
 
 ---
 
@@ -901,8 +1026,10 @@ this feature): a self-hosted Proxmox VM reached via Cloudflare Tunnel at
    This applies (among any other pending migrations):
      9c1f4d7a2b3e_telebirr_sms_evidence
      2f6b1a9c4d8e_telebirr_evidence_vat_receipt_url
-   Both are additive/inert — verified this session by running the full
-   pre-existing test suite unmodified on top of each.
+     e3a7c9f01b2d_telebirr_ingestion_devices  (2026-09-11, new table only)
+   All three are additive/inert — verified by running the full
+   pre-existing test suite unmodified on top of each, and (for the
+   newest) a real upgrade/downgrade/upgrade cycle against live Postgres.
 
 3. Restart only the services whose code changed:
      docker compose -f deploy/docker-compose.yml up -d --force-recreate \
@@ -922,12 +1049,16 @@ this feature): a self-hosted Proxmox VM reached via Cloudflare Tunnel at
 
 7. Configure the real payment agent(s) (admin console -> Payment Agents).
 
-8. Configure the real MacroDroid device (docs/TELEBIRR_MACRODROID_
-   QUICK_SETUP.md), pointed at https://pay.arada.fun/internal/telebirr/
-   ingest with the real MACRODROID_INGEST_TOKEN.
+8. Register the real phone as a device (admin console -> Ingestion
+   Devices -> Register device, §3.2a/§4.1) and configure MacroDroid
+   (docs/TELEBIRR_MACRODROID_QUICK_SETUP.md) with that device's own
+   token, pointed at https://pay.arada.fun/internal/telebirr/ingest.
+   (The legacy MACRODROID_INGEST_TOKEN env var remains available as a
+   fallback mechanism, §4.2, but a new phone should use its own token.)
 
-9. Run the real production acceptance test (§21) BEFORE enabling the
-   rail for players.
+9. Run the real production acceptance test (§21), and specifically the
+   real-device transport/evidence test (§21a), BEFORE enabling the rail
+   for players.
 
 10. Only after §21 passes cleanly: enable telebirr_sms/in (§20).
 
@@ -1018,18 +1149,83 @@ deployment of this feature before enabling it for real players.
 
 ---
 
+## 21a. Real Device Acceptance Test — Two Separate Phases
+
+§21 above was run against real services but a **simulated** SMS
+submission (real HTTP, not a real phone). This section is what remains
+before a real Android phone running MacroDroid is genuinely proven —
+deliberately split into two phases that must not be collapsed into one:
+the first proves the phone/network/parsing path with zero financial
+exposure; the second, run separately and only afterward, proves the
+money path.
+
+### Phase A — Transport/Evidence only (`telebirr_sms/in` stays `false` throughout)
+
+```text
+1.  Register the real test phone as a device (§3.2a) — copy its token.
+2.  Configure MacroDroid on the phone (§3.3/3.4, or
+    docs/TELEBIRR_MACRODROID_QUICK_SETUP.md) with that token.
+3.  Confirm the phone has real network connectivity to the production
+    ingest URL (any basic reachability check from the phone).
+4.  Arrange for one real Telebirr SMS to arrive on the phone.
+5.  Confirm MacroDroid's own log shows the macro fired and record the
+    HTTP response code it received.
+6.  Confirm the response was 200 with a real "status" value.
+7.  Confirm exactly one new row appears in Telebirr Evidence (admin
+    console) for that SMS's reference.
+8.  Confirm that row's source is "macrodroid" and (admin console,
+    Ingestion Devices) joins to the device registered in step 1.
+9.  Confirm that device's row now shows a real last_seen_at/
+    last_success_at, not blank.
+10. Re-trigger the identical SMS once more (MacroDroid's own "re-run
+    macro against a stored message", or manually resend) — confirm
+    still exactly one evidence row (status: duplicate on the second
+    attempt), and the device's duplicate_count incremented, not its
+    success_count a second time.
+11. Confirm no player's wallet changed and no redemption occurred —
+    expected and required, since the gate is still off.
+```
+
+Phase A is complete when steps 1–11 are all true. Nothing here requires
+`telebirr_sms/in` to ever be `true`.
+
+### Phase B — Financial redemption (only after Phase A is clean; run deliberately, briefly, separately)
+
+```text
+12. An admin temporarily sets telebirr_sms/in = true (Payment Provider
+    Availability, requires payments:configure + a typed reason).
+13. A real player redeems the exact reference Phase A produced,
+    entering ONLY the reference (§2's rule) via the Mini App.
+14. Confirm the wallet credit matches the SMS's own stated amount
+    exactly (§21's own verification table format).
+15. Confirm a second redemption attempt of the same reference is
+    rejected (§21's own "same/different user" checks).
+16. The admin sets telebirr_sms/in back to false immediately after this
+    one controlled test — do not leave it enabled from this step alone;
+    a real go-live decision is separate from this acceptance test.
+```
+
+Do not run Phase B until Phase A has been clean across more than one
+real SMS, ideally over more than one day of normal phone operation —
+a single lucky transport success does not prove the phone survives a
+reboot, a battery-optimization regression, or a busy period.
+
+---
+
 ## 22. Emergency Procedures
 
 | Situation | Action |
 |---|---|
 | MacroDroid is forwarding bad/irrelevant messages | Tighten the trigger's message-content filter (§3.3); worst case, disable the macro — ingestion has a manual fallback (§7). |
-| Token compromised | Rotate immediately (§4); every device using the old token stops working until updated. |
+| One device's per-device token compromised | **Ingestion Devices** → that device's row → **Rotate token** (§4.1) — immediate, and every *other* device keeps working untouched. |
+| Legacy shared token compromised | Rotate (§4.2) — breaks every phone still on the shared token simultaneously; update all of them in the same window, or migrate them to individual per-device tokens first to avoid this blast radius in the future. |
+| A specific phone lost or being decommissioned | **Ingestion Devices** → that device's row → **Revoke** (§4.1/§4.4) — immediate, isolated to that one phone. If it was on the legacy shared token instead, rotating that token (above) is the only option and affects every phone sharing it. |
 | Parser malfunction (real SMS suddenly all failing) | Check `telebirr_parser_failures_total` and recent `reason` values in logs; if Telebirr changed their template, do **not** loosen the parser to "probably fine" — extend it only from a new real sample (§13's own discipline), and disable the rail (§20) until fixed. |
 | Duplicate payments observed | Treat as a real incident — walk §15's "credited twice" checklist immediately; this should be structurally impossible, so a real occurrence means the reconciliation alert (§17) should already be firing — if it isn't, that is itself a second bug to report. |
 | Suspicious redemption attempts (reference guessing, rapid-fire) | Rate limiting already caps this at 10/hour/user; check `telebirr_redemption_outcomes_total` and the player's own recent attempt pattern via `payment_evidence`. |
 | Telegram agent account compromised | Deactivate them immediately in **Payment Agents** (toggle `is_active` off) — takes effect on their very next message. |
-| Phone lost | Rotate the token (§4) immediately; physically the phone likely also has other exposure (Telegram/agent access on the same device, if any) — treat as a general device-loss incident beyond just this feature. |
-| Must disable the whole rail right now | `telebirr_sms`/`in` → `false` (§20) — instant, touches nothing else, including Bingo gameplay. |
+| A device shows repeated `auth_failure_count` growth after being revoked | Expected if the old phone keeps trying with its now-dead token (harmless — every attempt is rejected before touching the pipeline) — confirm it's the expected decommissioned phone, not an unexpected credential-misuse attempt from somewhere else. |
+| Must disable the whole rail right now | `telebirr_sms`/`in` → `false` (§20) — instant, touches nothing else, including Bingo gameplay or any registered device's own status. |
 
 ---
 
@@ -1083,10 +1279,11 @@ this feature except the same underlying ledger tables.
 | Admin agent management | **IMPLEMENTED** | List/create/deactivate. |
 | Admin recipient configuration | **IMPLEMENTED** | Including effective-from/until windows. |
 | Reconciliation dashboard (admin UI page) | **NOT IMPLEMENTED** | Numbers exist and are queryable/scraped by Prometheus; no dedicated console page renders them. Operable without it. |
-| Automated "ingestion stopped" alert | **NOT IMPLEMENTED** | Deliberately deferred — a naive version would false-page constantly while disabled (the shipped default). |
+| System-wide automated "ingestion stopped" Prometheus alert | **NOT IMPLEMENTED** | Deliberately deferred — a naive version would false-page constantly while disabled (the shipped default). Per-device degraded signal (below) is a real, narrower substitute. |
 | Evidence expiry policy/job | **NOT IMPLEMENTED** | Schema supports an `expired` status; nothing sets it. |
-| Multi-token MacroDroid auth (per-device tokens) | **NOT IMPLEMENTED** | One shared `MACRODROID_INGEST_TOKEN` for all devices today. |
-| Physical Android device + MacroDroid | **NOT COMPLETED** | No physical device configured yet — requires a real phone, real SIM, and the setup in §3/`TELEBIRR_MACRODROID_QUICK_SETUP.md`. |
+| Multi-token MacroDroid auth (per-device tokens) | **IMPLEMENTED (2026-09-11)** | `ingestion_devices` table, `services/payments/device_registry.py`, **Ingestion Devices** admin screen — register/revoke/reactivate/rotate, independent per phone. Legacy shared `MACRODROID_INGEST_TOKEN` (§4.2) still works unmodified alongside it. |
+| Per-device health/degraded signal | **IMPLEMENTED (2026-09-11)** | `last_seen_at`/`last_success_at`/counters per device, a 5-minute structured-log sweep (`check_for_degraded_devices`), and an `ingestion_device_last_success_timestamp` gauge. A formal Prometheus alert *rule* on that gauge is not yet written (see §17). |
+| Physical Android device + MacroDroid | **NOT COMPLETED** | No physical device configured yet — requires a real phone, real SIM, and the setup in §3/`TELEBIRR_MACRODROID_QUICK_SETUP.md`. This is the one remaining step before a controlled real-world test — see §21a. |
 | Real payment agent(s) configured | **NOT COMPLETED** | `payment_agents` ships empty; needs real Telegram user id(s). |
 | Real recipient configured | **NOT COMPLETED** | `manual_payment_destinations` has no `telebirr` row in production; needs the real account name/phone. |
 | Production deployment (this feature) | **NOT COMPLETED** | Code committed locally, not yet pushed/deployed. |
@@ -1137,3 +1334,38 @@ an illustrative multi-stage `RECEIVED → PARSING → VERIFIED` state
 sequence) that does not match what the code actually does, this document
 follows the code (§12 explains the discrepancy explicitly) rather than
 repeating the earlier description.
+
+### 25.1 2026-09-11 update — per-device ingestion credentials
+
+Sections 1, 3, 4, 5.1, 6.2, 10, 11, 15, 17, 19, 22, 24, and this section
+were updated when `ingestion_devices` (migration `e3a7c9f01b2d`) and the
+**Ingestion Devices** admin screen shipped — §24's prior "Multi-token
+MacroDroid auth: NOT IMPLEMENTED" row was directly wrong the moment that
+landed and is corrected here, not left stale. Checked directly against
+the live code while updating, not carried over from a summary:
+
+- `services/payments/app.py::_authenticate_ingest_request`'s exact
+  strongest-first, no-silent-fallback-for-a-revoked-device logic (§4).
+- `services/admin/queries.py`'s `list_ingestion_devices` (confirmed it
+  never selects `token_hash`) and the `_DEVICE_DEGRADED_AFTER_HOURS`
+  constant (§17.1).
+- `packages/core/device_auth.py` (`secrets.token_urlsafe(32)`, SHA-256
+  hash, no plaintext persistence) and grepped every touched file for any
+  `logger.*` call referencing a token — none found (§4.1).
+- A real Playwright/Chromium run of register → token shown once → revoke
+  → reactivate → rotate → old token rejected / new token accepted,
+  against the real admin console, not asserted from reading the code.
+- The financial boundary claims in §2/§5.2 re-proven against the new
+  path specifically: a real HTTP request with a forged `amount`/
+  `recipient_name`/`payer_name`/`external_reference` alongside a real
+  SMS, confirming the stored evidence reflects only what the parser
+  extracted from the real text.
+- Full test suite after this change: 1414 passed / 1 failed (this
+  feature's own 22 new tests included, two of them real-browser
+  end-to-end runs). The one failure (`test_sms_app.py::test_full_
+  campaign_to_delivery_flow_over_real_http`) is in the unrelated SMS
+  Control Plane, reproduces in total isolation, and is a stray-message
+  shared-dev-database artifact of the kind already documented twice
+  elsewhere in this repo's `DECISIONS.md` (2026-09-06, 2026-09-10) — not
+  a file this work touched. mypy `--strict` clean. `telebirr_sms/in`
+  reconfirmed `false` in the database after the run.
