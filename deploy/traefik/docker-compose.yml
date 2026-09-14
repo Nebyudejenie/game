@@ -73,17 +73,23 @@ services:
       # containers/labels, never to create or modify them.
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
-      # The container's original, default network (Docker's real,
-      # built-in "bridge", not a Compose-generated one -- see the
-      # `bridge_net` mapping below). Kept for exact fidelity to the live
-      # container's own configuration; verified during this migration
-      # that every Arada Bingo hostname now actually resolves via
-      # hermis_hermis-internal instead, so this attachment appears to be
-      # vestigial today. Left in place rather than guessed away, since
-      # removing it was never itself tested in isolation.
-      - bridge_net
       # The network jobingo-gateway/payments/admin/bot actually run on --
       # this is what makes Docker-label discovery reach them at all.
+      #
+      # The container's original, default "bridge" network attachment
+      # (present on the live container this file was captured from) is
+      # deliberately NOT included here. Two independent findings support
+      # dropping it, not guessing it away: (1) it was already proven
+      # unnecessary earlier in this same migration -- once every Arada
+      # Bingo hostname (including arada.fun/gateway) was switched to
+      # Docker-label discovery over hermis_hermis-internal alone, all
+      # five kept working with no bridge attachment in the picture at
+      # all; (2) attempting to reproduce the bridge attachment through
+      # Compose fails outright -- Docker's built-in default "bridge"
+      # network does not support the per-container network-scoped alias
+      # Compose always assigns, a hard Docker limitation ("network-scoped
+      # aliases are only supported for user-defined networks"), confirmed
+      # live when this file's first draft included it.
       - hermis_hermis-internal
     logging:
       driver: json-file
@@ -92,12 +98,8 @@ services:
         max-file: "5"
 
 networks:
-  # Both networks already exist on the host and are owned elsewhere
-  # (Docker's own built-in bridge, and the separate HERMES stack's
-  # network respectively) -- `external: true` tells Compose to attach to
-  # them as-is, never to create or manage them.
-  bridge_net:
-    external: true
-    name: bridge
+  # Already exists on the host, owned by the separate HERMES stack --
+  # `external: true` tells Compose to attach to it as-is, never to
+  # create or manage it.
   hermis_hermis-internal:
     external: true
