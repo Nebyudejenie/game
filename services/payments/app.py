@@ -141,12 +141,14 @@ async def telebirr_ingest(
     """
     device = await _authenticate_ingest_request(authorization)
     raw_body = await request.body()
+    body_device_id = "unknown-device"
     if raw_body:
         raw_sms = raw_body.decode("utf-8", errors="replace")
         try:
             import json
             data = json.loads(raw_sms)
             raw_sms = data.get("raw_sms", str(data))
+            body_device_id = data.get("device_id", body_device_id)
         except (json.JSONDecodeError, ValueError):
             pass  # plain text body is accepted as-is
     else:
@@ -160,7 +162,7 @@ async def telebirr_ingest(
     # label, not a secret; the bearer token is what was actually
     # verified), only used as-is on the legacy shared-token path, where
     # it always has been.
-    source_ref = device.device_id if device is not None else "samsung-a15-01"
+    source_ref = device.device_id if device is not None else body_device_id
     outcome = await ingest_sms_evidence(
         app.state.pool, raw_sms=raw_sms, source=SOURCE_MACRODROID, source_ref=source_ref
     )
