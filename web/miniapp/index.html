@@ -399,8 +399,13 @@
            directive section 140). The server determines the exact amount
            from the SMS evidence already on file. -->
       <div id="deposit-telebirr-section" class="hidden">
-        <p class="wallet-note" data-i18n="wallet.telebirr_deposit_intro"></p>
-        <input id="deposit-telebirr-reference-input" class="wallet-input" type="text" data-i18n-placeholder="wallet.manual_reference_placeholder" />
+        <div id="deposit-telebirr-destination"><p class="wallet-note" data-i18n="wallet.telebirr_destination_loading"></p></div>
+        <ol class="step-list">
+          <li class="step-item"><span class="step-number">1</span><span class="step-text" data-i18n="wallet.telebirr_step1"></span></li>
+          <li class="step-item"><span class="step-number">2</span><span class="step-text" data-i18n="wallet.telebirr_step2"></span></li>
+          <li class="step-item"><span class="step-number">3</span><span class="step-text" data-i18n="wallet.telebirr_step3"></span></li>
+        </ol>
+        <input id="deposit-telebirr-reference-input" class="wallet-input" type="text" data-i18n-placeholder="wallet.telebirr_reference_placeholder" />
         <button id="deposit-telebirr-submit-btn" class="btn-primary" data-i18n="wallet.telebirr_deposit_submit"></button>
         <p id="deposit-telebirr-status" class="wallet-note"></p>
         <button type="button" id="deposit-telebirr-back-btn" class="btn-secondary" data-i18n="wallet.telebirr_deposit_back"></button>

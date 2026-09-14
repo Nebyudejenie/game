@@ -350,6 +350,82 @@
   outline-offset: 2px;
 }
 
+/* --- read-only variant: showing "here is the account to pay into" where
+   there's nothing to pick between (the automatic Telebirr flow only ever
+   has one destination) -- same visual language as the selectable
+   .destination-card above, just non-interactive and never focusable. --- */
+
+.destination-display {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1.5px solid var(--accent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+  margin-bottom: 14px;
+}
+
+.destination-display .destination-copy-btn {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  padding: 7px 10px;
+}
+
+.destination-display .destination-copy-btn.copied {
+  border-color: var(--call);
+  color: var(--call);
+}
+
+/* --- numbered step guide: three or four short, concrete actions instead
+   of one paragraph -- built for a player who may not be comfortable with
+   apps in general, not just this one. --- */
+
+.step-list {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.step-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.step-number {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.step-text {
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+  padding-top: 2px;
+}
+
+.step-text strong {
+  color: var(--text);
+}
+
 /* --- withdrawal summary: a live preview of what's about to be
    submitted, filled in as the player types -- purely a read of the
    existing form fields, no new data --- */

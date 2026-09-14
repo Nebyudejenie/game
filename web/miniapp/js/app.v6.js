@@ -1144,6 +1144,15 @@ async function openWallet() {
 // payment_provider_availability, read fresh every time the wallet
 // opens, so an admin flipping a toggle takes effect for the very next
 // player who opens their wallet, not just on a future deploy.
+// Set by applyPaymentAvailability() below -- which of the two possible
+// "already open by default" deposit sections is currently showing
+// (automatic/Chapa, or Telebirr when Chapa is off), so the shared
+// manual/automatic toggle handlers further down know which one to hide
+// or restore without hardcoding an assumption that automatic is always
+// the default.
+let depositDefaultIsTelebirr = false;
+let telebirrDestinationLoaded = false;
+
 async function applyPaymentAvailability() {
   try {
     const response = await fetch("/api/payment-methods", { headers: authHeader() });
@@ -1152,14 +1161,36 @@ async function applyPaymentAvailability() {
 
     const depositHasAutomatic = methods.deposit.includes("chapa");
     const depositHasManual = methods.deposit.includes("manual");
+    // Telebirr SMS-evidence deposits: instant, reference-only, no admin
+    // review -- ships disabled by default (payment_provider_availability
+    // seeds it off), so this is a no-op until an admin turns it on.
+    // Whenever it's on and chapa (the other fully-automatic rail) is off,
+    // it takes over as the default-open section instead of Manual
+    // Deposit -- real production confusion (DECISIONS.md, 2026-09-14)
+    // came from Telebirr and Manual sitting side by side with equal
+    // visual weight, so a player heading straight for their Telebirr
+    // payment kept landing in the always-review Manual form instead.
+    const depositHasTelebirr = methods.deposit.includes("telebirr_sms");
+    depositDefaultIsTelebirr = !depositHasAutomatic && depositHasTelebirr;
+
     if (!depositHasAutomatic) {
-      // Nothing to toggle *from* -- go straight to the manual panel,
-      // permanently, rather than showing a toggle button that would
-      // only ever lead to a dead automatic form.
       el("deposit-automatic-section").classList.add("hidden");
-      el("deposit-manual-toggle-btn").classList.add("hidden");
       el("deposit-automatic-toggle-btn").classList.add("hidden");
-      if (depositHasManual) {
+      el("deposit-telebirr-toggle-btn").classList.add("hidden"); // reached directly below, not via a toggle
+
+      if (depositDefaultIsTelebirr) {
+        el("deposit-telebirr-section").classList.remove("hidden");
+        el("deposit-manual-section").classList.add("hidden");
+        el("deposit-manual-toggle-btn").classList.toggle("hidden", !depositHasManual);
+        if (!telebirrDestinationLoaded) {
+          telebirrDestinationLoaded = true;
+          await loadTelebirrDestination();
+        }
+      } else if (depositHasManual) {
+        // Nothing better to toggle *from* -- go straight to the manual
+        // panel, permanently, rather than showing a toggle button that
+        // would only ever lead to a dead end.
+        el("deposit-manual-toggle-btn").classList.add("hidden");
         el("deposit-manual-section").classList.remove("hidden");
         if (!manualDestinationsLoaded) {
           manualDestinationsLoaded = true;
@@ -1169,19 +1200,17 @@ async function applyPaymentAvailability() {
         el("deposit-manual-section").classList.add("hidden");
         setWalletStatus("deposit-status", "wallet.not_available", "error");
       }
-    } else if (!depositHasManual) {
-      // Automatic works but manual doesn't (or isn't configured) --
-      // never offer a toggle to a dead end.
-      el("deposit-manual-toggle-btn").classList.add("hidden");
+    } else {
+      // Chapa is on and stays the default -- Telebirr and Manual are
+      // both reached via their own toggle buttons, unchanged from
+      // before.
+      el("deposit-telebirr-toggle-btn").classList.toggle("hidden", !depositHasTelebirr);
+      if (!depositHasManual) {
+        // Automatic works but manual doesn't (or isn't configured) --
+        // never offer a toggle to a dead end.
+        el("deposit-manual-toggle-btn").classList.add("hidden");
+      }
     }
-
-    // Telebirr SMS-evidence deposits: a fully independent third option,
-    // additive to whatever the automatic/manual toggle above already
-    // decided -- ships disabled by default (payment_provider_availability
-    // seeds it off), so this is a no-op for every player until an admin
-    // turns it on.
-    const depositHasTelebirr = methods.deposit.includes("telebirr_sms");
-    el("deposit-telebirr-toggle-btn").classList.toggle("hidden", !depositHasTelebirr);
 
     const withdrawHasAutomatic = methods.withdraw.includes("chapa");
     const withdrawHasManual = methods.withdraw.includes("manual");
@@ -1301,7 +1330,11 @@ el("deposit-submit-btn").addEventListener("click", async () => {
 let manualDestinationsLoaded = false;
 
 el("deposit-manual-toggle-btn").addEventListener("click", async () => {
-  el("deposit-automatic-section").classList.add("hidden");
+  // Hides whichever of the two is actually the current default --
+  // normally automatic/Chapa, but Telebirr whenever Chapa is off and
+  // Telebirr is on (see depositDefaultIsTelebirr, set by
+  // applyPaymentAvailability()).
+  el(depositDefaultIsTelebirr ? "deposit-telebirr-section" : "deposit-automatic-section").classList.add("hidden");
   el("deposit-manual-toggle-btn").classList.add("hidden");
   el("deposit-manual-section").classList.remove("hidden");
   el("deposit-automatic-toggle-btn").classList.remove("hidden");
@@ -1311,10 +1344,18 @@ el("deposit-manual-toggle-btn").addEventListener("click", async () => {
   }
 });
 
-el("deposit-automatic-toggle-btn").addEventListener("click", () => {
+el("deposit-automatic-toggle-btn").addEventListener("click", async () => {
   el("deposit-manual-section").classList.add("hidden");
   el("deposit-automatic-toggle-btn").classList.add("hidden");
-  el("deposit-automatic-section").classList.remove("hidden");
+  if (depositDefaultIsTelebirr) {
+    el("deposit-telebirr-section").classList.remove("hidden");
+    if (!telebirrDestinationLoaded) {
+      telebirrDestinationLoaded = true;
+      await loadTelebirrDestination();
+    }
+  } else {
+    el("deposit-automatic-section").classList.remove("hidden");
+  }
   el("deposit-manual-toggle-btn").classList.remove("hidden");
 });
 
@@ -1434,6 +1475,53 @@ async function loadManualDestinations() {
     updateInstructions();
   } catch {
     listEl.innerHTML = `<p class="wallet-note">${t("wallet.error.generic")}</p>`;
+  }
+}
+
+// The automatic Telebirr flow has nothing to pick between (there's only
+// ever the one company-owned receiving account for this rail) -- reuses
+// the exact same /api/manual-payment-destinations data and visual
+// language as the manual picker above, just as a single, non-selectable
+// display with a copy button, so a player knows exactly what number to
+// pay before they ever see the reference box.
+async function loadTelebirrDestination() {
+  const containerEl = el("deposit-telebirr-destination");
+  try {
+    const response = await fetch("/api/manual-payment-destinations", { headers: authHeader() });
+    const destinations = await response.json();
+    const destination = response.ok ? destinations.find((d) => d.method_kind === "telebirr") : null;
+    if (!destination) {
+      containerEl.innerHTML = `<p class="wallet-note">${t("wallet.no_manual_destinations")}</p>`;
+      return;
+    }
+    containerEl.innerHTML = `
+      <div class="destination-display">
+        <span class="destination-icon">${DESTINATION_ICONS.telebirr}</span>
+        <span class="destination-info">
+          <span class="destination-name">Telebirr</span>
+          <span class="destination-ref">${escapeHtml(destination.account_name)} · ${escapeHtml(destination.account_ref)}</span>
+        </span>
+        <button type="button" class="destination-copy-btn" id="deposit-telebirr-copy-btn">${t("wallet.telebirr_copy")}</button>
+      </div>
+    `;
+    el("deposit-telebirr-copy-btn").addEventListener("click", async (event) => {
+      const btn = event.currentTarget;
+      try {
+        await navigator.clipboard.writeText(destination.account_ref);
+        btn.textContent = t("wallet.telebirr_copied");
+        btn.classList.add("copied");
+        setTimeout(() => {
+          btn.textContent = t("wallet.telebirr_copy");
+          btn.classList.remove("copied");
+        }, 2000);
+      } catch {
+        /* clipboard access denied or unavailable -- the number is still
+           shown in plain text above, so this is a convenience, not the
+           only way to get it */
+      }
+    });
+  } catch {
+    containerEl.innerHTML = `<p class="wallet-note">${t("wallet.error.generic")}</p>`;
   }
 }
 
