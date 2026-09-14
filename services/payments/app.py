@@ -139,7 +139,7 @@ async def telebirr_ingest(
     - JSON: {"raw_sms": "...", "device_id": "..."}
     - Plain text: the full SMS string
     """
-    await _authenticate_ingest_request(authorization)
+    device = await _authenticate_ingest_request(authorization)
     raw_body = await request.body()
     if raw_body:
         raw_sms = raw_body.decode("utf-8", errors="replace")
