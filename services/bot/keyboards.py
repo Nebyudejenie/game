@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from aiogram.types import (
     InlineKeyboardButton,
@@ -63,16 +64,29 @@ def open_wallet_keyboard(
     button pointing nowhere" discipline main_menu_keyboard's own
     play_button already follows.
 
-    `target`, when given, is appended as a URL fragment (e.g. "deposit"
-    -> "...#deposit") -- web/miniapp/js/app.v6.js's own boot() reads this
-    once, right after the player is authenticated, to land them directly
-    on that wallet tab instead of the default Balance tab with a further,
-    easy-to-miss manual tap still needed (real, repeated confusion this
-    exact gap caused, 2026-09-14). A plain URL fragment, not a Telegram
-    `start_param` -- a `web_app` button hands the Mini App its exact URL
-    verbatim, so this needs no bot-side deep-link plumbing at all.
+    `target`, when given, is appended as a query parameter (e.g. "deposit"
+    -> "...?target=deposit") -- web/miniapp/js/app.v6.js's own boot()
+    reads this once, right after the player is authenticated, to land
+    them directly on that wallet tab instead of the default Balance tab
+    with a further, easy-to-miss manual tap still needed (real, repeated
+    confusion this exact gap caused, 2026-09-14).
+
+    Deliberately a query parameter, not a URL fragment: a first attempt
+    used "...#deposit", which two separate real-device tests (2026-09-14)
+    proved never survives inside actual Telegram -- Telegram's own client
+    needs that same fragment to deliver its WebApp initData
+    (`#tgWebAppData=...&tgWebAppVersion=...&tgWebAppPlatform=...`) and
+    evidently reconstructs or otherwise owns it wholesale rather than
+    appending to whatever was already there, so "#deposit" never reached
+    app.v6.js's own boot() at all. The query string is a part of the URL
+    Telegram has no reason to touch, so it can't collide with that.
     """
-    url = f"{miniapp_url}#{target}" if target else miniapp_url
+    if target:
+        split = urlsplit(miniapp_url)
+        query = urlencode({**dict(parse_qsl(split.query)), "target": target})
+        url = urlunsplit((split.scheme, split.netloc, split.path, query, split.fragment))
+    else:
+        url = miniapp_url
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("wallet_open_button", language), web_app=WebAppInfo(url=url))]

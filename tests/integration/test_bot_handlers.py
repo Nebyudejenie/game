@@ -1428,10 +1428,11 @@ async def test_deposit_redirects_to_the_wallet_when_only_manual_is_available(poo
         assert sent.reply_markup is not None
         button = sent.reply_markup.inline_keyboard[0][0]
         assert button.web_app is not None
-        # "#deposit" (2026-09-14): lands the player directly on the
-        # wallet's Deposit tab instead of Balance with a further tap
-        # still needed -- see open_wallet_keyboard's own docstring.
-        assert button.web_app.url == "https://miniapp.test/#deposit"
+        # "?target=deposit" (2026-09-14): lands the player directly on
+        # the wallet's Deposit tab instead of Balance with a further tap
+        # still needed -- see open_wallet_keyboard's own docstring for
+        # why this is a query param, not a URL fragment.
+        assert button.web_app.url == "https://miniapp.test/?target=deposit"
     finally:
         await _set_chapa_availability(pool, direction="in", enabled=True)
 
@@ -1469,7 +1470,7 @@ async def test_deposit_redirects_to_the_wallet_when_only_telebirr_sms_is_availab
         assert sent.reply_markup is not None
         button = sent.reply_markup.inline_keyboard[0][0]
         assert button.web_app is not None
-        assert button.web_app.url == "https://miniapp.test/#deposit"
+        assert button.web_app.url == "https://miniapp.test/?target=deposit"
     finally:
         await _set_chapa_availability(pool, direction="in", enabled=True)
         await admin_queries.set_payment_provider_availability_admin(
