@@ -185,14 +185,23 @@ services:
     depends_on: *app-depends-on
     command: ["python", "-m", "packages.core.reconcile_job"]
 
-  # The only ingress path onto this server (no public IP of its own) --
-  # always on, not profile-gated like deploy/docker-compose.yml's own
-  # optional observability services, since this *is* production ingress,
-  # not an add-on. Routing rules live in config.yml (see deploy/
-  # cloudflared/config.yml.example), never in the Cloudflare dashboard --
-  # both files, and the tunnel's own credentials, are real secrets and
-  # deliberately gitignored like deploy/.env; README.md's "Domain and
-  # Cloudflare Tunnel" section has the one-time setup that creates them.
+  # STALE, per docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md (2026-09-05,
+  # re-confirmed after a real routing outage on 2026-09-14, see
+  # DECISIONS.md): production does NOT run cloudflared as a container.
+  # It runs as a host-level systemd service, forwarding into a separate
+  # Traefik instance (a different, shared stack on the same host, not
+  # tracked in this repository) that does the real per-hostname routing.
+  # This service definition is not what's actually deployed -- don't
+  # assume `docker compose ... restart cloudflared` or editing
+  # ./cloudflared/config.yml does anything to real production traffic.
+  # Kept only for a possible future containerized-cloudflared migration;
+  # see deploy/cloudflared/config.yml.example's own header before
+  # touching this. Routing rules would live in config.yml (see
+  # deploy/cloudflared/config.yml.example), never in the Cloudflare
+  # dashboard -- both files, and the tunnel's own credentials, are real
+  # secrets and deliberately gitignored like deploy/.env; README.md's
+  # "Domain and Cloudflare Tunnel" section has the one-time setup that
+  # creates them.
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped

@@ -1,0 +1,101 @@
+# RECONSTRUCTED reference, not a copy of a real file this session could
+# read -- the actual Traefik dynamic configuration for jobingo's five
+# hostnames lives entirely outside this git repository, on the same
+# Proxmox host, as part of a separate, shared "Traefik" stack
+# (docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md's own diagram calls it the
+# "hermis" stack) that this repo has never tracked. That fact is exactly
+# what caused a real production outage on 2026-09-14 (see DECISIONS.md):
+# the routers for payments.arada.fun, agent.arada.fun, admin.arada.fun,
+# and finance.arada.fun had all silently disappeared from the live host
+# -- confirmed by getting Traefik's own generic, byte-identical
+# `404 page not found` from all four while arada.fun (gateway) kept
+# working normally -- with no version-controlled copy anywhere to
+# recover from. Whoever has root on that host could not be reached
+# during that incident to say whether Traefik there uses a file provider
+# (this shape) or Docker-label discovery (a different shape entirely) --
+# so treat this file as a faithful reconstruction of the *routing intent*
+# already documented and verified working in
+# docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md, not a guaranteed drop-in
+# replacement for whatever the live provider actually expects.
+#
+# If Traefik on that host uses the file provider (this shape): copy this
+# file's content (adjusted per the checklist below) into wherever that
+# Traefik instance's dynamic-config directory actually is, then confirm
+# it picked the change up (`traefik healthcheck`, or check its own logs
+# for a config-reload line) -- no restart should be needed for a file
+# provider watching its directory, but restart it if it doesn't pick the
+# change up within a few seconds.
+#
+# If Traefik there instead uses Docker-label discovery: this file's
+# `http:` block doesn't apply at all -- the equivalent fix is adding
+# these same five `traefik.http.routers.*` / `traefik.http.services.*`
+# labels directly to jobingo's own containers (deploy/docker-compose.
+# prod.yml doesn't currently have any -- that absence is itself worth
+# fixing at the same time, so a future container recreate can't silently
+# drop routing again the way an out-of-band, unversioned config change
+# already did once).
+#
+# Before applying either way, confirm against the live host:
+#   - Is jobingo's payments/admin/gateway/bot on the same Docker network
+#     Traefik can reach, or does Traefik reach them via the host's
+#     published ports (127.0.0.1:8000-8003, per deploy/docker-compose.
+#     prod.yml's own `ports:` mappings)? The `url:` values below assume
+#     the latter, since jobingo's compose file defines no explicit
+#     Docker network of its own and nothing here or in that file
+#     suggests one is shared with the separate Traefik stack.
+#   - Does Cloudflare Tunnel terminate TLS before reaching Traefik (this
+#     file assumes yes, matching docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md's
+#     own diagram showing the tunnel forwarding to plain
+#     `http://localhost:80`) -- if not, a certResolver/TLS block needs
+#     adding, which this reconstruction has no way to know the shape of.
+#   - What Traefik major version is actually running -- this file uses
+#     v2/v3 file-provider syntax; adjust if the live instance is older.
+
+http:
+  routers:
+    jobingo-gateway:
+      rule: "Host(`arada.fun`) || Host(`www.arada.fun`)"
+      service: jobingo-gateway
+    # Must outrank jobingo-gateway above for the same Host -- Telegram's
+    # webhook is a PathPrefix on the same arada.fun hostname, not a
+    # separate subdomain (docs/PRODUCTION_DOMAIN_AND_CLOUDFLARE.md's own
+    # diagram: "Host(arada.fun) && PathPrefix(/webhook) -> bot:8003").
+    jobingo-bot-webhook:
+      rule: "Host(`arada.fun`) && PathPrefix(`/webhook`)"
+      service: jobingo-bot
+      priority: 100
+    jobingo-payments:
+      rule: "Host(`payments.arada.fun`)"
+      service: jobingo-payments
+    # Same backend as jobingo-payments -- the Agent Portal
+    # (web/agent, services/payments/agent_auth.py) is genuinely part of
+    # the payments service, not a second deployment.
+    jobingo-agent:
+      rule: "Host(`agent.arada.fun`)"
+      service: jobingo-payments
+    jobingo-admin:
+      rule: "Host(`admin.arada.fun`)"
+      service: jobingo-admin
+    # Same backend as jobingo-admin -- "finance" is an admin_users.role
+    # inside the one console, not a separate app (services/admin/rbac.py).
+    jobingo-finance:
+      rule: "Host(`finance.arada.fun`)"
+      service: jobingo-admin
+
+  services:
+    jobingo-gateway:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:8000"
+    jobingo-admin:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:8001"
+    jobingo-payments:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:8002"
+    jobingo-bot:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:8003"
