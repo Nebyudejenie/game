@@ -89,9 +89,14 @@ def make_text_update(
 
 
 def make_contact_update(
-    telegram_id: int, *, contact_user_id: int | None, phone: str, first_name: str = "Test"
+    telegram_id: int,
+    *,
+    contact_user_id: int | None,
+    phone: str,
+    first_name: str = "Test",
+    language_code: str | None = None,
 ) -> Update:
-    user = User(id=telegram_id, is_bot=False, first_name=first_name)
+    user = User(id=telegram_id, is_bot=False, first_name=first_name, language_code=language_code)
     contact = Contact(phone_number=phone, first_name=first_name, user_id=contact_user_id)
     message = Message(
         message_id=next(_id_counter),
@@ -211,6 +216,45 @@ async def test_valid_contact_completes_registration(pool, bot_ctx):
     assert row is not None
     assert decrypt_phone(bytes(row["phone_e164_encrypted"])) == phone
     assert row["display_name"] == "Nebyu"
+
+
+async def test_registration_success_uses_the_stored_default_language_not_the_clients_hint(pool, bot_ctx):
+    # Real bug (2026-09-14): on_contact() used to build its success
+    # message and main menu from the sender's raw Telegram language_code,
+    # not from users.language (defaults to 'am' at the schema level --
+    # migration 81d041ff4513 -- and is what every other command, plus
+    # this same reply-keyboard's own text-matching in on_menu_text,
+    # actually reads). A brand-new user whose device reports
+    # language_code="en" (common regardless of the owner's real language)
+    # saw an English success message and an English main menu, whose
+    # button labels then matched nothing in on_menu_text's Amharic-keyed
+    # mapping -- every reply-keyboard button silently did nothing until
+    # the player typed a slash command like /play directly, which
+    # bypasses text-matching and "auto-fixed" the language on the spot.
+    # This proves both halves: the message language, and that the
+    # rendered keyboard's own button actually works when pressed.
+    dp, bot, session = bot_ctx
+    telegram_id = next_telegram_id()
+    phone = unique_phone()
+    update = make_contact_update(
+        telegram_id, contact_user_id=telegram_id, phone=phone, first_name="Nebyu", language_code="en"
+    )
+    await dp.feed_update(bot, update)
+    await _settle()
+
+    assert len(session.sent) == 1
+    sent = session.sent[0]
+    assert sent.text == "እንኳን ደስ አለዎት፣ Nebyu! ምዝገባዎ ተጠናቅቋል።"
+    assert sent.reply_markup is not None
+    button_texts = {button.text for row in sent.reply_markup.keyboard for button in row}
+    assert "▶️ ይጀምሩ" in button_texts
+
+    session.sent.clear()
+    await dp.feed_update(bot, make_text_update(telegram_id, "▶️ ይጀምሩ"))
+    await _settle(messages=2)
+    assert len(session.sent) == 2
+    assert "Nebyu" in session.sent[0].text
+    assert "Nebyu" in session.sent[1].text
 
 
 async def test_contact_with_an_unrecognizable_phone_number_is_rejected(pool, bot_ctx):

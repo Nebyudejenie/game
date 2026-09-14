@@ -144,7 +144,24 @@ async def on_contact(
     assert message.from_user is not None and message.contact is not None
     telegram_id = message.from_user.id
     chat_id = message.chat.id
-    language = resolve_language(message.from_user.language_code)
+    # Real bug (2026-09-14): this used to be
+    # resolve_language(message.from_user.language_code) -- Telegram's own
+    # client-language hint, which is unreliable for this app's actual
+    # audience (many devices report "en" regardless of the owner's real
+    # preference) and, critically, is NOT what register_from_contact()
+    # below persists: users.language defaults to 'am' at the schema level
+    # (migration 81d041ff4513) and is never written from language_code
+    # anywhere. A brand-new user saw their registration success message
+    # and main menu in whatever language_code said (often English), then
+    # watched it silently flip to Amharic the moment they ran /play or
+    # any other command -- every one of which resolves language via this
+    # same _language_for() DB lookup. Using it here too makes
+    # registration's own messages consistent with literally everything
+    # that follows it, for every language, with no more flip. A genuine
+    # brand-new row (not yet inserted) still resolves correctly: no row
+    # -> resolve_language(None) -> DEFAULT_LANGUAGE ("am"), the exact
+    # value the INSERT below is about to give it anyway.
+    language = await _language_for(pool, telegram_id)
 
     # Peeked, not popped, here -- a real bug a code review pass caught:
     # popping (deleting) the pending referral before attempting
