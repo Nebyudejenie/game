@@ -1405,8 +1405,23 @@ el("deposit-telebirr-back-btn").addEventListener("click", () => {
   el("deposit-telebirr-toggle-btn").classList.remove("hidden");
 });
 
+// A player pasting the ENTIRE Telebirr confirmation SMS (not just the
+// bare code) should work exactly as well as pasting only the reference
+// -- less-technical players are far more likely to copy the whole
+// message than to correctly select just one short code out of it. This
+// mirrors services/payments/telebirr_parser.py's own server-side
+// _REFERENCE_RE exactly (same anchor phrase, same character class, same
+// length bounds) so client and server always agree on what counts as a
+// reference -- if this ever finds a match, it's the same 10-character
+// code the server's own parser already extracted from the real SMS when
+// it first ingested it, not a new, independent guess.
+function extractTelebirrReference(rawInput) {
+  const match = rawInput.match(/transaction number is\s+([A-Za-z0-9]{6,20})/i);
+  return match ? match[1] : rawInput.trim();
+}
+
 el("deposit-telebirr-submit-btn").addEventListener("click", async () => {
-  const reference = el("deposit-telebirr-reference-input").value.trim();
+  const reference = extractTelebirrReference(el("deposit-telebirr-reference-input").value);
   if (!reference) {
     setWalletStatus("deposit-telebirr-status", "wallet.error.external_reference_required", "error");
     return;
