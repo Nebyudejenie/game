@@ -408,3 +408,95 @@ async def test_revoke_then_reactivate_via_admin_api(admin_server, pool):
         )
     assert revoke.status_code == 200
     assert reactivate.status_code == 200
+
+
+# --- financial safety boundary: proving injection is structurally impossible,
+# not just absent from today's client -------------------------------------
+
+
+async def test_client_injected_financial_fields_are_silently_dropped_never_trusted(pool, conn, payments_server):
+    # TelebirrIngestRequest declares exactly two fields (raw_sms, device_id)
+    # and pydantic's default extra="ignore" means anything else in the JSON
+    # body -- however convincing -- never becomes part of the parsed
+    # request object the route handler receives at all. This sends a real
+    # request with a forged amount, recipient, payer, and even a forged
+    # external_reference sitting alongside the real raw_sms, and proves the
+    # stored evidence reflects ONLY what parse_telebirr_sms() extracted
+    # from the real SMS text -- the injected fields never touch anything.
+    device = await _register_device(pool)
+    recipient = f"InjectionRecip{_next_reference()}"
+    await conn.execute(
+        "INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name, is_active) "
+        "VALUES ('telebirr', '0911000000', $1, true)",
+        recipient,
+    )
+    reference = _next_reference()
+    real_amount = "10.00"
+    sms = _build_sms(reference, amount=real_amount, recipient=recipient)
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{payments_server}/internal/telebirr/ingest",
+            json={
+                "raw_sms": sms,
+                "device_id": device["device_id"],
+                # None of these fields exist on TelebirrIngestRequest --
+                # a real attacker's or a misconfigured MacroDroid's best
+                # attempt at overriding the financial outcome.
+                "amount": "999999.00",
+                "recipient_name": "SOMEONE ELSE ENTIRELY",
+                "payer_name": "FORGED PAYER",
+                "payer_phone": "2519****0000",
+                "external_reference": "FORGEDREF01",
+            },
+            headers={"Authorization": f"Bearer {device['token']}"},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    # The real reference extracted from the SMS text, never the forged one.
+    assert body["external_reference"] == reference
+
+    row = await conn.fetchrow(
+        "SELECT amount, recipient_name, payer_name, payer_phone FROM payment_evidence "
+        "WHERE external_reference = $1",
+        reference,
+    )
+    assert str(row["amount"]) == real_amount
+    assert row["recipient_name"] == recipient
+    assert row["payer_name"] == "DAWIT WERKALEMAHU"
+    assert row["payer_phone"] == "2519****6294"
+
+
+async def test_device_id_alone_without_the_matching_token_cannot_authenticate(pool, conn, payments_server):
+    # Knowing a real, registered device_id is not a secret and must never
+    # be sufficient -- only the bearer token (verified by its hash) proves
+    # identity. Sends the real device_id in the body, but a token that
+    # doesn't belong to it.
+    device = await _register_device(pool)
+    other_device = await _register_device(pool)
+    reference = _next_reference()
+    response = await _post_ingest(
+        payments_server,
+        token=other_device["token"],  # wrong token for this device_id
+        raw_sms=_build_sms(reference, recipient="X"),
+        device_id=device["device_id"],  # correct device_id, but irrelevant to auth
+    )
+    # Authenticates as other_device (by its own token), not as `device` --
+    # never a 401, because a *valid* token was presented, just not one
+    # that matches the device_id label in the body. This is exactly the
+    # point: the body's device_id is cosmetic once a per-device token
+    # authenticates, per services/payments/app.py's own design.
+    assert response.status_code == 200
+    row = await conn.fetchrow(
+        "SELECT source_ref FROM payment_evidence WHERE external_reference = $1", reference
+    )
+    assert row["source_ref"] == other_device["device_id"]
+
+    # And a bare device_id with NO token at all (or a garbage one) is
+    # rejected outright -- device_id is never, by itself, a credential.
+    async with httpx.AsyncClient() as client:
+        no_auth_response = await client.post(
+            f"{payments_server}/internal/telebirr/ingest",
+            json={"raw_sms": _build_sms(_next_reference(), recipient="X"), "device_id": device["device_id"]},
+        )
+    assert no_auth_response.status_code == 401

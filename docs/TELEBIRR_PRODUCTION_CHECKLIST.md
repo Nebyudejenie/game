@@ -9,9 +9,10 @@ in `docs/TELEBIRR_SMS_OPERATIONS_GUIDE.md` (section references given).
 - [ ] Latest commit pushed to `origin/main`.
 - [ ] Server pulled the latest commit (`/home/cosmic/game` on the
       production host, per this project's real deployment topology).
-- [ ] `alembic upgrade head` run — confirm both
-      `9c1f4d7a2b3e_telebirr_sms_evidence` and
-      `2f6b1a9c4d8e_telebirr_evidence_vat_receipt_url` are applied.
+- [ ] `alembic upgrade head` run — confirm
+      `9c1f4d7a2b3e_telebirr_sms_evidence`,
+      `2f6b1a9c4d8e_telebirr_evidence_vat_receipt_url`, and
+      `e3a7c9f01b2d_telebirr_ingestion_devices` are all applied.
 - [ ] `gateway`, `payments`, `admin`, `bot`, `payout-worker` containers
       recreated with the current image/code (`docker compose ... up -d
       --force-recreate --no-deps <services>`).
@@ -22,11 +23,16 @@ in `docs/TELEBIRR_SMS_OPERATIONS_GUIDE.md` (section references given).
 
 ## B. Secrets & configuration
 
-- [ ] `MACRODROID_INGEST_TOKEN` generated (`python -c "import secrets;
+- [ ] **Preferred path**: a per-device token registered via admin console
+      → Ingestion Devices → Register device (§3.2a/§4.1 of the ops
+      guide) — copied once, immediately, into the phone's macro. No env
+      var, no server restart, isolated per phone.
+- [ ] **Legacy path** (only if not using per-device tokens):
+      `MACRODROID_INGEST_TOKEN` generated (`python -c "import secrets;
       print(secrets.token_hex(32))"`) and set in the server's `deploy/.env`
       — **never** committed to git, never pasted into a shared doc/chat.
-- [ ] Confirmed the token is only known to: this env file, and the
-      MacroDroid macro on the dedicated phone.
+      Confirmed known only to this env file and the MacroDroid macro on
+      the dedicated phone.
 - [ ] `payment_provider_availability` shows `telebirr_sms / in = false`
       (the shipped default) — confirm this **before** doing anything else,
       so no player can attempt a redemption mid-setup.
@@ -56,15 +62,20 @@ in `docs/TELEBIRR_SMS_OPERATIONS_GUIDE.md` (section references given).
 
 ## E. MacroDroid device
 
+- [ ] Device registered in admin console → Ingestion Devices (§B above)
+      *before* touching the phone, its token copied to a temporary note.
 - [ ] Dedicated Android phone set up per
       `docs/TELEBIRR_MACRODROID_QUICK_SETUP.md`, start to finish.
 - [ ] Battery optimization disabled for MacroDroid; autostart permission
       granted if applicable to this phone's manufacturer.
-- [ ] Macro configured with the real ingest URL and the real
-      `MACRODROID_INGEST_TOKEN`.
+- [ ] Macro configured with the real ingest URL and this device's own
+      token (or the legacy `MACRODROID_INGEST_TOKEN` only if not using
+      per-device tokens).
 - [ ] Macro toggled ON.
 - [ ] A realistic-format test SMS produces a real HTTP 200 from the
       server (checked in MacroDroid's own log).
+- [ ] The device's row in Ingestion Devices shows a real `last_seen_at`/
+      `last_success_at` after that test.
 
 ## F. Parser verification against real data
 
