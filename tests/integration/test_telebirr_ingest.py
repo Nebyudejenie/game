@@ -264,6 +264,65 @@ async def test_received_template_recipient_check_is_unaffected_by_phone_matching
     assert outcome.status == STATUS_INGESTED_AVAILABLE
 
 
+async def test_transferred_full_name_matches_a_shorter_configured_nickname_with_correct_phone(pool, conn):
+    # The exact real SMS a real payer forwarded on 2026-09-14, reproduced
+    # verbatim (only the reference is swapped for a test-unique one) --
+    # was rejected in production purely because Telebirr's "transferred"
+    # template states the payer's full registered name ("Nebyu Dejenie")
+    # while the configured destination uses the shorter nickname Telebirr
+    # itself uses in the "received" template's own "Dear {name}" greeting
+    # ("Nebyu") -- despite the phone number matching exactly. This is the
+    # real regression test for that fix.
+    account_ref = "0911223344"  # masks to exactly 2519****3344, matching the real SMS below
+    recipient_nickname = f"Nebyu{_unique_name_suffix()}"
+    await conn.execute(
+        "INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name, is_active) "
+        "VALUES ('telebirr', $1, $2, true)",
+        account_ref,
+        recipient_nickname,
+    )
+    reference = _next_reference()
+    sms = (
+        f"Dear DAWIT \n"
+        f"You have transferred ETB 10.00 to {recipient_nickname} Dejenie (2519****3344) on "
+        f"14/09/2026 14:19:30. Your transaction number is {reference}. The service fee is  ETB 0.87 and  "
+        f"15% VAT on the service fee is ETB 0.13. Your current E-Money Account  balance is ETB 912.24. "
+        f"To download your payment information please click this link: "
+        f"https://transactioninfo.ethiotelecom.et/receipt/{reference}.\n\n"
+        f"Thank you for using telebirr\n"
+        f"Ethio telecom"
+    )
+
+    outcome = await ingest_sms_evidence(pool, raw_sms=sms, source="macrodroid", source_ref="test-device")
+    assert outcome.status == STATUS_INGESTED_AVAILABLE
+    assert outcome.reason is None
+
+    row = await conn.fetchrow(
+        "SELECT status, recipient_name FROM payment_evidence WHERE external_reference = $1", reference
+    )
+    assert row["status"] == "available"
+    assert row["recipient_name"] == f"{recipient_nickname} Dejenie"
+
+
+async def test_transferred_nickname_must_match_a_whole_word_not_a_bare_substring(pool, conn):
+    # Guards the word-boundary safety property the fix above depends on:
+    # a configured nickname that happens to be a PREFIX of an unrelated
+    # word in the SMS's full name must never match. "Neb" is a substring
+    # of "Nebyu" but not a whole word within it.
+    account_ref = "0911223355"  # masks to 2519****3355
+    await conn.execute(
+        "INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name, is_active) "
+        "VALUES ('telebirr', $1, 'Neb', true)",
+        account_ref,
+    )
+    reference = _next_reference()
+    sms = _build_transferred_sms(reference, recipient="Nebyu Dejenie", recipient_phone="2519****3355")
+
+    outcome = await ingest_sms_evidence(pool, raw_sms=sms, source="macrodroid", source_ref="test-device")
+    assert outcome.status == STATUS_INGESTED_REJECTED
+    assert outcome.reason == "recipient_not_recognized"
+
+
 # --- real HTTP: the MacroDroid ingestion route -----------------------------
 
 

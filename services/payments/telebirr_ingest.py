@@ -93,42 +93,68 @@ def _mask_ethiopian_phone(raw: str) -> str | None:
     return f"251{local[0]}****{local[-4:]}"
 
 
+def _name_matches_whole_word(haystack: str, needle: str) -> bool:
+    """True if `needle` appears in `haystack` as a whole word (word-
+    boundary matched), not merely as a substring -- e.g. "nebyu" is found
+    in "nebyu dejenie" but not in "nebyuworks". Both arguments are
+    expected already lower-cased/trimmed by the caller.
+    """
+    return re.search(rf"\b{re.escape(needle)}\b", haystack) is not None
+
+
 async def _find_matching_recipient(
     conn: AsyncpgConnection, *, recipient_name: str, recipient_phone: str | None, at: datetime
 ) -> bool:
-    """Fail-closed recipient check (sections 92/94/13). Name match is
-    always required, case-insensitively and exactly against manual_
-    payment_destinations.account_name -- a fuzzy/contains match would let
-    an unrelated similarly-named recipient slip through, which is exactly
-    the false-acceptance risk section 94 forbids. An admin configuring a
-    telebirr destination should set account_name to precisely what
-    Telebirr's own SMS calls the account holder (the "Dear {name}"
-    greeting for a "received" template, the "to {name}" recipient for a
-    "transferred" one -- both resolve to this same field).
+    """Fail-closed recipient check (sections 92/94/13).
 
-    When the parsed evidence also carries a recipient_phone (only the
-    "transferred" template ever does -- "received" never restates the
-    recipient's own number), that phone must ALSO match the configured
-    destination's account_ref (masked via _mask_ethiopian_phone above) --
-    a strictly stronger check than name alone, closing the gap where two
-    different real accounts might coincidentally share a display name.
+    "received" template (recipient_phone is always None -- it never
+    restates the recipient's own number): name match is required,
+    case/whitespace-insensitively and EXACTLY against manual_payment_
+    destinations.account_name -- a fuzzy/contains match would let an
+    unrelated similarly-named recipient slip through (section 94's own
+    false-acceptance risk), and there is no second signal to fall back on
+    if the name is wrong.
+
+    "transferred" template (always carries a recipient_phone): Telebirr's
+    own template states the PAYER's full registered name for the "to
+    {name}" recipient field (e.g. "Nebyu Dejenie"), which routinely
+    differs from the shorter nickname an admin realistically configures
+    as account_name (e.g. "Nebyu", matching the "received" template's own
+    shorter "Dear {name}" greeting for the same real person) -- a real,
+    genuine payment was rejected live over exactly this naming difference
+    on 2026-09-14, despite the phone matching exactly. account_name is
+    accepted here as either an exact match OR a whole-word match within
+    the SMS's full name (never a bare substring check, which could
+    false-match part of an unrelated longer word) -- but the phone must
+    STILL also match the configured destination's account_ref (masked via
+    _mask_ethiopian_phone above) regardless of which way the name
+    matched: this keeps "transferred" a genuine two-factor check
+    (name-ish + exact phone), it just no longer requires the name half to
+    be byte-identical to Telebirr's own full-name rendering.
     """
     rows = await conn.fetch(
         """
-        SELECT account_ref FROM manual_payment_destinations
+        SELECT account_ref, account_name FROM manual_payment_destinations
         WHERE method_kind = 'telebirr' AND is_active
-          AND lower(trim(account_name)) = lower(trim($1))
-          AND (effective_from IS NULL OR effective_from <= $2)
-          AND (effective_until IS NULL OR effective_until >= $2)
+          AND (effective_from IS NULL OR effective_from <= $1)
+          AND (effective_until IS NULL OR effective_until >= $1)
         """,
-        recipient_name,
         at,
     )
-    if not rows:
-        return False
-    if recipient_phone is None:
-        return True
-    return any(_mask_ethiopian_phone(row["account_ref"]) == recipient_phone for row in rows)
+    normalized_recipient_name = recipient_name.strip().lower()
+    for row in rows:
+        configured_name = row["account_name"].strip().lower()
+        if recipient_phone is None:
+            if configured_name == normalized_recipient_name:
+                return True
+            continue
+        name_matches = configured_name == normalized_recipient_name or _name_matches_whole_word(
+            normalized_recipient_name, configured_name
+        )
+        phone_matches = _mask_ethiopian_phone(row["account_ref"]) == recipient_phone
+        if name_matches and phone_matches:
+            return True
+    return False
 
 
 async def ingest_sms_evidence(
