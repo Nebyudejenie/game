@@ -33,6 +33,19 @@ dependencies = [
     "aiogram>=3.0",
     "aiohttp>=3.9",
     "httpx>=0.27",
+    # FastAPI's own Form(...)/UploadFile support (services/sms/app.py's
+    # CSV bulk-import route, packages/core/sms/csv_import.py) needs this
+    # at import time -- fastapi raises RuntimeError otherwise, so it's a
+    # hard dependency, not an optional extra. Same failure class as the
+    # aiogram gap above: present in every dev shell this project has ever
+    # been built in (by chance, not by declaration), so every test here
+    # passed while a genuinely fresh `pip install .` -- the production
+    # image's own build step -- silently produced an sms service that
+    # crash-loops on startup. Confirmed 2026-09-14: the sms service had
+    # never actually been deployed to production before, so this sat
+    # undetected since the CSV import feature shipped (2026-09-10) until
+    # the first real deploy attempt hit it.
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]

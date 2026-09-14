@@ -162,6 +162,8 @@ python-dotenv==1.2.3
     # via
     #   pydantic-settings
     #   uvicorn
+python-multipart==0.0.32
+    # via jobingo (pyproject.toml)
 pyyaml==6.0.3
     # via uvicorn
 redis==8.1.0
