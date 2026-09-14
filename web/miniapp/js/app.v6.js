@@ -1516,48 +1516,59 @@ async function loadManualDestinations() {
   }
 }
 
-// The automatic Telebirr flow has nothing to pick between (there's only
-// ever the one company-owned receiving account for this rail) -- reuses
-// the exact same /api/manual-payment-destinations data and visual
-// language as the manual picker above, just as a single, non-selectable
-// display with a copy button, so a player knows exactly what number to
-// pay before they ever see the reference box.
+// The automatic Telebirr flow shows every active Telebirr destination an
+// admin has configured -- not just one. The server's own recipient match
+// (services/payments/telebirr_ingest.py::_find_matching_recipient)
+// already accepts a payment to ANY of them, so if an admin adds a second
+// number (a new till, a backup account, whatever the real reason), a
+// player needs to see it too, not just whichever one happened to be
+// added first -- a real gap found live, 2026-09-14: a newly-added
+// destination was invisible here because this only ever looked up a
+// single match. Reuses the exact same /api/manual-payment-destinations
+// data and visual language as the manual picker above; each one gets its
+// own card and its own copy button, since paying into any of them works.
 async function loadTelebirrDestination() {
   const containerEl = el("deposit-telebirr-destination");
   try {
     const response = await fetch("/api/manual-payment-destinations", { headers: authHeader() });
-    const destinations = await response.json();
-    const destination = response.ok ? destinations.find((d) => d.method_kind === "telebirr") : null;
-    if (!destination) {
+    const allDestinations = await response.json();
+    const destinations = response.ok ? allDestinations.filter((d) => d.method_kind === "telebirr") : [];
+    if (destinations.length === 0) {
       containerEl.innerHTML = `<p class="wallet-note">${t("wallet.no_manual_destinations")}</p>`;
       return;
     }
-    containerEl.innerHTML = `
+    containerEl.innerHTML = destinations
+      .map(
+        (d, i) => `
       <div class="destination-display">
         <span class="destination-icon">${DESTINATION_ICONS.telebirr}</span>
         <span class="destination-info">
           <span class="destination-name">Telebirr</span>
-          <span class="destination-ref">${escapeHtml(destination.account_name)} · ${escapeHtml(destination.account_ref)}</span>
+          <span class="destination-ref">${escapeHtml(d.account_name)} · ${escapeHtml(d.account_ref)}</span>
         </span>
-        <button type="button" class="destination-copy-btn" id="deposit-telebirr-copy-btn">${t("wallet.telebirr_copy")}</button>
-      </div>
-    `;
-    el("deposit-telebirr-copy-btn").addEventListener("click", async (event) => {
-      const btn = event.currentTarget;
-      try {
-        await navigator.clipboard.writeText(destination.account_ref);
-        btn.textContent = t("wallet.telebirr_copied");
-        btn.classList.add("copied");
-        setTimeout(() => {
-          btn.textContent = t("wallet.telebirr_copy");
-          btn.classList.remove("copied");
-        }, 2000);
-      } catch {
-        /* clipboard access denied or unavailable -- the number is still
-           shown in plain text above, so this is a convenience, not the
-           only way to get it */
-      }
-    });
+        <button type="button" class="destination-copy-btn" data-index="${i}">${t("wallet.telebirr_copy")}</button>
+      </div>`
+      )
+      .join("");
+    for (const btn of containerEl.querySelectorAll(".destination-copy-btn")) {
+      btn.addEventListener("click", async (event) => {
+        const target = event.currentTarget;
+        const destination = destinations[Number(target.dataset.index)];
+        try {
+          await navigator.clipboard.writeText(destination.account_ref);
+          target.textContent = t("wallet.telebirr_copied");
+          target.classList.add("copied");
+          setTimeout(() => {
+            target.textContent = t("wallet.telebirr_copy");
+            target.classList.remove("copied");
+          }, 2000);
+        } catch {
+          /* clipboard access denied or unavailable -- the number is
+             still shown in plain text above, so this is a convenience,
+             not the only way to get it */
+        }
+      });
+    }
   } catch {
     containerEl.innerHTML = `<p class="wallet-note">${t("wallet.error.generic")}</p>`;
   }
