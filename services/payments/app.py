@@ -131,10 +131,27 @@ async def _authenticate_ingest_request(authorization: str) -> DeviceIdentity | N
 
 @app.post("/internal/telebirr/ingest")
 async def telebirr_ingest(
-    body: TelebirrIngestRequest, authorization: Annotated[str, Header()] = ""
+    request: Request, authorization: str = Header("")
 ) -> dict[str, str | int | None]:
-    device = await _authenticate_ingest_request(authorization)
-    if not body.raw_sms.strip():
+    """Accept SMS payload from MacroDroid or any HTTP client.
+
+    The body can be either:
+    - JSON: {"raw_sms": "...", "device_id": "..."}
+    - Plain text: the full SMS string
+    """
+    _check_macrodroid_token(authorization)
+    raw_body = await request.body()
+    if raw_body:
+        raw_sms = raw_body.decode("utf-8", errors="replace")
+        try:
+            import json
+            data = json.loads(raw_sms)
+            raw_sms = data.get("raw_sms", str(data))
+        except (json.JSONDecodeError, ValueError):
+            pass  # plain text body is accepted as-is
+    else:
+        raw_sms = ""
+    if not raw_sms.strip():
         raise HTTPException(status_code=422, detail="raw_sms_required")
 
     # A device's own registered device_id is authoritative once a
@@ -143,9 +160,9 @@ async def telebirr_ingest(
     # label, not a secret; the bearer token is what was actually
     # verified), only used as-is on the legacy shared-token path, where
     # it always has been.
-    source_ref = device.device_id if device is not None else body.device_id
+    source_ref = device.device_id if device is not None else "samsung-a15-01"
     outcome = await ingest_sms_evidence(
-        app.state.pool, raw_sms=body.raw_sms, source=SOURCE_MACRODROID, source_ref=source_ref
+        app.state.pool, raw_sms=raw_sms, source=SOURCE_MACRODROID, source_ref=source_ref
     )
     if device is not None:
         await device_registry.record_ingestion_outcome(
@@ -162,7 +179,6 @@ async def telebirr_ingest(
         "reason": outcome.reason,
         "device_name": device.device_name if device is not None else None,
     }
-
 
 # --- Payment Agent Portal ---------------------------------------------
 #
