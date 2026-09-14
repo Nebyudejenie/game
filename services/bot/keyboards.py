@@ -52,18 +52,30 @@ def deposit_checkout_keyboard(language: str, *, checkout_url: str, amount: str) 
     )
 
 
-def open_wallet_keyboard(language: str, *, miniapp_url: str) -> InlineKeyboardMarkup:
-    """P1: when the automatic provider is unavailable, /deposit and
-    /withdraw point the player at the Mini App's own wallet screen
-    (destination picker, reference input) instead of trying to collect a
-    multi-field manual request as bot command args. Only ever called once
-    the caller has already confirmed miniapp_url is non-empty -- same
-    "never ship a button pointing nowhere" discipline main_menu_keyboard's
-    own play_button already follows.
+def open_wallet_keyboard(
+    language: str, *, miniapp_url: str, target: str | None = None
+) -> InlineKeyboardMarkup:
+    """P1: when the automatic provider is unavailable, /deposit points the
+    player at the Mini App's own wallet screen (destination picker,
+    reference input) instead of trying to collect a multi-field manual
+    request as bot command args. Only ever called once the caller has
+    already confirmed miniapp_url is non-empty -- same "never ship a
+    button pointing nowhere" discipline main_menu_keyboard's own
+    play_button already follows.
+
+    `target`, when given, is appended as a URL fragment (e.g. "deposit"
+    -> "...#deposit") -- web/miniapp/js/app.v6.js's own boot() reads this
+    once, right after the player is authenticated, to land them directly
+    on that wallet tab instead of the default Balance tab with a further,
+    easy-to-miss manual tap still needed (real, repeated confusion this
+    exact gap caused, 2026-09-14). A plain URL fragment, not a Telegram
+    `start_param` -- a `web_app` button hands the Mini App its exact URL
+    verbatim, so this needs no bot-side deep-link plumbing at all.
     """
+    url = f"{miniapp_url}#{target}" if target else miniapp_url
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=t("wallet_open_button", language), web_app=WebAppInfo(url=miniapp_url))]
+            [InlineKeyboardButton(text=t("wallet_open_button", language), web_app=WebAppInfo(url=url))]
         ]
     )
 

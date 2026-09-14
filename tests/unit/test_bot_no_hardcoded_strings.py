@@ -29,8 +29,8 @@ _EXEMPT_CALL_NAMES = {"Command", "CommandObject", "Router"}
 _SQL_METHOD_NAMES = {"fetchrow", "fetch", "fetchval", "execute"}
 
 # Calls whose string arguments are internal domain identifiers (ledger
-# account kinds), not user-facing text.
-_DOMAIN_ENUM_CALL_NAMES = {"get_or_create_account"}
+# account kinds, a wallet tab name), not user-facing text.
+_DOMAIN_ENUM_CALL_NAMES = {"get_or_create_account", "open_wallet_keyboard"}
 
 
 def _call_name(func: ast.expr) -> str | None:

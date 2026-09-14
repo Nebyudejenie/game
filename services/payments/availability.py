@@ -24,7 +24,13 @@ import asyncpg
 
 from packages.core.config import Settings
 
-_IMPLEMENTED_PROVIDERS = frozenset({"chapa", "manual", "telebirr_sms"})
+# telebirr_sms has no adapter class (unlike ChapaProvider/ManualProvider),
+# so callers that need to check for it by name (e.g. services/bot/
+# handlers.py's cmd_deposit) import this constant rather than repeating
+# the bare literal.
+TELEBIRR_SMS_PROVIDER_NAME = "telebirr_sms"
+
+_IMPLEMENTED_PROVIDERS = frozenset({"chapa", "manual", TELEBIRR_SMS_PROVIDER_NAME})
 
 
 async def get_payment_availability(pool: asyncpg.Pool, settings: Settings) -> dict[str, list[str]]:

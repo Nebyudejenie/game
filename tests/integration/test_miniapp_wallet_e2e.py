@@ -441,59 +441,72 @@ async def test_history_tab_filters_by_won_and_lost(gateway_server, browser, pool
 
 async def test_manual_deposit_flow_submits_a_real_review_request(gateway_server, browser, pool, conn):
     # P1: keep taking deposits when the automatic provider is
-    # unavailable. Deliberately doesn't touch gateway_app.state.chapa at
-    # all -- the manual rail is provider-independent by design (the whole
-    # point of this feature), so this proves the manual panel works
-    # regardless of Chapa's own state.
-    destination_row = await conn.fetchrow(
-        "INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name, instructions) "
-        "VALUES ('telebirr', '0911000000', 'Arada Bingo PLC', 'Reference your player id') RETURNING id"
+    # unavailable. Manual Deposit is no longer offered as a player-visible
+    # *choice* alongside Chapa/Telebirr (DEPOSIT_MANUAL_HIDDEN_FROM_UI,
+    # 2026-09-14) -- it's reachable only as the last resort when neither
+    # is available, so Chapa must be explicitly disabled here for the
+    # section to appear at all (shown directly, no toggle click needed --
+    # that's the whole point of it being the only remaining option).
+    admin_id, *_ = await create_test_admin(pool)
+    await admin_queries.set_payment_provider_availability_admin(
+        pool, admin_id=admin_id, provider="chapa", direction="in", enabled=False,
+        reason="e2e test: force Manual Deposit as the last-resort default", ip_address=None,
     )
+    try:
+        destination_row = await conn.fetchrow(
+            "INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name, instructions) "
+            "VALUES ('telebirr', '0911000000', 'Arada Bingo PLC', 'Reference your player id') RETURNING id"
+        )
 
-    telegram_id = next_telegram_id()
-    page, console_errors = await prepare_page(browser, telegram_id)
-    http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
-    await page.goto(http_base + "/")
-    await page.wait_for_selector("#screen-rooms.active", timeout=10000)
-    await page.wait_for_function(
-        "document.getElementById('balance-amount').textContent.includes('0.00')", timeout=10000
-    )
-    user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
-    assert user_row is not None
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('0.00')", timeout=10000
+        )
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        assert user_row is not None
 
-    await _open_wallet_tab(page, "deposit")
-    await page.click("#deposit-manual-toggle-btn")
-    destination_selector = f'.destination-card[data-id="{destination_row["id"]}"]'
-    await page.wait_for_selector(destination_selector, timeout=10000)
-    # The card list shows every active destination (shared, session-wide
-    # data other tests also insert into), not necessarily with this
-    # test's own newest row auto-selected -- click it explicitly rather
-    # than assuming it's the default.
-    await page.click(destination_selector)
+        await _open_wallet_tab(page, "deposit")
+        await page.wait_for_selector("#deposit-manual-section:not(.hidden)", timeout=10000)
+        destination_selector = f'.destination-card[data-id="{destination_row["id"]}"]'
+        await page.wait_for_selector(destination_selector, timeout=10000)
+        # The card list shows every active destination (shared, session-wide
+        # data other tests also insert into), not necessarily with this
+        # test's own newest row auto-selected -- click it explicitly rather
+        # than assuming it's the default.
+        await page.click(destination_selector)
 
-    await page.fill("#deposit-manual-amount-input", "300")
-    await page.fill("#deposit-manual-reference-input", "FT-E2E-MINIAPP-1")
-    await page.click("#deposit-manual-submit-btn")
+        await page.fill("#deposit-manual-amount-input", "300")
+        await page.fill("#deposit-manual-reference-input", "FT-E2E-MINIAPP-1")
+        await page.click("#deposit-manual-submit-btn")
 
-    await page.wait_for_selector("#deposit-manual-status.success", timeout=10000)
+        await page.wait_for_selector("#deposit-manual-status.success", timeout=10000)
 
-    row = await pool.fetchrow(
-        "SELECT status, provider, amount, provider_ref, manual_destination_id FROM payments "
-        "WHERE user_id = $1 ORDER BY id DESC LIMIT 1",
-        user_row["id"],
-    )
-    assert row["status"] == "review"
-    assert row["provider"] == "manual"
-    assert row["amount"] == Decimal("300.00")
-    assert row["provider_ref"] == "FT-E2E-MINIAPP-1"
-    assert row["manual_destination_id"] == destination_row["id"]
+        row = await pool.fetchrow(
+            "SELECT status, provider, amount, provider_ref, manual_destination_id FROM payments "
+            "WHERE user_id = $1 ORDER BY id DESC LIMIT 1",
+            user_row["id"],
+        )
+        assert row["status"] == "review"
+        assert row["provider"] == "manual"
+        assert row["amount"] == Decimal("300.00")
+        assert row["provider_ref"] == "FT-E2E-MINIAPP-1"
+        assert row["manual_destination_id"] == destination_row["id"]
 
-    # No premature credit -- the whole point of "PENDING REVIEW".
-    balance_text = await page.text_content("#balance-amount")
-    assert balance_text and "0.00" in balance_text
+        # No premature credit -- the whole point of "PENDING REVIEW".
+        balance_text = await page.text_content("#balance-amount")
+        assert balance_text and "0.00" in balance_text
 
-    assert console_errors == [], f"JS errors during manual deposit flow: {console_errors}"
-    await page.screenshot(path="/tmp/miniapp-manual-deposit.png")
+        assert console_errors == [], f"JS errors during manual deposit flow: {console_errors}"
+        await page.screenshot(path="/tmp/miniapp-manual-deposit.png")
+    finally:
+        await admin_queries.set_payment_provider_availability_admin(
+            pool, admin_id=admin_id, provider="chapa", direction="in", enabled=True,
+            reason="test cleanup", ip_address=None,
+        )
     await page.close()
 
 
@@ -632,13 +645,27 @@ async def test_full_lifecycle_registration_through_withdrawal_using_the_manual_r
     room = await load_room_config(pool, room_id)
     engine = RoundEngine(pool, redis, room, card_pool)
     task = asyncio.create_task(engine.run_forever())
+    # Created before the try block, matching test_telebirr_reference_
+    # redemption_flow_credits_the_wallet's own established pattern --
+    # the finally block below needs this id to always be defined, never
+    # left to a NameError masking whatever actually failed inside try.
+    admin_id, *_ = await create_test_admin(pool)
 
     try:
         destination_row = await conn.fetchrow(
             "INSERT INTO manual_payment_destinations (method_kind, account_ref, account_name) "
             "VALUES ('telebirr', '0911000000', 'Arada Bingo PLC') RETURNING id"
         )
-        admin_id, *_ = await create_test_admin(pool)
+        # Manual Deposit is no longer offered as a player-visible *choice*
+        # alongside Chapa/Telebirr (DEPOSIT_MANUAL_HIDDEN_FROM_UI,
+        # 2026-09-14) -- disabling Chapa deposits is what makes it the
+        # last-resort default this "...using the manual rail" test needs
+        # to reach at all. Withdrawal's own manual path is unaffected (a
+        # checkbox opt-in, not this toggle), so nothing else here changes.
+        await admin_queries.set_payment_provider_availability_admin(
+            pool, admin_id=admin_id, provider="chapa", direction="in", enabled=False,
+            reason="e2e test: force Manual Deposit as the last-resort default", ip_address=None,
+        )
 
         # --- Registration ---
         telegram_id = next_telegram_id()
@@ -654,7 +681,7 @@ async def test_full_lifecycle_registration_through_withdrawal_using_the_manual_r
 
         # --- Deposit (manual, real browser submission) ---
         await _open_wallet_tab(page, "deposit")
-        await page.click("#deposit-manual-toggle-btn")
+        await page.wait_for_selector("#deposit-manual-section:not(.hidden)", timeout=10000)
         destination_selector = f'.destination-card[data-id="{destination_row["id"]}"]'
         await page.wait_for_selector(destination_selector, timeout=10000)
         await page.click(destination_selector)
@@ -772,6 +799,10 @@ async def test_full_lifecycle_registration_through_withdrawal_using_the_manual_r
         await page.screenshot(path="/tmp/miniapp-full-lifecycle.png")
         await page.close()
     finally:
+        await admin_queries.set_payment_provider_availability_admin(
+            pool, admin_id=admin_id, provider="chapa", direction="in", enabled=True,
+            reason="test cleanup", ip_address=None,
+        )
         await engine.stop()
         await asyncio.wait_for(task, timeout=15)
 

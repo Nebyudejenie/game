@@ -1271,14 +1271,22 @@ function setWalletStatus(id, key, kind) {
   if (kind) node.classList.add(kind);
 }
 
-document.querySelectorAll(".wallet-tab").forEach((tabEl) => {
-  tabEl.addEventListener("click", () => {
-    document.querySelectorAll(".wallet-tab").forEach((t2) => t2.classList.remove("active"));
-    tabEl.classList.add("active");
-    document.querySelectorAll(".wallet-pane").forEach((pane) => pane.classList.add("hidden"));
-    el(`wallet-pane-${tabEl.dataset.tab}`).classList.remove("hidden");
-    if (tabEl.dataset.tab === "history") loadHistory();
+// Shared by the tab-click handler below and by boot()'s own deep-link
+// check (a player tapping "Deposit" in the bot's menu should land
+// directly on this tab, not on Balance with one more tap still needed)
+// -- one place decides what "switch to tab X" actually does, so a future
+// tab can never work correctly from a click but not from a deep link.
+function switchToWalletTab(tabName) {
+  document.querySelectorAll(".wallet-tab").forEach((tabEl) => {
+    tabEl.classList.toggle("active", tabEl.dataset.tab === tabName);
   });
+  document.querySelectorAll(".wallet-pane").forEach((pane) => pane.classList.add("hidden"));
+  el(`wallet-pane-${tabName}`).classList.remove("hidden");
+  if (tabName === "history") loadHistory();
+}
+
+document.querySelectorAll(".wallet-tab").forEach((tabEl) => {
+  tabEl.addEventListener("click", () => switchToWalletTab(tabEl.dataset.tab));
 });
 
 el("open-wallet-btn").addEventListener("click", openWallet);
@@ -1932,6 +1940,22 @@ async function boot() {
   document.getElementById("balance-amount").textContent = `${user.balance} ETB`;
   showScreen("rooms");
   refreshRoomList();
+
+  // Deep link from the bot: /deposit's own "open the wallet" button
+  // (services/bot/keyboards.py::open_wallet_keyboard) appends "#deposit"
+  // to the Mini App URL so tapping it lands the player directly on the
+  // Deposit tab -- not on Balance with a further, easy-to-miss tap still
+  // needed (real confusion this exact session spent hours untangling
+  // came from players never finding the right screen at all). Cleared
+  // immediately via replaceState so it can never re-trigger on an
+  // in-app reload or re-fire if the player later switches away and
+  // Telegram's own Back button brings them back to this same screen.
+  if (location.hash === "#deposit") {
+    history.replaceState(null, "", location.pathname + location.search);
+    await openWallet();
+    switchToWalletTab("deposit");
+  }
+
   hideSplash();
 }
 

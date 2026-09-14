@@ -334,11 +334,21 @@ async def cmd_deposit(
     # silently disagree about what's actually live.
     methods = await availability.get_payment_availability(pool, settings)
     if ChapaProvider.name not in methods["deposit"]:
-        if ManualProvider.name in methods["deposit"] and settings.miniapp_url:
+        # telebirr_sms has no adapter class (see availability.py's own
+        # docstring -- it's a bare string in _IMPLEMENTED_PROVIDERS, not a
+        # PaymentProvider), so it's checked by literal here the same way.
+        # Checking ManualProvider alone was a real bug: with Chapa off and
+        # telebirr_sms on but manual off, /deposit fell through to
+        # deposit.not_available ("launching soon") even though the wallet
+        # was actually taking Telebirr deposits fine.
+        if (
+            ManualProvider.name in methods["deposit"]
+            or availability.TELEBIRR_SMS_PROVIDER_NAME in methods["deposit"]
+        ) and settings.miniapp_url:
             await notifier.send(
                 message.chat.id,
-                t("deposit.manual_only_available", language),
-                reply_markup=open_wallet_keyboard(language, miniapp_url=settings.miniapp_url),
+                t("deposit.open_wallet", language),
+                reply_markup=open_wallet_keyboard(language, miniapp_url=settings.miniapp_url, target="deposit"),
             )
         else:
             await notifier.send(message.chat.id, t("deposit.not_available", language))

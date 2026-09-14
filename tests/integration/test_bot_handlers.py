@@ -1424,13 +1424,62 @@ async def test_deposit_redirects_to_the_wallet_when_only_manual_is_available(poo
 
         assert len(session.sent) == 1
         sent = session.sent[0]
-        assert "manually" in sent.text or "በእጅ" in sent.text
+        assert "wallet" in sent.text or "ቦርሳ" in sent.text
         assert sent.reply_markup is not None
         button = sent.reply_markup.inline_keyboard[0][0]
         assert button.web_app is not None
-        assert button.web_app.url == "https://miniapp.test/"
+        # "#deposit" (2026-09-14): lands the player directly on the
+        # wallet's Deposit tab instead of Balance with a further tap
+        # still needed -- see open_wallet_keyboard's own docstring.
+        assert button.web_app.url == "https://miniapp.test/#deposit"
     finally:
         await _set_chapa_availability(pool, direction="in", enabled=True)
+
+
+async def test_deposit_redirects_to_the_wallet_when_only_telebirr_sms_is_available(pool, bot_ctx, monkeypatch):
+    # Real bug (2026-09-14): the gate here used to check ManualProvider
+    # only, so Chapa off + manual off + telebirr_sms on fell through to
+    # "Deposits are launching soon" even though the wallet was actually
+    # taking Telebirr deposits fine -- see handlers.py's own comment.
+    dp, bot, session = bot_ctx
+    settings = dp["settings"]
+    monkeypatch.setattr(settings, "miniapp_url", "https://miniapp.test/")
+
+    await _set_chapa_availability(pool, direction="in", enabled=False)
+    admin_id, *_ = await create_test_admin(pool)
+    await admin_queries.set_payment_provider_availability_admin(
+        pool, admin_id=admin_id, provider="manual", direction="in", enabled=False,
+        reason="test: telebirr_sms-only deposit path", ip_address=None,
+    )
+    # telebirr_sms deposits ship disabled by default (see migration
+    # 9c1f4d7a2b3e) -- an admin has to turn the row on, same as the real
+    # Provider Availability screen this session's earlier bug was in.
+    await admin_queries.set_payment_provider_availability_admin(
+        pool, admin_id=admin_id, provider="telebirr_sms", direction="in", enabled=True,
+        reason="test: telebirr_sms-only deposit path", ip_address=None,
+    )
+    try:
+        telegram_id = await _register(dp, bot, session)
+        await dp.feed_update(bot, make_text_update(telegram_id, "/deposit 100"))
+        await _settle()
+
+        assert len(session.sent) == 1
+        sent = session.sent[0]
+        assert "wallet" in sent.text or "ቦርሳ" in sent.text
+        assert sent.reply_markup is not None
+        button = sent.reply_markup.inline_keyboard[0][0]
+        assert button.web_app is not None
+        assert button.web_app.url == "https://miniapp.test/#deposit"
+    finally:
+        await _set_chapa_availability(pool, direction="in", enabled=True)
+        await admin_queries.set_payment_provider_availability_admin(
+            pool, admin_id=admin_id, provider="telebirr_sms", direction="in", enabled=False,
+            reason="test cleanup", ip_address=None,
+        )
+        await admin_queries.set_payment_provider_availability_admin(
+            pool, admin_id=admin_id, provider="manual", direction="in", enabled=True,
+            reason="test cleanup", ip_address=None,
+        )
 
 
 async def test_deposit_shows_not_available_when_no_provider_and_no_miniapp_url(pool, bot_ctx, monkeypatch):
