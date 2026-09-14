@@ -1153,6 +1153,16 @@ async function openWallet() {
 let depositDefaultIsTelebirr = false;
 let telebirrDestinationLoaded = false;
 
+// Product decision (2026-09-14, DECISIONS.md): Manual Deposit is no
+// longer offered as a player-visible *choice* for deposits -- only as an
+// absolute last resort if neither automatic (Chapa) nor Telebirr is
+// available at all, so a real-money system is never left with zero
+// deposit path over a UI decision. Flip this back to `false` to restore
+// it as a normal, always-reachable option (its own code, destinations,
+// and backend are all untouched either way -- this only ever controls
+// whether the deposit tab's toggle button/section for it can appear).
+const DEPOSIT_MANUAL_HIDDEN_FROM_UI = true;
+
 async function applyPaymentAvailability() {
   try {
     const response = await fetch("/api/payment-methods", { headers: authHeader() });
@@ -1160,7 +1170,8 @@ async function applyPaymentAvailability() {
     const methods = await response.json();
 
     const depositHasAutomatic = methods.deposit.includes("chapa");
-    const depositHasManual = methods.deposit.includes("manual");
+    const depositHasManual = methods.deposit.includes("manual") && !DEPOSIT_MANUAL_HIDDEN_FROM_UI;
+    const depositManualIsLastResort = methods.deposit.includes("manual") && DEPOSIT_MANUAL_HIDDEN_FROM_UI;
     // Telebirr SMS-evidence deposits: instant, reference-only, no admin
     // review -- ships disabled by default (payment_provider_availability
     // seeds it off), so this is a no-op until an admin turns it on.
@@ -1186,10 +1197,14 @@ async function applyPaymentAvailability() {
           telebirrDestinationLoaded = true;
           await loadTelebirrDestination();
         }
-      } else if (depositHasManual) {
+      } else if (depositHasManual || depositManualIsLastResort) {
         // Nothing better to toggle *from* -- go straight to the manual
         // panel, permanently, rather than showing a toggle button that
-        // would only ever lead to a dead end.
+        // would only ever lead to a dead end. Reached even when Manual
+        // is otherwise hidden from the UI (DEPOSIT_MANUAL_HIDDEN_FROM_UI)
+        // -- a real-money system should never show "not available" when
+        // a real, configured deposit path still exists, even one that's
+        // no longer offered as a first-choice option.
         el("deposit-manual-toggle-btn").classList.add("hidden");
         el("deposit-manual-section").classList.remove("hidden");
         if (!manualDestinationsLoaded) {
@@ -1201,9 +1216,11 @@ async function applyPaymentAvailability() {
         setWalletStatus("deposit-status", "wallet.not_available", "error");
       }
     } else {
-      // Chapa is on and stays the default -- Telebirr and Manual are
-      // both reached via their own toggle buttons, unchanged from
-      // before.
+      // Chapa is on and stays the default -- Telebirr is reached via its
+      // own toggle button, unchanged from before. Manual's own toggle
+      // stays suppressed per DEPOSIT_MANUAL_HIDDEN_FROM_UI (chapa being
+      // on means it's never the only path anyway, so there's no
+      // last-resort case to fall back to here).
       el("deposit-telebirr-toggle-btn").classList.toggle("hidden", !depositHasTelebirr);
       if (!depositHasManual) {
         // Automatic works but manual doesn't (or isn't configured) --
