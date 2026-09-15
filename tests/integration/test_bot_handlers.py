@@ -754,7 +754,7 @@ async def test_withdraw_command_succeeds_and_creates_a_real_request(pool, conn, 
     await fund_user(conn, user_row["id"], Decimal("500.00"))
 
     await dp.feed_update(
-        bot, make_text_update(telegram_id, "/withdraw 100 0911223344 Abebe Kebede")
+        bot, make_text_update(telegram_id, "/withdraw 300 0911223344 Abebe Kebede")
     )
     await _settle()
 
@@ -766,7 +766,7 @@ async def test_withdraw_command_succeeds_and_creates_a_real_request(pool, conn, 
     )
     assert payment is not None
     assert payment["direction"] == "out"
-    assert payment["amount"] == Decimal("100.00")
+    assert payment["amount"] == Decimal("300.00")
     assert payment["status"] == "review"
 
 
@@ -1565,7 +1565,7 @@ async def test_withdraw_uses_the_manual_rail_when_chapa_is_unavailable(pool, con
         user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
         await fund_user(conn, user_row["id"], Decimal("500.00"))
 
-        await dp.feed_update(bot, make_text_update(telegram_id, "/withdraw 100 0911223344 Abebe Kebede"))
+        await dp.feed_update(bot, make_text_update(telegram_id, "/withdraw 300 0911223344 Abebe Kebede"))
         await _settle()
 
         assert len(session.sent) == 1
@@ -1577,7 +1577,7 @@ async def test_withdraw_uses_the_manual_rail_when_chapa_is_unavailable(pool, con
         assert payment is not None
         assert payment["provider"] == "manual"
         assert payment["status"] == "review"  # always review for manual, regardless of amount
-        assert payment["amount"] == Decimal("100.00")
+        assert payment["amount"] == Decimal("300.00")
     finally:
         await _set_chapa_availability(pool, direction="out", enabled=True)
 

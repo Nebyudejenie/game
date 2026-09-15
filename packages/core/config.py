@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     agent_portal_base_url: str = ""
     min_deposit_etb: Decimal = Decimal("10.00")
     daily_deposit_cap_etb: Decimal = Decimal("50000.00")
-    min_withdraw_etb: Decimal = Decimal("50.00")
+    min_withdraw_etb: Decimal = Decimal("200.00")
     # Auto-approved without landing in the admin review queue.
     auto_approve_withdraw_etb: Decimal = Decimal("2000.00")
     # kyc_level must be >= 2 for any withdrawal above this amount.
