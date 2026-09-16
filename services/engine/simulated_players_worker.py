@@ -55,7 +55,7 @@ from services.gateway.queries import list_rooms
 
 logger = structlog.get_logger()
 
-METRICS_PORT = 8006
+METRICS_PORT = 8007  # 8006 is the sms service's own HTTP port -- see deploy/docker-compose.prod.yml
 
 TICK_INTERVAL_SECONDS = 5.0
 ETHIOPIA_TZ = ZoneInfo("Africa/Addis_Ababa")

@@ -163,6 +163,27 @@ services:
       - "8005:8005"
     command: ["python", "-m", "services.payments.payout_worker"]
 
+  # Admin-controlled bot accounts (services/admin/simulated_players_
+  # queries.py) that join real rooms and play through the real engine so
+  # rooms don't feel empty during early launch -- see that module's own
+  # docstring for the financial-isolation design. A separate process for
+  # the same reason engine-worker/payout-worker are: a crash here can
+  # never touch a real room's own engine or the ledger. Every runtime
+  # toggle (the global enabled switch, each bot's status/strategy) is a
+  # polled DB column, not an env var, so nothing here needs its own
+  # config beyond the shared DATABASE_URL/REDIS_URL -- and the system
+  # ships and stays disabled until an admin explicitly turns it on from
+  # the Simulated Players console screen, regardless of this container
+  # running.
+  simulated-players-worker:
+    image: ${JOBINGO_IMAGE:-jobingo:latest}
+    restart: unless-stopped
+    <<: *app-env
+    depends_on: *app-depends-on
+    ports:
+      - "8007:8007"
+    command: ["python", "-m", "services.engine.simulated_players_worker"]
+
   # One-shot, same shape as migrate above -- spec section 14's definition
   # of done needs this "verified nightly", but nothing runs it on a
   # schedule yet. profiles: ["reconcile"] (the same gating
