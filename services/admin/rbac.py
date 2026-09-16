@@ -143,6 +143,24 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     "sms:campaigns:approve": frozenset({"superadmin"}),
     "sms:nodes:manage": frozenset({"ops", "superadmin"}),
     "sms:compliance:manage": frozenset({"ops", "superadmin"}),
+
+    # Simulated Players: admin-controlled bot accounts that join real
+    # rooms during early launch so they don't feel empty. A bot's
+    # existence/status/balance is low-sensitivity operational info -- same
+    # breadth as payments:view/bonuses:view.
+    "simulated_players:view": frozenset({"support", "finance", "ops", "superadmin"}),
+    # Creating/configuring/starting/pausing/resetting one bot also funds
+    # or re-funds its balance (a real house_float-backed ledger
+    # transaction, see services/admin/simulated_players_queries.py) --
+    # but unlike bonuses:grant, this money is capped at a fixed 5,000 ETB
+    # seed, entirely house-funded, and fully reversible via Reset, so it
+    # stays ops-reachable rather than finance-gated like a real per-player
+    # bonus grant.
+    "simulated_players:manage": frozenset({"ops", "superadmin"}),
+    # Matches rooms:emergency_stop's own reasoning exactly: the single
+    # highest-leverage lever in this screen (kills every bot platform-wide
+    # at once, and doubles as the global on/off switch) -- superadmin only.
+    "simulated_players:stop_all": frozenset({"superadmin"}),
 }
 
 

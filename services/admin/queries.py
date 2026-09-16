@@ -84,7 +84,8 @@ async def search_users(pool: asyncpg.Pool, query: str, limit: int = 20) -> list[
 
     rows = await pool.fetch(
         """
-        SELECT id, telegram_id, display_name, phone_e164_encrypted, status, kyc_level, created_at
+        SELECT id, telegram_id, display_name, phone_e164_encrypted, status, kyc_level, created_at,
+               is_simulated
         FROM users
         WHERE phone_lookup_hash = $1
            OR display_name ILIKE '%' || $2 || '%'
@@ -102,7 +103,7 @@ async def search_users(pool: asyncpg.Pool, query: str, limit: int = 20) -> list[
 async def get_user_detail(pool: asyncpg.Pool, user_id: int) -> dict[str, Any] | None:
     user_row = await pool.fetchrow(
         "SELECT id, telegram_id, display_name, phone_e164_encrypted, status, kyc_level, language, "
-        "created_at, last_seen_at FROM users WHERE id = $1",
+        "created_at, last_seen_at, is_simulated FROM users WHERE id = $1",
         user_id,
     )
     if user_row is None:
@@ -212,6 +213,7 @@ async def retention_cohorts(pool: asyncpg.Pool, weeks: int = 8) -> list[dict[str
         WITH cohort AS (
           SELECT id, date_trunc('week', created_at AT TIME ZONE 'Africa/Addis_Ababa')::date AS cohort_week
           FROM users
+          WHERE NOT is_simulated
         ),
         cohort_sizes AS (
           SELECT cohort_week, count(*) AS cohort_size FROM cohort GROUP BY cohort_week
@@ -1756,6 +1758,14 @@ async def dashboard_summary(pool: asyncpg.Pool) -> dict[str, Any]:
     # (verified against the original per-query WHERE clauses one for one,
     # including that house_revenue_today has no t.kind restriction of its
     # own, matching the original) instead of three separate round trips.
+    # LEFT JOIN users (not INNER): house_revenue's own account row has
+    # a.user_id IS NULL (it's a singleton system account), so an INNER
+    # join would silently drop every house_revenue_today entry entirely.
+    # The is_simulated exclusion only ever actually filters stakes_today/
+    # payouts_today, which key off the per-user user_cash account --
+    # house_revenue_today is deliberately left untouched by it (see
+    # simulated_players_daily_activity() below for why a mixed real+bot
+    # round's shared house cut can't be honestly split further than that).
     row = await pool.fetchrow(
         """
         SELECT
@@ -1768,8 +1778,10 @@ async def dashboard_summary(pool: asyncpg.Pool) -> dict[str, Any]:
         FROM ledger_entries e
         JOIN accounts a ON a.id = e.account_id
         JOIN ledger_transactions t ON t.id = e.transaction_id
+        LEFT JOIN users u ON u.id = a.user_id
         WHERE (e.created_at AT TIME ZONE 'Africa/Addis_Ababa')::date = $1
           AND (t.kind IN ('stake', 'payout') OR a.kind = 'house_revenue')
+          AND (a.user_id IS NULL OR NOT u.is_simulated)
         """,
         today,
     )

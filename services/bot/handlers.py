@@ -499,7 +499,11 @@ async def cmd_withdraw(
     except withdrawals.RecentReversibleDeposit:
         await notifier.send(message.chat.id, t("withdraw.recent_deposit", language))
         return
-    except withdrawals.UnknownWithdrawer:
+    except (withdrawals.UnknownWithdrawer, withdrawals.SimulatedPlayerCannotWithdraw):
+        # SimulatedPlayerCannotWithdraw is unreachable through this real
+        # command in practice (nothing drives a bot's own Telegram
+        # session), kept here only so a future caller change can't
+        # silently skip this defense-in-depth guard.
         await notifier.send(message.chat.id, t("error.generic", language))
         return
 

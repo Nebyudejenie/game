@@ -70,6 +70,17 @@ class UnknownWithdrawer(WithdrawalRejected):
     pass
 
 
+class SimulatedPlayerCannotWithdraw(WithdrawalRejected):
+    """Defense in depth: nothing today actually drives a bot's own
+    Telegram/Mini-App session to reach this function at all (see
+    services/admin/simulated_players_queries.py's own module docstring),
+    but a simulated player's real user_cash balance -- funded from
+    house_float so it can stake through the real game engine -- must
+    never be extractable as a real payout regardless of how this
+    function ever gets called in the future.
+    """
+
+
 @dataclass(frozen=True)
 class WithdrawalIntent:
     payment_id: int
@@ -110,10 +121,15 @@ async def request_withdrawal(
         async with pool.acquire() as conn:
             async with conn.transaction():
                 user = await conn.fetchrow(
-                    "SELECT kyc_level, created_at FROM users WHERE id = $1 FOR UPDATE", user_id
+                    "SELECT kyc_level, created_at, is_simulated FROM users WHERE id = $1 FOR UPDATE",
+                    user_id,
                 )
                 if user is None:
                     raise UnknownWithdrawer(f"user {user_id} does not exist")
+                if user["is_simulated"]:
+                    raise SimulatedPlayerCannotWithdraw(
+                        f"user {user_id} is a simulated player and can never withdraw real money"
+                    )
 
                 if amount > kyc_threshold and user["kyc_level"] < 2:
                     raise KycLevelTooLow(

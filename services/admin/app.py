@@ -33,6 +33,7 @@ from services.admin import (
     notification_queries,
     queries,
     search_queries,
+    simulated_players_queries,
     system_health,
     telegram_diagnostics,
 )
@@ -1919,6 +1920,233 @@ async def notification_center_overview(
     admin: Annotated[AdminSession, Depends(require("notifications:view_analytics"))],
 ) -> dict[str, Any]:
     return await notification_queries.notification_overview_admin(app.state.pool)
+
+
+# --- Simulated Players -------------------------------------------------
+
+
+@app.get("/simulated-players")
+async def list_simulated_players(
+    admin: Annotated[AdminSession, Depends(require("simulated_players:view"))],
+) -> list[dict[str, Any]]:
+    return await simulated_players_queries.list_simulated_players(app.state.pool)
+
+
+@app.get("/simulated-players/settings")
+async def get_simulated_players_settings(
+    admin: Annotated[AdminSession, Depends(require("simulated_players:view"))],
+) -> dict[str, Any]:
+    return await simulated_players_queries.get_settings_admin(app.state.pool)
+
+
+@app.get("/simulated-players/daily-activity")
+async def get_simulated_players_daily_activity(
+    admin: Annotated[AdminSession, Depends(require("simulated_players:view"))], on_date: date
+) -> dict[str, Any]:
+    return await simulated_players_queries.simulated_players_daily_activity(app.state.pool, on_date)
+
+
+class UpdateSimulatedPlayersSettingsRequest(BaseModel):
+    enabled: bool
+    max_concurrent_bots: int
+    reason: str
+
+
+@app.patch("/simulated-players/settings")
+async def update_simulated_players_settings(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("simulated_players:stop_all"))],
+    body: UpdateSimulatedPlayersSettingsRequest,
+) -> dict[str, Any]:
+    _require_reason(body.reason)
+    try:
+        return await simulated_players_queries.update_settings_admin(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            enabled=body.enabled,
+            max_concurrent_bots=body.max_concurrent_bots,
+            reason=body.reason,
+            ip_address=_client_ip(request),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+class CreateSimulatedPlayerRequest(BaseModel):
+    display_name: str
+    strategy: str = "normal"
+
+
+@app.post("/simulated-players")
+async def create_simulated_player(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("simulated_players:manage"))],
+    body: CreateSimulatedPlayerRequest,
+) -> dict[str, int]:
+    try:
+        user_id = await simulated_players_queries.create_simulated_player(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            display_name=body.display_name,
+            strategy=body.strategy,
+            ip_address=_client_ip(request),
+        )
+    except (ValueError, simulated_players_queries.SimulatedPlayerRosterFull) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"user_id": user_id}
+
+
+class SetSimulatedPlayerStrategyRequest(BaseModel):
+    strategy: str
+    join_probability_pct: int = 70
+    max_cards_per_join: int = 1
+    schedule_mode: str = "always_on"
+    schedule_window_start_minute: int | None = None
+    schedule_window_end_minute: int | None = None
+    pinned_room_id: int | None = None
+    reason: str
+
+
+@app.patch("/simulated-players/{user_id}/strategy")
+async def set_simulated_player_strategy(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("simulated_players:manage"))],
+    user_id: int,
+    body: SetSimulatedPlayerStrategyRequest,
+) -> dict[str, bool]:
+    _require_reason(body.reason)
+    try:
+        await simulated_players_queries.set_strategy_admin(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            user_id=user_id,
+            strategy=body.strategy,
+            join_probability_pct=body.join_probability_pct,
+            max_cards_per_join=body.max_cards_per_join,
+            schedule_mode=body.schedule_mode,
+            schedule_window_start_minute=body.schedule_window_start_minute,
+            schedule_window_end_minute=body.schedule_window_end_minute,
+            pinned_room_id=body.pinned_room_id,
+            reason=body.reason,
+            ip_address=_client_ip(request),
+        )
+    except simulated_players_queries.SimulatedPlayerNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"updated": True}
+
+
+class SimulatedPlayerActionRequest(BaseModel):
+    reason: str | None = None
+
+
+async def _simulated_player_action(
+    request: Request,
+    admin: AdminSession,
+    user_id: int,
+    body: SimulatedPlayerActionRequest,
+    fn: Any,
+) -> dict[str, bool]:
+    try:
+        await fn(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            user_id=user_id,
+            reason=body.reason,
+            ip_address=_client_ip(request),
+        )
+    except simulated_players_queries.SimulatedPlayerNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except simulated_players_queries.InvalidSimulatedPlayerTransition as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"updated": True}
+
+
+@app.post("/simulated-players/{user_id}/start")
+async def start_simulated_player(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("simulated_players:manage"))],
+    user_id: int,
+    body: SimulatedPlayerActionRequest,
+) -> dict[str, bool]:
+    return await _simulated_player_action(
+        request, admin, user_id, body, simulated_players_queries.start_simulated_player_admin
+    )
+
+
+@app.post("/simulated-players/{user_id}/pause")
+async def pause_simulated_player(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("simulated_players:manage"))],
+    user_id: int,
+    body: SimulatedPlayerActionRequest,
+) -> dict[str, bool]:
+    return await _simulated_player_action(
+        request, admin, user_id, body, simulated_players_queries.pause_simulated_player_admin
+    )
+
+
+@app.post("/simulated-players/{user_id}/stop")
+async def stop_simulated_player(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("simulated_players:manage"))],
+    user_id: int,
+    body: SimulatedPlayerActionRequest,
+) -> dict[str, bool]:
+    return await _simulated_player_action(
+        request, admin, user_id, body, simulated_players_queries.stop_simulated_player_admin
+    )
+
+
+class ResetSimulatedPlayerRequest(BaseModel):
+    reason: str
+
+
+@app.post("/simulated-players/{user_id}/reset")
+async def reset_simulated_player(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("simulated_players:manage"))],
+    user_id: int,
+    body: ResetSimulatedPlayerRequest,
+) -> dict[str, str]:
+    _require_reason(body.reason)
+    try:
+        return await simulated_players_queries.reset_simulated_player_admin(
+            app.state.pool,
+            admin_id=admin.admin_id,
+            user_id=user_id,
+            reason=body.reason,
+            ip_address=_client_ip(request),
+        )
+    except simulated_players_queries.SimulatedPlayerNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class StopAllSimulatedPlayersRequest(BaseModel):
+    reason: str
+    confirmation: str
+
+
+@app.post("/simulated-players/stop-all")
+async def stop_all_simulated_players(
+    request: Request,
+    admin: Annotated[AdminSession, Depends(require("simulated_players:stop_all"))],
+    body: StopAllSimulatedPlayersRequest,
+) -> dict[str, int]:
+    """Same reason+typed-confirmation contract as POST /rooms/{id}/stop --
+    the single highest-leverage lever in this screen, superadmin-only per
+    rbac.py's own comment on simulated_players:stop_all.
+    """
+    _require_reason(body.reason)
+    if body.confirmation.strip().upper() != "STOP ALL":
+        raise HTTPException(status_code=422, detail="confirmation must be exactly 'STOP ALL'")
+    try:
+        return await simulated_players_queries.stop_all_simulated_players_admin(
+            app.state.pool, admin_id=admin.admin_id, reason=body.reason, ip_address=_client_ip(request)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 # Mounted last, same reasoning as services/gateway/app.py's own miniapp

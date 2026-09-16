@@ -179,6 +179,7 @@ _WITHDRAWAL_ERROR_CODES: dict[type[Exception], str] = {
     withdrawals.InsufficientAvailableBalance: "insufficient_balance",
     withdrawals.KycLevelTooLow: "kyc_required",
     withdrawals.RecentReversibleDeposit: "recent_deposit",
+    withdrawals.SimulatedPlayerCannotWithdraw: "simulated_player",
 }
 
 
