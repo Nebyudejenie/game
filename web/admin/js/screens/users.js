@@ -50,7 +50,7 @@ export async function render(container) {
           ${users.map((u) => `
             <tr class="clickable-row" data-user-id="${u.id}">
               <td>${u.id}</td>
-              <td>${escapeHtml(u.display_name)}</td>
+              <td>${escapeHtml(u.display_name)} ${u.is_simulated ? '<span class="badge badge-simulated">SIMULATED</span>' : ""}</td>
               <td>${escapeHtml(u.phone_e164 || "—")}</td>
               <td><span class="badge badge-${escapeHtml(u.status)}">${escapeHtml(u.status)}</span></td>
               <td>${u.kyc_level}</td>
@@ -82,7 +82,11 @@ export async function render(container) {
   function renderDetail(user, ledger) {
     return `
       <div class="detail-panel">
-        <h2 style="margin-top:0">${escapeHtml(user.display_name)} <span class="badge badge-${escapeHtml(user.status)}">${escapeHtml(user.status)}</span></h2>
+        <h2 style="margin-top:0">
+          ${escapeHtml(user.display_name)}
+          <span class="badge badge-${escapeHtml(user.status)}">${escapeHtml(user.status)}</span>
+          ${user.is_simulated ? '<span class="badge badge-simulated">SIMULATED</span>' : ""}
+        </h2>
         <div class="detail-grid">
           <div><div class="field-label">User ID</div><div class="field-value">${user.id}</div></div>
           <div><div class="field-label">Telegram ID</div><div class="field-value">${user.telegram_id}</div></div>

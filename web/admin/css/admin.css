@@ -8,6 +8,7 @@
   --danger: #c0362c;
   --success: #1b7a43;
   --warn: #a8621a;
+  --simulated: #6d28d9;
   --radius: 6px;
 }
 
@@ -343,6 +344,11 @@ textarea {
   font-weight: 600;
 }
 
+.field-hint {
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+
 .action-row {
   display: flex;
   gap: 0.5rem;
@@ -372,7 +378,8 @@ textarea {
 
 .badge-active,
 .badge-available,
-.badge-healthy {
+.badge-healthy,
+.badge-playing {
   background: #dcfce7;
   color: var(--success);
 }
@@ -381,7 +388,8 @@ textarea {
 .badge-limited,
 .badge-disputed,
 .badge-expired,
-.badge-warning {
+.badge-warning,
+.badge-paused {
   background: #fef3c7;
   color: var(--warn);
 }
@@ -427,6 +435,14 @@ textarea {
 .badge-failed {
   background: #fde8e6;
   color: var(--danger);
+}
+
+/* Deliberately distinct from every status color above (success/warn/
+   danger/info) -- this marks "not a real customer," a category, not an
+   outcome, and must never be visually confusable with a real status. */
+.badge-simulated {
+  background: #ede9fe;
+  color: var(--simulated);
 }
 
 pre.code-block {
