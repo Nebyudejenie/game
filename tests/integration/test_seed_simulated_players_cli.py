@@ -22,6 +22,7 @@ from tests.integration.test_admin_auth import create_test_admin
 async def _delete_bot_completely(pool, user_id: int) -> None:
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await conn.execute("SET LOCAL jobingo.allow_ledger_history_mutation = 'true'")
             await conn.execute(
                 "DELETE FROM ledger_entries WHERE account_id IN (SELECT id FROM accounts WHERE user_id = $1)",
                 user_id,

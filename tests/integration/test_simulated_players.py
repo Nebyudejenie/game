@@ -47,6 +47,11 @@ async def _delete_bot_completely(pool, user_id: int) -> None:
     """
     async with pool.acquire() as conn:
         async with conn.transaction():
+            # ledger_entries is append-only in real production (a DB-level
+            # trigger enforces it); this dev/test-only escape hatch, as a
+            # jobingo_dev_fixture role member, is what makes test cleanup
+            # of synthetic bot ledger rows possible at all.
+            await conn.execute("SET LOCAL jobingo.allow_ledger_history_mutation = 'true'")
             await conn.execute(
                 "DELETE FROM ledger_entries WHERE account_id IN (SELECT id FROM accounts WHERE user_id = $1)",
                 user_id,
@@ -109,7 +114,14 @@ async def test_create_simulated_player_funds_via_house_float_adjustment(pool, bo
     assert sp_row["strategy"] == "normal"
 
 
-async def test_roster_cap_rejects_an_eleventh_bot(pool, bot_factory):
+async def test_roster_cap_rejects_an_eleventh_bot(pool, bot_factory, monkeypatch):
+    # Patched down to a small cap for this test only -- MAX_SIMULATED_PLAYERS
+    # is 200 in production, and this test only needs to prove the real
+    # enforcement code path (create_simulated_player reads the module-level
+    # constant at call time, so patching it here exercises the exact same
+    # branch), not actually create 200 real bots with 200 real ledger
+    # transactions just to reach it.
+    monkeypatch.setattr(spq, "MAX_SIMULATED_PLAYERS", 3)
     admin_id, *_ = await create_test_admin(pool)
     existing = await pool.fetchval("SELECT count(*) FROM simulated_players")
     headroom = spq.MAX_SIMULATED_PLAYERS - existing

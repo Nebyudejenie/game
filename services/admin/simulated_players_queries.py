@@ -1,4 +1,4 @@
-"""Simulated Players: up to 10 admin-controlled bot accounts that join
+"""Simulated Players: up to MAX_SIMULATED_PLAYERS admin-controlled bot accounts that join
 real rooms and play through the real game engine (services/engine/
 round_engine.py, via services/engine/commands.py -- the same channel a
 real player's WebSocket action travels) so a room doesn't feel empty
@@ -37,7 +37,7 @@ from packages.core import ledger
 from services.admin import audit
 
 INITIAL_SIMULATED_BALANCE = Decimal("5000.00")
-MAX_SIMULATED_PLAYERS = 10
+MAX_SIMULATED_PLAYERS = 200
 
 STATUSES = ("disabled", "idle", "joining", "playing", "paused")
 STRATEGIES = ("conservative", "normal", "active", "randomized")
