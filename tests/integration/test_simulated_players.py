@@ -217,6 +217,67 @@ async def test_stop_all_disables_every_active_bot_and_flips_global_enabled_false
         )
 
 
+async def test_active_simulated_player_count_reflects_idle_and_playing_but_not_disabled_or_paused(
+    pool, bot_factory
+):
+    # Real user request: an idle bot (not currently seated in any round)
+    # was invisible everywhere -- it has no WebSocket of its own to count
+    # toward the Rooms screen's "online" headcount (services/gateway/
+    # connection.py), and it only ever shows up in "playing" once actually
+    # in round_entries. This is the query behind the fix: an idle bot
+    # should read as "online" the same way a real, connected-but-not-yet-
+    # playing player already does.
+    admin_id, *_ = await create_test_admin(pool)
+
+    await spq.update_settings_admin(
+        pool, admin_id=admin_id, enabled=True, max_concurrent_bots=10, reason="test enable", ip_address=None
+    )
+    try:
+        # Baselined *after* enabling, not before: this shared dev database
+        # can have other real active bots at test time, and the count is
+        # forced to 0 whenever the global switch is off (checked below),
+        # so a baseline taken before enabling could read 0 even with other
+        # active bots on file -- comparing against that would overcount
+        # every delta below by however many of those there are.
+        baseline = await spq.active_simulated_player_count(pool)
+
+        user_id = await bot_factory(admin_id)
+        # Freshly created: status = "disabled" -- must not count yet.
+        assert await spq.active_simulated_player_count(pool) == baseline
+
+        await spq.start_simulated_player_admin(
+            pool, admin_id=admin_id, user_id=user_id, reason="test", ip_address=None
+        )
+        assert await spq.active_simulated_player_count(pool) == baseline + 1  # idle counts
+
+        await spq.pause_simulated_player_admin(
+            pool, admin_id=admin_id, user_id=user_id, reason="test", ip_address=None
+        )
+        assert await spq.active_simulated_player_count(pool) == baseline  # paused doesn't
+
+        await spq.start_simulated_player_admin(
+            pool, admin_id=admin_id, user_id=user_id, reason="test", ip_address=None
+        )
+        await pool.execute(
+            "UPDATE simulated_players SET status = 'playing' WHERE user_id = $1", user_id
+        )
+        assert await spq.active_simulated_player_count(pool) == baseline + 1  # playing counts too
+
+        # The global switch is belt-and-suspenders: even with a real
+        # "playing" row on file, the whole feature reading as off must
+        # force this back to whatever real WebSocket connections alone
+        # would show.
+        await spq.update_settings_admin(
+            pool, admin_id=admin_id, enabled=False, max_concurrent_bots=10,
+            reason="test: verify global gate", ip_address=None,
+        )
+        assert await spq.active_simulated_player_count(pool) == 0
+    finally:
+        await spq.update_settings_admin(
+            pool, admin_id=admin_id, enabled=False, max_concurrent_bots=10, reason="test cleanup", ip_address=None
+        )
+
+
 # --- balance isolation ---------------------------------------------------
 
 

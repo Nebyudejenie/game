@@ -23,6 +23,7 @@ from redis.asyncio import Redis
 from packages.core import metrics, rate_limit, telegram_auth
 from packages.core.ledger import user_balance_snapshot
 from packages.core.telegram_auth import InvalidInitData
+from services.admin.simulated_players_queries import active_simulated_player_count
 from services.engine import commands
 from services.engine.commands import CommandTimeout
 from services.gateway import queries
@@ -209,8 +210,20 @@ class ConnectionHandler:
             )
         elif t == "rooms":
             rooms = await queries.list_rooms(self._pool)
+            # Real WebSocket connections plus active-but-idle-or-playing
+            # simulated players -- a bot never opens a WebSocket of its
+            # own, so without this it stayed invisible in "online" the
+            # entire time it wasn't actually seated in a round (see
+            # active_simulated_player_count()'s own docstring).
+            simulated_online = await active_simulated_player_count(self._pool)
             await self._ws.send_text(
-                json.dumps({"t": "rooms", "rooms": rooms, "online_count": len(self._connections)})
+                json.dumps(
+                    {
+                        "t": "rooms",
+                        "rooms": rooms,
+                        "online_count": len(self._connections) + simulated_online,
+                    }
+                )
             )
         elif t == "join":
             await self._handle_join(frame)

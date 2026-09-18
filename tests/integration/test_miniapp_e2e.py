@@ -34,6 +34,7 @@ from decimal import Decimal
 import pytest
 
 from packages.core.bingo import letter_for
+from services.admin.simulated_players_queries import active_simulated_player_count
 from services.engine.round_engine import RoundEngine, load_room_config
 from services.gateway import queries
 from tests.integration.conftest import (
@@ -628,8 +629,13 @@ async def test_rooms_screen_shows_a_real_online_and_playing_headcount(
     # real is_active=true rooms across every test run (the same
     # "3092 leftover test rooms" class of pollution this session already
     # hit elsewhere), so "Playing" sums real activity across every one of
-    # them, not just this test's own room.
+    # them, not just this test's own room. "Online" now also folds in
+    # active_simulated_player_count() (idle/joining/playing bots read as
+    # "online" too, same as a real connected-but-not-yet-playing player
+    # would) -- baselined the same way, since the shared dev DB can have
+    # real active bots at test time.
     baseline_playing = sum(r["players"] for r in await queries.list_rooms(pool))
+    baseline_online = await active_simulated_player_count(pool)
 
     try:
         telegram_id_a = next_telegram_id()
@@ -638,7 +644,8 @@ async def test_rooms_screen_shows_a_real_online_and_playing_headcount(
         await page_a.goto(http_base + "/")
         await page_a.wait_for_selector("#screen-rooms.active", timeout=10000)
         await page_a.wait_for_function(
-            "document.getElementById('rooms-online-count').textContent === '1'", timeout=10000
+            f"document.getElementById('rooms-online-count').textContent === '{baseline_online + 1}'",
+            timeout=10000,
         )
 
         user_a = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id_a)
@@ -664,7 +671,8 @@ async def test_rooms_screen_shows_a_real_online_and_playing_headcount(
         await page_b.goto(http_base + "/")
         await page_b.wait_for_selector("#screen-rooms.active", timeout=10000)
         await page_b.wait_for_function(
-            "document.getElementById('rooms-online-count').textContent === '2'", timeout=10000
+            f"document.getElementById('rooms-online-count').textContent === '{baseline_online + 2}'",
+            timeout=10000,
         )
         playing_text = await page_b.text_content("#rooms-playing-count")
         assert playing_text == str(baseline_playing + 1), (
