@@ -1827,13 +1827,17 @@ setInterval(checkSessionReminder, 60000);
 if (tg) {
   tg.BackButton.onClick(() => {
     const state = getState();
-    if (state.screen === "wallet" || state.screen === "lobby") {
+    if (state.screen === "wallet" || state.screen === "lobby" || state.screen === "game") {
       showScreen("rooms");
     } else if (state.screen === "result") {
       showScreen("rooms");
     }
-    // Deliberately not wired to close the app while a round is live
-    // (spec section 3.5): only rooms/lobby/result respond to Back.
+    // showScreen() is a pure client-side view switch -- it never touches
+    // the WebSocket connection or sends a drop/leave command, so Back
+    // from a live "game" screen is safe: the round keeps running
+    // server-side exactly as before, the player just stops looking at
+    // it (same as backgrounding the app), rather than the button
+    // visibly showing on this screen while silently doing nothing.
   });
 }
 

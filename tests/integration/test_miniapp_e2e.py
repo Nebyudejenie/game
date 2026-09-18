@@ -69,7 +69,11 @@ def telegram_stub_script(init_data: str, telegram_id: int, first_name: str) -> s
         BackButton: {{
           show: function() {{}},
           hide: function() {{}},
-          onClick: function() {{}}
+          // Stores the app's real handler so a test can invoke it directly
+          // (window.__triggerBackButton()) to simulate a genuine press --
+          // Telegram's own native chrome has no DOM element a Playwright
+          // click() could target.
+          onClick: function(cb) {{ window.__triggerBackButton = cb; }}
         }}
       }}
     }};
@@ -444,6 +448,80 @@ async def test_a_solo_player_reaches_active_gameplay_and_a_real_result(
         assert result_amount, "a real terminal result, win or refund, either way not stuck"
 
         assert console_errors == [], f"JS errors during solo gameplay: {console_errors}"
+        await page.close()
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
+async def test_telegram_back_button_works_from_a_live_game_screen(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    """A real product gap: Telegram's native Back button is shown on the
+    game screen (app.v6.js's showScreen() calls tg.BackButton.show() for
+    every screen except "rooms"), but its onClick handler used to only
+    handle wallet/lobby/result -- pressing it during a live round did
+    nothing, despite the button being visibly there. showScreen() itself
+    is a pure client-side view switch (no WebSocket/drop_card call), so
+    this proves both halves: the button now actually navigates back to
+    the room list, and the real round keeps running server-side
+    completely unaffected by a player merely looking away from it.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=1, lobby_seconds=8, call_interval_ms=15,
+        is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    try:
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        assert user_row is not None
+        await fund_user(conn, user_row["id"], Decimal("100.00"))
+        await page.reload()
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('100.00')", timeout=10000
+        )
+
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page.wait_for_selector(room_selector, timeout=10000)
+        await page.click(room_selector)
+        await page.wait_for_selector("#screen-lobby.active", timeout=10000)
+
+        cells = await page.query_selector_all(".card-grid-cell")
+        await cells[0].click()  # card #1
+        await page.wait_for_selector("#screen-game.active", timeout=20000)
+
+        # Simulate a genuine Telegram Back press -- there's no real DOM
+        # element for Telegram's own native chrome, so the stub above
+        # captured the app's real onClick handler for direct invocation.
+        await page.evaluate("window.__triggerBackButton()")
+        await page.wait_for_selector("#screen-rooms.active", timeout=5000)
+
+        # The round itself must be completely unaffected -- still running
+        # (or already progressed on its own), never voided/dropped just
+        # because the player navigated away from looking at it.
+        round_status = await pool.fetchval(
+            "SELECT status FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1", room_id
+        )
+        assert round_status in ("running", "settling", "done"), round_status
+        entry_count = await pool.fetchval(
+            "SELECT count(*) FROM round_entries re JOIN rounds r ON r.id = re.round_id "
+            "WHERE r.room_id = $1 AND re.user_id = $2",
+            room_id, user_row["id"],
+        )
+        assert entry_count == 1  # card was never dropped by navigating away
+
+        assert console_errors == [], f"JS errors during back-button navigation: {console_errors}"
         await page.close()
     finally:
         await engine.stop()
