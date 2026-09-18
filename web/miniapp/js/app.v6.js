@@ -658,7 +658,17 @@ function gridNumbers(grid) {
 }
 
 function updateStatStrip(sync) {
-  el("stat-derash").textContent = `${sync.derash || sync.pot || "0.00"} ETB`;
+  // Was `sync.derash || sync.pot || "0.00"`: every server message that
+  // reaches this function always sends derash as a non-empty string
+  // ("0.00" included), and "0.00" is truthy in JS -- so the `|| sync.pot`
+  // fallback could never actually fire, dead code masking a real
+  // server-side bug (state_sync used to always send "0.00" for any round
+  // still in progress; fixed in services/gateway/queries.py::
+  // build_state_sync). Kept as `??`, not `||`, so a genuinely missing
+  // field still falls back safely without ever substituting `pot` (a
+  // different, larger number -- the gross stake, not the payout) mislabeled
+  // as derash.
+  el("stat-derash").textContent = `${sync.derash ?? "0.00"} ETB`;
   el("stat-players").textContent = String(sync.players || "");
   el("stat-stake").textContent = `${sync.stake || ""} ETB`;
   el("stat-call").textContent = `${sync.call_index || 0}/75`;

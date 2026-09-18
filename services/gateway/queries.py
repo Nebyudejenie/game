@@ -20,6 +20,7 @@ from typing import Any
 import asyncpg
 
 from packages.core.phone_crypto import decrypt_phone
+from services.engine.settlement import compute_derash
 
 
 async def get_or_create_user_by_telegram_id(
@@ -322,7 +323,21 @@ async def build_state_sync(pool: asyncpg.Pool, room_id: int, user_id: int) -> di
         round_id = round_row["id"]
         call_index = round_row["call_index"]
         pot = round_row["pot"]
-        derash = round_row["derash"] or Decimal("0")
+        # rounds.derash is only ever written at settlement (round_engine.py's
+        # own UPDATE ... SET status = 'done', derash = $2 ...) -- for any
+        # round still in "lobby" or "running" (the only statuses reachable
+        # here; terminal rounds are treated as "no round" above), that
+        # column is always NULL, so reading it directly made this reconnect
+        # payload show a hardcoded 0.00 derash for the entire life of every
+        # round regardless of the real pot. A live player connected exactly
+        # when round_engine.py's own round_start/lobby_tick broadcasts fired
+        # saw the correct value (those compute it fresh from the live pot);
+        # anyone who reconnected, refreshed, or joined mid-round instead saw
+        # 0.00 -- the exact "sometimes right, sometimes 0" behavior this
+        # fixes by computing it the same way round_engine.py already does,
+        # live from the real pot, instead of reading the not-yet-written
+        # column.
+        derash, _ = compute_derash(pot, round_row["house_cut_bps"])
         players = round_row["distinct_players"] or 0
         stake = round_row["stake"]
         draw_order = round_row["draw_order"] or []
