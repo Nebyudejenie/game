@@ -97,6 +97,10 @@ function buildNav(active) {
 }
 
 async function showScreen(name) {
+  // Reflected in the URL (not pushed as a new history entry -- nav clicks
+  // shouldn't pile up back-button stops) purely so a refresh lands back on
+  // the same section instead of always resetting to the dashboard.
+  history.replaceState(null, "", `#${name}`);
   buildNav(name);
   contentEl.innerHTML = `<p class="loading">Loading…</p>`;
   try {
@@ -133,10 +137,15 @@ async function doLogout() {
   showLogin();
 }
 
+function screenFromUrl() {
+  const name = location.hash.slice(1);
+  return name in SCREENS ? name : "dashboard";
+}
+
 function showApp() {
   loginEl.hidden = true;
   shellEl.hidden = false;
-  showScreen("dashboard");
+  showScreen(screenFromUrl());
 }
 
 function showLogin() {

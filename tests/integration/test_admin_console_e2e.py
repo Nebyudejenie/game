@@ -665,3 +665,29 @@ async def test_admin_console_announcement_screen_saves_and_shows_current_state(
     finally:
         await pool.execute("UPDATE platform_announcement SET text = '', enabled = false WHERE id = 1")
         await page.close()
+
+
+async def test_admin_console_refresh_stays_on_the_current_screen(admin_server, pool, browser):
+    # Previously showApp() unconditionally called showScreen("dashboard")
+    # on every load with no URL state at all, so a refresh always bounced
+    # an admin mid-task on some other screen back to the dashboard.
+    admin_id, username, password, totp_secret = await create_test_admin(pool, role="superadmin")
+    page = await browser.new_page(viewport={"width": 1280, "height": 900})
+    page_errors: list[str] = []
+    page.on("pageerror", lambda exc: page_errors.append(str(exc)))
+
+    await _login(page, admin_server, username, password, totp_secret)
+    await page.wait_for_selector(".stat-grid", timeout=10000)
+
+    await page.click('.nav-btn[data-screen="rooms"]')
+    await page.wait_for_selector('.nav-btn[data-screen="rooms"].active', timeout=10000)
+    assert page.url.endswith("#rooms")
+
+    await page.reload()
+    await page.wait_for_selector('.nav-btn[data-screen="rooms"].active', timeout=10000)
+    # Landed back on Rooms (its create-room form), not the Dashboard's own
+    # stat grid.
+    await page.wait_for_selector("#create-room-form", timeout=10000)
+
+    assert page_errors == [], f"JS errors: {page_errors}"
+    await page.close()
