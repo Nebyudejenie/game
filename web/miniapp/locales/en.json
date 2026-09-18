@@ -4,6 +4,8 @@
   "rooms.playing_now": "Playing",
   "rooms.derash_up_to": "Derash up to {amount}",
   "rooms.empty": "No rooms available",
+  "rooms.online_label": "online",
+  "rooms.playing_count_label": "playing now",
 
   "lobby.pick_card": "Pick your card",
   "lobby.starts_in": "{seconds}s to start",

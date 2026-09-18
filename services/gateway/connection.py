@@ -61,12 +61,20 @@ class ConnectionHandler:
         redis: Redis,
         hub: FanoutHub,
         bot_token: str,
+        connections: set[ConnectionHandler],
     ) -> None:
         self._ws = websocket
         self._pool = pool
         self._redis = redis
         self._hub = hub
         self._bot_token = bot_token
+        # The same set services/gateway/app.py's ws_endpoint adds/removes
+        # this handler from -- a live headcount of real people with the
+        # app open right now (never bots: simulated players act purely
+        # through services.engine.commands.send_command(), no WebSocket
+        # of their own), read on demand rather than tracked separately,
+        # so it can never drift from the actual set of open connections.
+        self._connections = connections
 
         self._user_id: int | None = None
         self._auto_mark_preference: bool = True
@@ -201,7 +209,9 @@ class ConnectionHandler:
             )
         elif t == "rooms":
             rooms = await queries.list_rooms(self._pool)
-            await self._ws.send_text(json.dumps({"t": "rooms", "rooms": rooms}))
+            await self._ws.send_text(
+                json.dumps({"t": "rooms", "rooms": rooms, "online_count": len(self._connections)})
+            )
         elif t == "join":
             await self._handle_join(frame)
         elif t == "leave":

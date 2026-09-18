@@ -35,6 +35,7 @@ import pytest
 
 from packages.core.bingo import letter_for
 from services.engine.round_engine import RoundEngine, load_room_config
+from services.gateway import queries
 from tests.integration.conftest import (
     build_init_data,
     create_funded_user,
@@ -592,6 +593,82 @@ async def test_a_late_joiner_sees_an_already_taken_card_as_taken(
         assert "selected" not in (classes or ""), "taken, not B's own selection"
 
         assert console_errors_b == [], f"JS errors for the late joiner: {console_errors_b}"
+        await page_a.close()
+        await page_b.close()
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=15)
+
+
+async def test_rooms_screen_shows_a_real_online_and_playing_headcount(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    """Per explicit request: the rooms (stake-picker) screen shows how
+    alive the platform is the moment it opens. "Online" must be a real
+    count of open WebSocket connections (services/gateway/connection.py's
+    online_count on the "rooms" push), not a guess -- proven here by
+    connecting a genuine second real browser tab and confirming the
+    figure the *second* connection sees actually includes the first.
+    "Playing" is the sum of every room's own player count, confirmed
+    against a real card a first player actually took.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=2, lobby_seconds=30, is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    # Delta, not an absolute total: this shared dev database accumulates
+    # real is_active=true rooms across every test run (the same
+    # "3092 leftover test rooms" class of pollution this session already
+    # hit elsewhere), so "Playing" sums real activity across every one of
+    # them, not just this test's own room.
+    baseline_playing = sum(r["players"] for r in await queries.list_rooms(pool))
+
+    try:
+        telegram_id_a = next_telegram_id()
+        page_a, console_errors_a = await prepare_page(browser, telegram_id_a, first_name="PlayerA")
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page_a.goto(http_base + "/")
+        await page_a.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page_a.wait_for_function(
+            "document.getElementById('rooms-online-count').textContent === '1'", timeout=10000
+        )
+
+        user_a = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id_a)
+        assert user_a is not None
+        await fund_user(conn, user_a["id"], Decimal("100.00"))
+        await page_a.reload()
+        await page_a.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page_a.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('100.00')", timeout=10000
+        )
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page_a.wait_for_selector(room_selector, timeout=10000)
+        await page_a.click(room_selector)
+        await page_a.wait_for_selector("#screen-lobby.active", timeout=10000)
+        cells_a = await page_a.query_selector_all(".card-grid-cell")
+        await cells_a[0].click()  # card #1
+        await page_a.wait_for_selector("#lobby-your-cards-section:not(.hidden)", timeout=10000)
+
+        # Player B connects fresh, after A is both online AND holding a
+        # real card -- B's own very first "rooms" push must reflect both.
+        telegram_id_b = next_telegram_id()
+        page_b, console_errors_b = await prepare_page(browser, telegram_id_b, first_name="PlayerB")
+        await page_b.goto(http_base + "/")
+        await page_b.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page_b.wait_for_function(
+            "document.getElementById('rooms-online-count').textContent === '2'", timeout=10000
+        )
+        playing_text = await page_b.text_content("#rooms-playing-count")
+        assert playing_text == str(baseline_playing + 1), (
+            f"expected baseline ({baseline_playing}) + A's own real card = {baseline_playing + 1}, "
+            f"got {playing_text!r}"
+        )
+
+        assert console_errors_a == [], f"JS errors for player A: {console_errors_a}"
+        assert console_errors_b == [], f"JS errors for player B: {console_errors_b}"
         await page_a.close()
         await page_b.close()
     finally:

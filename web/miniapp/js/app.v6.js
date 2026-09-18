@@ -201,9 +201,21 @@ function roomCountdownText(room) {
 }
 
 ws.on("rooms", (msg) => {
-  setState({ rooms: msg.rooms });
+  setState({ rooms: msg.rooms, onlineCount: msg.online_count ?? 0 });
+  updateRoomsActivityHeader();
   if (getState().screen === "rooms") renderRoomList();
 });
+
+// "Online" comes straight from the server (a real WebSocket headcount);
+// "Playing" is summed here from each room's own player count rather than
+// asking the server for a second figure -- list_rooms() already carries
+// everything needed for it.
+function updateRoomsActivityHeader() {
+  const state = getState();
+  const playing = state.rooms.reduce((sum, room) => sum + room.players, 0);
+  el("rooms-online-count").textContent = String(state.onlineCount ?? 0);
+  el("rooms-playing-count").textContent = String(playing);
+}
 
 function refreshRoomList() {
   ws.requestRooms();

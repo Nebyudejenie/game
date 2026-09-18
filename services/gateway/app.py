@@ -87,6 +87,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
         app.state.redis,
         app.state.hub,
         app.state.bot_token,
+        app.state.connections,
     )
     app.state.connections.add(handler)
     try:

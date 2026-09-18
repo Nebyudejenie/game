@@ -27,6 +27,61 @@
   margin-bottom: 12px;
 }
 
+/* The first thing a player sees on open, right under the balance --
+   how alive the platform is right now. "Online" is a real headcount of
+   open WebSocket connections (services/gateway/connection.py); "Playing"
+   is the sum of every room's own distinct-player count, which honestly
+   includes simulated players (they hold real round_entries rows, just
+   never a WebSocket of their own) -- exactly the "a room doesn't feel
+   empty" effect that feature exists for. */
+.rooms-activity-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.rooms-activity-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.rooms-activity-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.rooms-activity-dot.online {
+  background: var(--call);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--call) 70%, transparent);
+}
+
+.rooms-activity-dot.playing {
+  background: var(--gold);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--gold) 70%, transparent);
+  animation: roomsActivityDotPulse 1.6s ease-in-out infinite;
+}
+
+@keyframes roomsActivityDotPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rooms-activity-dot.playing {
+    animation: none;
+  }
+}
+
 .balance-pill {
   display: flex;
   align-items: center;
