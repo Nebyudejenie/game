@@ -890,6 +890,64 @@ function renderAnnouncementMarquee() {
   marquee.classList.remove("hidden");
 }
 
+// --- invite / referral ----------------------------------------------------
+//
+// services/bot/handlers.py::cmd_invite() already sends this same
+// ?start=ref_{telegram_id} link + join count over chat, but only to a
+// player who thinks to type /invite there -- this is the same data, one
+// tap away, on the screen every player actually spends their time on.
+// Sharing goes through Telegram's own native share sheet (t.me/share/url,
+// opened via tg.openTelegramLink) rather than a raw copy-paste link: the
+// resulting message uses Telegram's own preview of the bot's profile
+// (name/photo/short description), so it looks like a real invite, not a
+// pasted URL -- one tap fans out to any chat, group, or channel the
+// player picks, with zero server-side involvement in the fan-out itself.
+let inviteLink = null;
+let inviteReferralCount = 0;
+
+async function fetchInviteSummary() {
+  try {
+    const response = await fetch("/api/invite", { headers: authHeader() });
+    if (!response.ok) return;
+    const data = await response.json();
+    inviteLink = data.link || null;
+    inviteReferralCount = data.referral_count || 0;
+  } catch {
+    /* invite panel just shows nothing to share -- not critical to any real functionality */
+  }
+}
+
+el("invite-btn").addEventListener("click", async () => {
+  haptics.lightTap();
+  const panel = el("invite-panel");
+  const opening = panel.classList.contains("hidden");
+  panel.classList.toggle("hidden");
+  if (opening) {
+    // Re-fetched on every open, unlike the announcement text above -- a
+    // friend joining via this exact link is the one thing this panel
+    // exists to show, and it can genuinely change between opens within
+    // the same session.
+    await fetchInviteSummary();
+    el("invite-count").textContent = t("invite.count", { count: inviteReferralCount });
+  }
+});
+
+el("invite-share-btn").addEventListener("click", () => {
+  if (!inviteLink) {
+    showToast("invite.no_link");
+    return;
+  }
+  haptics.mediumTap();
+  const shareUrl =
+    `https://t.me/share/url?url=${encodeURIComponent(inviteLink)}` +
+    `&text=${encodeURIComponent(t("invite.share_text"))}`;
+  if (tg && tg.openTelegramLink) {
+    tg.openTelegramLink(shareUrl);
+  } else {
+    window.open(shareUrl, "_blank");
+  }
+});
+
 // A real production incident, caught on video: a player who took a card
 // during a lobby that then failed to fill (too few players) saw the
 // countdown hit 0 and just freeze there forever -- nothing was telling an
@@ -2004,6 +2062,7 @@ async function boot() {
   showScreen("rooms");
   refreshRoomList();
   fetchAnnouncement();
+  fetchInviteSummary();
 
   // Deep link from the bot: /deposit's own "open the wallet" button
   // (services/bot/keyboards.py::open_wallet_keyboard) appends

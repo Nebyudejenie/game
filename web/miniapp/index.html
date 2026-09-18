@@ -150,6 +150,10 @@
         <span class="amount" id="balance-amount">-- ETB</span>
       </div>
       <div class="header-actions">
+        <button id="invite-btn" class="wallet-fab invite-fab">
+          <span aria-hidden="true">🎁</span>
+          <span class="wallet-fab-label" data-i18n="invite.button"></span>
+        </button>
         <button id="voice-settings-btn" class="icon-fab">🔊</button>
         <button id="open-wallet-btn" class="wallet-fab">
           <svg class="wallet-fab-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
@@ -172,6 +176,11 @@
         <span id="rooms-playing-count">0</span>
         <span data-i18n="rooms.playing_count_label"></span>
       </span>
+    </div>
+    <div id="invite-panel" class="voice-settings-panel hidden">
+      <p class="invite-panel-title" data-i18n="invite.panel_title"></p>
+      <p id="invite-count" class="invite-count"></p>
+      <button id="invite-share-btn" class="btn-secondary" data-i18n="invite.share_button"></button>
     </div>
     <div id="voice-settings-panel" class="voice-settings-panel hidden">
       <div class="voice-settings-row">

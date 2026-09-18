@@ -92,6 +92,22 @@ async def set_auto_mark_preference(pool: asyncpg.Pool, user_id: int, auto: bool)
     )
 
 
+async def invite_summary(pool: asyncpg.Pool, user_id: int) -> dict[str, Any]:
+    """The same two facts services/bot/handlers.py::cmd_invite() already
+    sends over chat (the deep link's telegram_id and how many people have
+    joined through it) -- surfaced here so the Mini App can offer the same
+    invite, one tap, without a player leaving the game for the bot chat.
+    `referred_by` is an internal users.id (see 81d041ff4513_ledger_
+    foundation.py), the same column cmd_invite() counts against.
+    """
+    row = await pool.fetchrow("SELECT telegram_id FROM users WHERE id = $1", user_id)
+    telegram_id = int(row["telegram_id"]) if row is not None else 0
+    referral_count = await pool.fetchval(
+        "SELECT count(*) FROM users WHERE referred_by = $1", user_id
+    )
+    return {"telegram_id": telegram_id, "referral_count": int(referral_count)}
+
+
 async def held_card_no_for_room(pool: asyncpg.Pool, room_id: int, user_id: int) -> int | None:
     """Resolves "the" card a user holds in a room's current round, for a
     drop_card/claim frame that didn't explicitly say which card (every

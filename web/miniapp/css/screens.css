@@ -115,6 +115,27 @@
   flex-shrink: 0;
 }
 
+/* Gold, not --accent: this is the one header action meant to read as a
+   reward/growth prompt rather than a utility (wallet/voice), same gold
+   already used for FREE cells and the "playing" activity dot. */
+.invite-fab {
+  background:
+    radial-gradient(120% 160% at 0% 0%, color-mix(in srgb, #fff 35%, transparent), transparent 60%),
+    var(--gold);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--gold) 55%, transparent);
+  color: #1a1200;
+}
+
+.invite-panel-title {
+  font-size: var(--fs-sm);
+  font-weight: 700;
+}
+
+.invite-count {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
 .wallet-fab-label {
   white-space: nowrap;
 }

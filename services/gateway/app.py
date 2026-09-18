@@ -175,6 +175,24 @@ async def api_announcement(authorization: str = Header(default="")) -> dict[str,
     return {"text": row["text"]}
 
 
+@app.get("/api/invite")
+async def api_invite(authorization: str = Header(default="")) -> dict[str, Any]:
+    """Same `?start=ref_{telegram_id}` deep link and referral count
+    services/bot/handlers.py::cmd_invite() already sends over chat --
+    surfaced in-app so a player can share it with one tap (native
+    Telegram share sheet, see js/app.v6.js) without leaving the game.
+    `link: None` only when the bot has no configured username, matching
+    cmd_invite()'s own invite.no_username fallback.
+    """
+    user_id = await _authenticated_user_id(authorization)
+    summary = await queries.invite_summary(app.state.pool, user_id)
+    settings = get_settings()
+    if not settings.telegram_bot_username:
+        return {"link": None, "referral_count": summary["referral_count"]}
+    link = f"https://t.me/{settings.telegram_bot_username}?start=ref_{summary['telegram_id']}"
+    return {"link": link, "referral_count": summary["referral_count"]}
+
+
 # Every DepositRejected/WithdrawalRejected subclass maps to a short error
 # code the Mini App looks up its own translated message for -- the same
 # "distinct exception type, not a string reason" pattern

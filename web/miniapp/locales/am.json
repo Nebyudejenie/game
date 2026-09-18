@@ -7,6 +7,14 @@
   "rooms.online_label": "ኦንላይን",
   "rooms.playing_count_label": "እየተጫወቱ",
 
+  "invite.button": "ጋብዙ",
+  "invite.panel_title": "ጓደኞችን ጋብዙ፣ አብረው ይጫወቱ",
+  "invite.count": "እስካሁን {count} ጓደኞች ተቀላቅለዋል",
+  "invite.share_button": "የግብዣ አገናኝ ላክ",
+  "invite.share_text": "🎉 በአራዳ ቢንጎ ላይ ተቀላቀሉኝ — እውነተኛ ቢንጎ፣ እውነተኛ ገንዘብ፣ በቴሌግራም ላይ በቀጥታ! ለመጫወት ይንኩ፦",
+  "invite.no_link": "የግብዣ አገናኝ አሁን አይገኝም — እባክዎ ቆየት ብለው ይሞክሩ።",
+  "invite.copied": "የግብዣ አገናኝ ተቀድቷል",
+
   "lobby.pick_card": "ካርድ ይምረጡ",
   "lobby.starts_in": "{seconds}ሰ ይጀምራል",
   "lobby.round_voided_underfilled": "በቂ ተጫዋቾች ስላልተቀላቀሉ ገንዘብዎ ተመልሷል።",

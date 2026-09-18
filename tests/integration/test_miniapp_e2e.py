@@ -75,9 +75,14 @@ def telegram_stub_script(init_data: str, telegram_id: int, first_name: str) -> s
           // Telegram's own native chrome has no DOM element a Playwright
           // click() could target.
           onClick: function(cb) {{ window.__triggerBackButton = cb; }}
-        }}
+        }},
+        // Real Telegram opens its native share sheet for this; there's no
+        // such UI in a test browser, so this just records the exact URL
+        // the app asked to open, for a test to assert against.
+        openTelegramLink: function(url) {{ window.__openedTelegramLinks.push(url); }}
       }}
     }};
+    window.__openedTelegramLinks = [];
     """
 
 
@@ -1648,4 +1653,43 @@ async def test_opening_directly_in_a_plain_browser_shows_an_accurate_message_not
     assert console_errors == [], f"JS errors on the no-initData boot path: {console_errors}"
 
     await page.screenshot(path="/tmp/miniapp-not-in-telegram.png")
+    await page.close()
+
+
+async def test_rooms_screen_invite_button_shares_a_real_referral_link(gateway_server, browser, conn):
+    """The Rooms header's new Invite button (services/gateway/queries.py::
+    invite_summary(), services/gateway/app.py's /api/invite) -- the same
+    ?start=ref_{telegram_id} deep link and join count
+    services/bot/handlers.py::cmd_invite() already sends over chat, now one
+    tap away in the game itself instead of requiring a trip back to the bot.
+    """
+    telegram_id = next_telegram_id()
+    page, console_errors = await prepare_page(browser, telegram_id)
+
+    http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+    await page.goto(http_base + "/")
+    await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+
+    referrer_id = await conn.fetchval("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+    assert referrer_id is not None
+    for _ in range(2):
+        await conn.execute(
+            "INSERT INTO users (telegram_id, display_name, referred_by) VALUES ($1, $2, $3)",
+            next_telegram_id(), "referred-friend", referrer_id,
+        )
+
+    await page.click("#invite-btn")
+    await page.wait_for_selector("#invite-panel:not(.hidden)", timeout=5000)
+    await page.wait_for_function(
+        "document.getElementById('invite-count').textContent.includes('2')", timeout=10000
+    )
+
+    await page.click("#invite-share-btn")
+    opened = await page.evaluate("window.__openedTelegramLinks")
+    assert len(opened) == 1, f"expected exactly one share-sheet open, got {opened!r}"
+    assert opened[0].startswith("https://t.me/share/url?")
+    assert f"ref_{telegram_id}" in opened[0]
+    assert "aradabingo_test_bot" in opened[0]
+
+    assert console_errors == [], f"JS errors during invite flow: {console_errors}"
     await page.close()
