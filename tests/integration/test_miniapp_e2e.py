@@ -35,6 +35,7 @@ import pytest
 
 from packages.core.bingo import letter_for
 from services.admin.simulated_players_queries import active_simulated_player_count
+from services.engine import settlement
 from services.engine.round_engine import RoundEngine, load_room_config
 from services.gateway import queries
 from tests.integration.conftest import (
@@ -687,6 +688,105 @@ async def test_rooms_screen_shows_a_real_online_and_playing_headcount(
     finally:
         await engine.stop()
         await asyncio.wait_for(task, timeout=15)
+
+
+async def test_room_list_derash_only_shows_once_running_and_is_the_real_derash_not_the_pot(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    """Per explicit request: the stake-selection (Rooms) screen must not
+    show a derash figure at all until a room's round has actually passed
+    its lobby cutoff and started running (the pot is still filling up
+    until then, so advertising a number would be premature) -- and once
+    shown, it must be the real, post-house-cut derash (services/gateway/
+    queries.py::list_rooms(), via settlement.compute_derash()), not the
+    raw gross pot the "Derash up to X" copy used to display.
+    """
+    # A generous lobby, unlike this file's other fast-timing tests: the
+    # "before cutoff" assertion below needs a real, comfortable window to
+    # land inside a real second browser connection's own full boot
+    # sequence (page load, WS handshake, funding, reload) before the round
+    # transitions to running -- a short lobby made this flaky (the round
+    # was already running by the time player B's own check ran).
+    house_cut_bps = 2000
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), house_cut_bps=house_cut_bps, min_players=1,
+        lobby_seconds=20, call_interval_ms=300, is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+    room_selector = f'.room-card[data-room-id="{room_id}"]'
+
+    try:
+        telegram_id_a = next_telegram_id()
+        page_a, console_errors_a = await prepare_page(browser, telegram_id_a, first_name="PlayerA")
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page_a.goto(http_base + "/")
+        await page_a.wait_for_selector("#screen-rooms.active", timeout=10000)
+        user_a = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id_a)
+        assert user_a is not None
+        await fund_user(conn, user_a["id"], Decimal("100.00"))
+        await page_a.reload()
+        await page_a.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page_a.wait_for_selector(room_selector, timeout=10000)
+        await page_a.click(room_selector)
+        await page_a.wait_for_selector("#screen-lobby.active", timeout=10000)
+        cells_a = await page_a.query_selector_all(".card-grid-cell")
+        await cells_a[0].click()  # stakes into the round -- pot is now 10.00, status "lobby"
+
+        # A second, fresh connection's very first "rooms" push must still
+        # hide the derash line for this room: the lobby hasn't closed yet.
+        telegram_id_b = next_telegram_id()
+        page_b, console_errors_b = await prepare_page(browser, telegram_id_b, first_name="PlayerB")
+        await page_b.goto(http_base + "/")
+        await page_b.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page_b.wait_for_selector(room_selector, timeout=10000)
+        derash_text_before = await page_b.text_content(f'{room_selector} .derash-line')
+        assert (derash_text_before or "").strip() == "", (
+            f"expected no derash shown before the lobby closes, got {derash_text_before!r}"
+        )
+
+        # Player A's own client naturally moves to the game screen the
+        # instant round_start actually broadcasts -- the real signal the
+        # lobby has closed and the round is running, no arbitrary sleep.
+        await page_a.wait_for_selector("#screen-game.active", timeout=30000)
+
+        # Player B reloads (re-running boot()'s own refreshRoomList()) --
+        # same real "rooms" push, now for a room whose round is running.
+        await page_b.reload()
+        await page_b.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page_b.wait_for_selector(room_selector, timeout=10000)
+        await page_b.wait_for_function(
+            f"document.querySelector('{room_selector} .derash-line').textContent.trim() !== ''",
+            timeout=10000,
+        )
+        derash_text_after = await page_b.text_content(f'{room_selector} .derash-line')
+        expected_derash, _ = settlement.compute_derash(Decimal("10.00"), house_cut_bps)
+        assert str(expected_derash) in (derash_text_after or ""), (
+            f"expected the real derash ({expected_derash}) in {derash_text_after!r}"
+        )
+        # The old "up to" pot-based copy must be gone -- this is the real,
+        # final derash for a locked-in pot, not an upper bound.
+        assert "10.00" not in (derash_text_after or ""), (
+            f"expected the derash figure, not the raw pot, got {derash_text_after!r}"
+        )
+
+        assert console_errors_a == [], f"JS errors for player A: {console_errors_a}"
+        assert console_errors_b == [], f"JS errors for player B: {console_errors_b}"
+        await page_a.close()
+        await page_b.close()
+    finally:
+        # 30s, not this file's usual 15s: engine.stop() only sets a flag
+        # _run_running()'s own per-call loop never actually checks (only
+        # self._status/self._lock.is_held() do) -- it's honored at the
+        # *outer* run_forever() loop boundary, i.e. only once the current
+        # round naturally finishes. With a single real card and this room's
+        # default win_patterns (min_winning_lines=2), that can run the
+        # full 75-call sequence at 300ms/call (~22.5s) before a win lands,
+        # confirmed directly: this teardown took ~38s wall-clock in
+        # isolation, comfortably failing the file's usual 15s budget.
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=30)
 
 
 async def test_spectate_shows_the_admin_configured_announcement_marquee(

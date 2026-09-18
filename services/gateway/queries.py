@@ -192,12 +192,12 @@ async def list_rooms(pool: asyncpg.Pool) -> list[dict[str, Any]]:
         """
         SELECT
             r.id, r.code, r.stake, r.max_players,
-            latest.status, latest.pot, latest.lobby_deadline,
+            latest.status, latest.pot, latest.house_cut_bps, latest.lobby_deadline,
             (SELECT count(DISTINCT user_id) FROM round_entries
              WHERE round_id = latest.id) AS distinct_players
         FROM rooms r
         LEFT JOIN LATERAL (
-            SELECT id, status, pot, lobby_deadline
+            SELECT id, status, pot, house_cut_bps, lobby_deadline
             FROM rounds
             WHERE room_id = r.id
             ORDER BY seq DESC
@@ -209,6 +209,20 @@ async def list_rooms(pool: asyncpg.Pool) -> list[dict[str, Any]]:
     )
     out = []
     for row in rows:
+        pot = row["pot"] if row["pot"] is not None else Decimal("0.00")
+        # Only meaningful once a round is actually running (past the lobby
+        # cutoff, per explicit request -- before that the pot is still
+        # filling and showing a derash figure at all would be premature).
+        # The Mini App only ever renders this for status == "running", but
+        # it's computed for every row the same live way build_state_sync()
+        # and round_engine.py itself do (settlement.compute_derash()), not
+        # a stale/never-written column -- see this same fix already
+        # applied there.
+        derash = (
+            compute_derash(pot, row["house_cut_bps"])[0]
+            if row["house_cut_bps"] is not None
+            else Decimal("0.00")
+        )
         out.append(
             {
                 "room_id": row["id"],
@@ -217,7 +231,8 @@ async def list_rooms(pool: asyncpg.Pool) -> list[dict[str, Any]]:
                 "max_players": row["max_players"],
                 "status": row["status"] or "idle",
                 "players": row["distinct_players"] or 0,
-                "pot": str(row["pot"]) if row["pot"] is not None else "0.00",
+                "pot": str(pot),
+                "derash": str(derash),
                 # Mini App spec 2.1: the room list's own countdown ("0:18")
                 # for a room still in its lobby -- the SQL above already
                 # selected this column, but it was silently dropped here

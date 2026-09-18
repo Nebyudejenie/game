@@ -2,7 +2,7 @@
   "rooms.title": "Rooms",
   "rooms.playing": "Playing — next in ~{seconds}s",
   "rooms.playing_now": "Playing",
-  "rooms.derash_up_to": "Derash up to {amount}",
+  "rooms.derash_amount": "Derash {amount}",
   "rooms.empty": "No rooms available",
   "rooms.online_label": "online",
   "rooms.playing_count_label": "playing now",

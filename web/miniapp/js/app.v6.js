@@ -171,7 +171,9 @@ function renderRoomList() {
         <div class="players">🟢 ${room.players}</div>
       </div>
       <div style="text-align:right">
-        <div class="derash-line">${t("rooms.derash_up_to", { amount: room.pot })}</div>
+        <div class="derash-line">${
+          room.status === "running" ? t("rooms.derash_amount", { amount: room.derash }) : ""
+        }</div>
         <div class="countdown">${roomCountdownText(room)}</div>
       </div>
     `;

@@ -1124,12 +1124,21 @@ async def test_daily_ggr_attributes_a_near_midnight_utc_entry_to_the_correct_eth
         idempotency_key=f"tz-boundary-test-{house.id}-{provider.id}-{datetime.now(UTC).timestamp()}",
     )
     boundary_utc = datetime(2026, 8, 25, 23, 30, 0, tzinfo=UTC)
-    await conn.execute(
-        "UPDATE ledger_entries SET created_at = $1 WHERE transaction_id = $2 AND account_id = $3",
-        boundary_utc,
-        txn.id,
-        house.id,
-    )
+    # ledger_entries is append-only in real production (a DB-level CHECK
+    # added after this test was first written) -- this dev/test-only
+    # escape hatch, as a jobingo_dev_fixture role member, is what makes
+    # backdating this one entry for the test's own boundary setup
+    # possible at all, the same fix already applied to every other test
+    # cleanup helper that mutates ledger history (see test_simulated_
+    # players.py's own _delete_bot_completely for the same pattern).
+    async with conn.transaction():
+        await conn.execute("SET LOCAL jobingo.allow_ledger_history_mutation = 'true'")
+        await conn.execute(
+            "UPDATE ledger_entries SET created_at = $1 WHERE transaction_id = $2 AND account_id = $3",
+            boundary_utc,
+            txn.id,
+            house.id,
+        )
 
     after_correct_day = Decimal((await queries.daily_ggr(pool, date(2026, 8, 26)))["ggr"])
     after_wrong_day = Decimal((await queries.daily_ggr(pool, date(2026, 8, 25)))["ggr"])
