@@ -6,7 +6,7 @@
   "rooms.empty": "ምንም ክፍል የለም",
 
   "lobby.pick_card": "ካርድ ይምረጡ",
-  "lobby.starts_in": "ይጀምራል {seconds}ሰ",
+  "lobby.starts_in": "{seconds}ሰ ይጀምራል",
   "lobby.round_voided_underfilled": "በቂ ተጫዋቾች ስላልተቀላቀሉ ገንዘብዎ ተመልሷል።",
   "lobby.cards_held": "{count} ካርድ ይዘዋል",
   "lobby.card_taken_change": "ካርድ {card} ተይዟል · ቀይር",

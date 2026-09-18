@@ -14,6 +14,23 @@ let winPatterns = ["row", "col", "diag"];
 // exactly like winPatterns' own default above, never a hardcoded rule.
 let minWinningLines = 2;
 let countdownTimer = null;
+let lastLobbyCountdownSeconds = null;
+
+// Renders the lobby countdown's gold pulse-per-second, switching to a
+// continuously-pulsing red in the final 3 seconds. Only re-triggers the
+// pulse animation when the integer seconds value actually changes --
+// startLobbyCountdown's own interval ticks every 250ms for a smooth
+// clock, far more often than the displayed number itself changes.
+function renderLobbyCountdown(label, seconds) {
+  label.textContent = t("lobby.starts_in", { seconds });
+  label.classList.toggle("lobby-countdown-urgent", seconds > 0 && seconds <= 3);
+  if (seconds !== lastLobbyCountdownSeconds) {
+    lastLobbyCountdownSeconds = seconds;
+    label.classList.remove("lobby-countdown-tick");
+    void label.offsetWidth; // force reflow so the animation restarts
+    label.classList.add("lobby-countdown-tick");
+  }
+}
 
 // --- screen management --------------------------------------------------
 
@@ -468,18 +485,20 @@ function startLobbyCountdown(sync) {
   // to action until a real round_start/state_sync hands back a genuine
   // lobby_deadline_ms.
   if (sync.lobby_deadline_ms == null) {
+    label.classList.remove("lobby-countdown-tick", "lobby-countdown-urgent");
     label.textContent = t("lobby.pick_card");
     return;
   }
+  lastLobbyCountdownSeconds = null;
   countdownTimer = setInterval(() => {
     const secondsLeft = Math.max(0, Math.round((sync.lobby_deadline_ms - serverNow()) / 1000));
-    label.textContent = t("lobby.starts_in", { seconds: secondsLeft });
+    renderLobbyCountdown(label, secondsLeft);
   }, 250);
 }
 
 ws.on("lobby_tick", (msg) => {
   if (getState().screen !== "lobby") return;
-  el("lobby-countdown").textContent = t("lobby.starts_in", { seconds: msg.seconds_left });
+  renderLobbyCountdown(el("lobby-countdown"), msg.seconds_left);
   updateLobbyMoneyBar(msg);
 });
 

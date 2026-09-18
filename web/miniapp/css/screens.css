@@ -220,6 +220,45 @@
   color: var(--call);
 }
 
+/* The lobby countdown -- previously plain .stat-value gray, indistinguishable
+   from "Players: 5". This is the one number on the whole screen a player is
+   actually watching tick down toward a real money-committing moment, so it
+   gets its own color and a per-second pulse instead of sitting flat. */
+#lobby-countdown {
+  color: var(--gold);
+  font-size: var(--fs-lg);
+  font-weight: 800;
+}
+
+#lobby-countdown.lobby-countdown-tick {
+  animation: lobbyCountdownPulse 0.35s ease-out;
+}
+
+/* Last 3 seconds: switches to --danger and pulses continuously rather
+   than once per tick, so the final stretch reads as genuinely urgent
+   instead of just "still counting." */
+#lobby-countdown.lobby-countdown-urgent {
+  color: var(--danger);
+  animation: lobbyCountdownUrgent 0.6s ease-in-out infinite;
+}
+
+@keyframes lobbyCountdownPulse {
+  0% { transform: scale(1.35); }
+  100% { transform: scale(1); }
+}
+
+@keyframes lobbyCountdownUrgent {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.18); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #lobby-countdown.lobby-countdown-tick,
+  #lobby-countdown.lobby-countdown-urgent {
+    animation: none;
+  }
+}
+
 .lobby-connection-pill.connected .lobby-connection-dot {
   background: var(--call);
   box-shadow: 0 0 6px var(--call);
