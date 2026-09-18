@@ -536,6 +536,124 @@ async def test_telegram_back_button_works_from_a_live_game_screen(
         await asyncio.wait_for(task, timeout=15)
 
 
+async def test_the_auto_switch_toggles_and_really_persists_both_round_and_user_level(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    """The game screen's AUTO toggle (#auto-switch) -- verifying it isn't
+    just a label that flips a CSS class: a real click must actually reach
+    the server (services/gateway/connection.py's "set_auto" handler) and
+    persist in both places the spec calls for -- the current round's own
+    round_entries.auto_mark (what the engine's auto-claim logic reads
+    right now) and the player's account-level users.auto_mark_preference
+    (what their *next* round starts from). 300ms/call (matching this
+    file's other post-round_start interaction tests) gives comfortable
+    real time to click and check the database mid-round without racing
+    the round to its own natural end -- a slower interval was tried first
+    and made teardown (engine.stop() only takes effect once the current
+    round's own call loop naturally finishes, up to 75 calls away) take
+    minutes instead of seconds.
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=1, lobby_seconds=8, call_interval_ms=300,
+        is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    try:
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+
+        user_row = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
+        assert user_row is not None
+        await fund_user(conn, user_row["id"], Decimal("100.00"))
+        await page.reload()
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('balance-amount').textContent.includes('100.00')", timeout=10000
+        )
+
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page.wait_for_selector(room_selector, timeout=10000)
+        await page.click(room_selector)
+        await page.wait_for_selector("#screen-lobby.active", timeout=10000)
+
+        cells = await page.query_selector_all(".card-grid-cell")
+        await cells[0].click()  # card #1
+        await page.wait_for_selector("#screen-game.active", timeout=20000)
+
+        # Defaults to on -- both the static markup (class="switch on") and
+        # get_auto_mark_preference()'s own fallback for a first-time user.
+        assert "on" in (await page.get_attribute("#auto-switch", "class") or "")
+        assert await page.get_attribute("#auto-switch", "aria-checked") == "true"
+
+        round_id = await pool.fetchval(
+            "SELECT id FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1", room_id
+        )
+        assert round_id is not None
+
+        async def auto_mark_in_round() -> bool:
+            value = await pool.fetchval(
+                "SELECT auto_mark FROM round_entries WHERE round_id = $1 AND user_id = $2",
+                round_id, user_row["id"],
+            )
+            return bool(value)
+
+        async def auto_mark_preference() -> bool:
+            value = await pool.fetchval(
+                "SELECT auto_mark_preference FROM users WHERE id = $1", user_row["id"]
+            )
+            return bool(value)
+
+        assert await auto_mark_in_round() is True
+        assert await auto_mark_preference() is True
+
+        # Click it off.
+        await page.click("#auto-switch")
+        await page.wait_for_function(
+            "document.getElementById('auto-switch').getAttribute('aria-checked') === 'false'",
+            timeout=5000,
+        )
+        assert "on" not in (await page.get_attribute("#auto-switch", "class") or "")
+
+        async def poll_db_false() -> None:
+            for _ in range(50):
+                if not await auto_mark_in_round() and not await auto_mark_preference():
+                    return
+                await asyncio.sleep(0.1)
+            raise AssertionError("auto_mark never reached False in the database after clicking off")
+
+        await poll_db_false()
+
+        # Click it back on -- both the UI and the database must recover.
+        await page.click("#auto-switch")
+        await page.wait_for_function(
+            "document.getElementById('auto-switch').getAttribute('aria-checked') === 'true'",
+            timeout=5000,
+        )
+        assert "on" in (await page.get_attribute("#auto-switch", "class") or "")
+
+        async def poll_db_true() -> None:
+            for _ in range(50):
+                if await auto_mark_in_round() and await auto_mark_preference():
+                    return
+                await asyncio.sleep(0.1)
+            raise AssertionError("auto_mark never reached True in the database after clicking on")
+
+        await poll_db_true()
+
+        assert console_errors == [], f"JS errors toggling AUTO: {console_errors}"
+        await page.close()
+    finally:
+        await engine.stop()
+        await asyncio.wait_for(task, timeout=30)
+
+
 async def test_a_late_joiner_sees_an_already_taken_card_as_taken(
     gateway_server, browser, pool, redis, card_pool, conn
 ):
