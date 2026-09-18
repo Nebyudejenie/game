@@ -248,7 +248,12 @@
 
     <div id="spectate-banner" class="spectate-banner hidden">
       <p data-i18n="spectate.banner"></p>
-      <button id="reserve-card-btn" class="btn-primary" style="margin-top:8px" data-i18n="spectate.reserve"></button>
+      <div id="announcement-marquee" class="announcement-marquee hidden">
+        <div class="announcement-marquee-track">
+          <span id="announcement-marquee-text"></span>
+          <span id="announcement-marquee-text-repeat" aria-hidden="true"></span>
+        </div>
+      </div>
     </div>
 
     <!-- Single-column-of-calls on the left, everything the player watches

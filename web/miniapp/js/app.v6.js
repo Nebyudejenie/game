@@ -855,25 +855,40 @@ function enterSpectate(sync) {
   board.markAllCalled(sync.called || []);
   updateStatStrip(sync);
   restoreCallBadge(sync.called || []);
+  renderAnnouncementMarquee();
 }
 
-el("reserve-card-btn").addEventListener("click", () => {
-  // A real reported bug: this used to call enterRoom() -> ws.joinRoom(),
-  // re-sending "join" for the SAME already-running round. The server
-  // can't actually assign a card while a round is running (join() only
-  // ever accepts one during that round's own "lobby" phase) -- so the
-  // resulting state_sync response could never contain a card, and the
-  // only real effect was a full, disruptive board.buildBoard() + call
-  // -badge/recent-calls rebuild of a view that hadn't meaningfully
-  // changed at all, which looked exactly like an already-called number
-  // (e.g. the current "I30" ball) flickering away and back. The player
-  // is *already* moved into the next round automatically the instant it
-  // starts (ws.on("round_start") below checks your_cards itself) --
-  // there is nothing this click could speed up or improve, so it no
-  // longer touches the connection at all, just acknowledges.
-  haptics.lightTap();
-  showToast("spectate.reserve_confirmed");
-});
+// Replaces the old "Reserve a card" button (services/gateway/app.py's
+// /api/announcement is the admin-configurable source, see
+// announcement_queries.py) -- that button re-synced the whole spectate
+// view for zero real benefit, since join() can't assign a card mid-round
+// and the player auto-advances into the next round regardless. Fetched
+// once at boot, not per spectate entry: this text rarely changes within
+// a single short-lived Mini App session, and re-fetching on every
+// spectate entry would just be another pointless round trip.
+let announcementText = null;
+
+async function fetchAnnouncement() {
+  try {
+    const response = await fetch("/api/announcement", { headers: authHeader() });
+    if (!response.ok) return;
+    const data = await response.json();
+    announcementText = data.text || null;
+  } catch {
+    /* no banner shown -- not critical to any real functionality */
+  }
+}
+
+function renderAnnouncementMarquee() {
+  const marquee = el("announcement-marquee");
+  if (!announcementText) {
+    marquee.classList.add("hidden");
+    return;
+  }
+  el("announcement-marquee-text").textContent = announcementText;
+  el("announcement-marquee-text-repeat").textContent = announcementText;
+  marquee.classList.remove("hidden");
+}
 
 // A real production incident, caught on video: a player who took a card
 // during a lobby that then failed to fill (too few players) saw the
@@ -1988,6 +2003,7 @@ async function boot() {
   document.getElementById("balance-amount").textContent = `${user.balance} ETB`;
   showScreen("rooms");
   refreshRoomList();
+  fetchAnnouncement();
 
   // Deep link from the bot: /deposit's own "open the wallet" button
   // (services/bot/keyboards.py::open_wallet_keyboard) appends

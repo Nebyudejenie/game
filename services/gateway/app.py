@@ -161,6 +161,20 @@ async def api_payment_methods(authorization: str = Header(default="")) -> dict[s
     return await availability.get_payment_availability(app.state.pool, get_settings())
 
 
+@app.get("/api/announcement")
+async def api_announcement(authorization: str = Header(default="")) -> dict[str, Any]:
+    """The admin-configurable scrolling banner (services/admin/
+    announcement_queries.py) -- fetched once at boot, same as the other
+    /api/* config reads above. disabled/empty is a completely normal,
+    common response; the Mini App just shows nothing in that case.
+    """
+    await _authenticated_user_id(authorization)
+    row = await app.state.pool.fetchrow("SELECT text, enabled FROM platform_announcement WHERE id = 1")
+    if row is None or not row["enabled"] or not row["text"]:
+        return {"text": None}
+    return {"text": row["text"]}
+
+
 # Every DepositRejected/WithdrawalRejected subclass maps to a short error
 # code the Mini App looks up its own translated message for -- the same
 # "distinct exception type, not a string reason" pattern

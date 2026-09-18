@@ -956,6 +956,51 @@
   color: var(--muted);
 }
 
+/* Admin-configurable scrolling banner (services/admin/announcement_
+   queries.py), shown in place of the old "Reserve a card" button --
+   that button re-synced the whole spectate view for zero real benefit
+   (join() can't assign a card mid-round; the player auto-advances into
+   the next round regardless), so this space is put to actual use
+   instead. Two identical copies of the text sit back to back in a
+   track twice the visible width; animating that track from -50% to 0%
+   moves the content left-to-right with no visible seam -- the moment
+   the first copy has fully entered, the second copy is in exactly the
+   position the first started in, so the loop restart is invisible. */
+.announcement-marquee {
+  overflow: hidden;
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.announcement-marquee-track {
+  display: flex;
+  width: max-content;
+  animation: announcement-marquee-scroll 14s linear infinite;
+}
+
+.announcement-marquee-track span {
+  white-space: nowrap;
+  padding-right: 48px;
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--gold);
+}
+
+@keyframes announcement-marquee-scroll {
+  from { transform: translateX(-50%); }
+  to { transform: translateX(0%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .announcement-marquee-track {
+    animation: none;
+  }
+  .announcement-marquee {
+    overflow-x: auto;
+  }
+}
+
 /* --- 2.5 Result --- */
 
 .result-screen {

@@ -676,27 +676,34 @@ async def test_rooms_screen_shows_a_real_online_and_playing_headcount(
         await asyncio.wait_for(task, timeout=15)
 
 
-async def test_spectate_reserve_button_no_longer_disrupts_the_live_call_display(
+async def test_spectate_shows_the_admin_configured_announcement_marquee(
     gateway_server, browser, pool, redis, card_pool, conn
 ):
-    """A real reported bug: clicking "ካርድ ያዝ" (Reserve a card) while
-    spectating a live round used to re-send "join" for the same
-    already-running round. The server can never assign a card while a
-    round is running (join() only accepts one during that round's own
-    "lobby" phase), so the only actual effect was a full
-    board.buildBoard() + call-badge/recent-calls rebuild of a view that
-    hadn't changed at all -- which looked exactly like an already-called
-    number (e.g. a shown "I30") flickering away and back, reported as
-    "the button removes the called number." Fixed by making the click a
-    plain acknowledgment: the player is already moved into the next
-    round automatically the instant it starts (ws.on("round_start")),
-    so the click can't speed up or improve anything.
+    """The spectate screen's old "Reserve a card" button was replaced
+    entirely -- it re-synced the whole view for zero real benefit
+    (join() can't assign a card mid-round; the player auto-advances into
+    the next round regardless), which looked exactly like an already
+    -shown called number flickering away and back. In its place: a
+    genuinely useful, admin-configurable scrolling announcement
+    (services/admin/announcement_queries.py), fetched once at boot via
+    /api/announcement and rendered here.
 
-    Proven here byte-for-byte: the call badge, the recent-calls trail,
-    and every highlighted board cell must be identical before and after
-    the click, with a real WebSocket connection and a real running
-    round throughout -- not just "no crash."
+    Proven against a real running round: with a real announcement set
+    and enabled, a spectating player's marquee actually contains that
+    exact text, the old button element is gone entirely, and -- the
+    original report's own concern -- the called-number board is
+    completely unaffected by anything on this screen.
     """
+    from services.admin import announcement_queries
+    from tests.integration.test_admin_auth import create_test_admin
+
+    admin_id, *_ = await create_test_admin(pool)
+    announcement_text = "Deposit bonus this week — ask support for details!"
+    await announcement_queries.update_announcement_admin(
+        pool, admin_id=admin_id, text=announcement_text, enabled=True,
+        reason="e2e test", ip_address=None,
+    )
+
     room_id = await create_room(
         conn, stake=Decimal("10.00"), min_players=1, lobby_seconds=3, call_interval_ms=300,
         is_active=True,
@@ -733,38 +740,24 @@ async def test_spectate_reserve_button_no_longer_disrupts_the_live_call_display(
         await page_b.click(room_selector)
         await page_b.wait_for_selector("#screen-game.active", timeout=10000)
         await page_b.wait_for_selector("#spectate-banner:not(.hidden)", timeout=10000)
+        await page_b.wait_for_selector("#announcement-marquee:not(.hidden)", timeout=10000)
 
-        # At least one real call must have landed before this proves anything.
+        marquee_text = await page_b.text_content("#announcement-marquee-text")
+        assert marquee_text == announcement_text, f"unexpected marquee text: {marquee_text!r}"
+
+        # The old button is gone entirely, not just hidden.
+        old_button = await page_b.query_selector("#reserve-card-btn")
+        assert old_button is None, "the old Reserve button must no longer exist in the DOM"
+
+        # At least one real call must land before this proves the board
+        # is genuinely unaffected by anything on this screen.
         await page_b.wait_for_function(
             "document.getElementById('call-badge').textContent.length > 0", timeout=15000
         )
-
-        before_board_called = set(
-            await page_b.eval_on_selector_all(".board-cell.called", "els => els.map(e => e.textContent)")
+        called_after_marquee_shown = await page_b.eval_on_selector_all(
+            ".board-cell.called", "els => els.length"
         )
-
-        await page_b.click("#reserve-card-btn")
-        await page_b.wait_for_selector("#toast.visible", timeout=5000)
-        toast_text = await page_b.text_content("#toast")
-        assert toast_text == (
-            "ተመዝግበዋል — ቀጣዩ ዙር ሲጀምር በራስ-ሰር ካርድ ያገኛሉ።"
-        ), f"unexpected confirmation text: {toast_text!r}"
-
-        # The click itself makes no network round trip anymore, but this
-        # room's real calling loop keeps running regardless -- a genuine
-        # new call landing in the moment between these two snapshots is
-        # real game progress, not a bug, so the only property that
-        # actually matters (and the one the original report was about)
-        # is that nothing already shown ever goes missing: the called
-        # set must never shrink, only possibly grow.
-        after_board_called = set(
-            await page_b.eval_on_selector_all(".board-cell.called", "els => els.map(e => e.textContent)")
-        )
-        vanished = before_board_called - after_board_called
-        assert not vanished, (
-            f"a called number vanished from the board: before={sorted(before_board_called)}, "
-            f"after={sorted(after_board_called)}, vanished={sorted(vanished)}"
-        )
+        assert called_after_marquee_shown > 0
 
         assert console_errors_b == [], f"JS errors while spectating: {console_errors_b}"
         await page_a.close()
@@ -779,6 +772,10 @@ async def test_spectate_reserve_button_no_longer_disrupts_the_live_call_display(
         # call_interval_ms -- stop() genuinely needs longer to reach a
         # safe checkpoint than a test with only one round ever plays out.
         await asyncio.wait_for(task, timeout=45)
+        # platform_announcement is a real, shared singleton row -- leaving
+        # it enabled would show this test's own placeholder text to every
+        # other test (and any manual QA) against this database afterward.
+        await pool.execute("UPDATE platform_announcement SET text = '', enabled = false WHERE id = 1")
 
 
 async def _wait_for_class(locator, class_name: str, interval: float = 0.05) -> None:

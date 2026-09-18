@@ -161,6 +161,15 @@ PERMISSIONS: dict[str, frozenset[str]] = {
     # highest-leverage lever in this screen (kills every bot platform-wide
     # at once, and doubles as the global on/off switch) -- superadmin only.
     "simulated_players:stop_all": frozenset({"superadmin"}),
+
+    # Platform announcement: a single scrolling banner every real player
+    # sees in the Mini App. Same view/manage split and breadth as
+    # simulated_players above: read-only visibility is low-sensitivity,
+    # but writing it is public-facing copy every real player immediately
+    # sees, so it's ops-gated rather than support-reachable (matches
+    # bot_content:manage's own {ops, superadmin} for the same reason).
+    "announcement:view": frozenset({"support", "finance", "ops", "superadmin"}),
+    "announcement:manage": frozenset({"ops", "superadmin"}),
 }
 
 

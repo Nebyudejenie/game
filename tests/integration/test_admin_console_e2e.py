@@ -621,3 +621,47 @@ async def test_admin_console_global_search_via_command_palette_over_a_real_brows
 
     assert page_errors == [], f"JS errors: {page_errors}"
     await page.close()
+
+
+async def test_admin_console_announcement_screen_saves_and_shows_current_state(
+    admin_server, pool, conn, browser
+):
+    admin_id, username, password, totp_secret = await create_test_admin(pool, role="ops")
+    page = await browser.new_page(viewport={"width": 1280, "height": 900})
+    page_errors: list[str] = []
+    page.on("pageerror", lambda exc: page_errors.append(str(exc)))
+
+    try:
+        await _login(page, admin_server, username, password, totp_secret)
+        await page.wait_for_selector(".stat-grid", timeout=10000)
+
+        await page.click('.nav-btn[data-screen="announcement"]')
+        await page.wait_for_selector("#announcement-form", timeout=10000)
+        assert "DISABLED" in await page.text_content("#announcement-panel")
+
+        await page.fill('#announcement-form input[name="text"]', "Weekend tournament — join now!")
+        await page.check('#announcement-form input[name="enabled"]')
+        await page.fill('#announcement-form input[name="reason"]', "e2e test: launch promo")
+        await page.click('#announcement-form button[type="submit"]')
+
+        await page.wait_for_selector("#toast.visible", timeout=5000)
+        await page.wait_for_function(
+            "document.getElementById('announcement-panel')?.textContent.includes('ENABLED')",
+            timeout=10000,
+        )
+
+        row = await conn.fetchrow("SELECT text, enabled FROM platform_announcement WHERE id = 1")
+        assert row["text"] == "Weekend tournament — join now!"
+        assert row["enabled"] is True
+
+        audit_row = await conn.fetchrow(
+            "SELECT reason FROM admin_audit_log WHERE action = 'announcement.update' "
+            "ORDER BY id DESC LIMIT 1"
+        )
+        assert audit_row is not None
+        assert "launch promo" in audit_row["reason"]
+
+        assert page_errors == [], f"JS errors: {page_errors}"
+    finally:
+        await pool.execute("UPDATE platform_announcement SET text = '', enabled = false WHERE id = 1")
+        await page.close()

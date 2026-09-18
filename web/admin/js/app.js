@@ -23,6 +23,7 @@ import * as adminUsersScreen from "./screens/admin_users.js";
 import * as bonusesScreen from "./screens/bonuses.js";
 import * as telegramHealthScreen from "./screens/telegram_health.js";
 import * as simulatedPlayersScreen from "./screens/simulated_players.js";
+import * as announcementScreen from "./screens/announcement.js";
 
 // Order here is the nav order. Each screen owns its own error handling
 // (an inline banner using the real API error detail, e.g. "role 'support'
@@ -46,6 +47,7 @@ const SCREENS = {
   bot_content: botContentScreen,
   telegram_health: telegramHealthScreen,
   simulated_players: simulatedPlayersScreen,
+  announcement: announcementScreen,
   reports: reportsScreen,
   risk: riskScreen,
   audit: auditScreen,
