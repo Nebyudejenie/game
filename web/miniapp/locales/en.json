@@ -38,6 +38,7 @@
   "spectate.banner": "This round is in progress. Please wait for a new round.",
   "spectate.next_in": "Next round starts in ~{seconds}s.",
   "spectate.reserve": "Reserve a card",
+  "spectate.reserve_confirmed": "You're set — you'll get a card automatically when the next round starts.",
 
   "result.win_title": "You won!",
   "result.round_winner_title": "We have a winner!",

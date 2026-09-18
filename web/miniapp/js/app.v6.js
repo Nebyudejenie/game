@@ -858,8 +858,21 @@ function enterSpectate(sync) {
 }
 
 el("reserve-card-btn").addEventListener("click", () => {
-  const state = getState();
-  if (state.currentRoomId !== null) enterRoom(state.currentRoomId);
+  // A real reported bug: this used to call enterRoom() -> ws.joinRoom(),
+  // re-sending "join" for the SAME already-running round. The server
+  // can't actually assign a card while a round is running (join() only
+  // ever accepts one during that round's own "lobby" phase) -- so the
+  // resulting state_sync response could never contain a card, and the
+  // only real effect was a full, disruptive board.buildBoard() + call
+  // -badge/recent-calls rebuild of a view that hadn't meaningfully
+  // changed at all, which looked exactly like an already-called number
+  // (e.g. the current "I30" ball) flickering away and back. The player
+  // is *already* moved into the next round automatically the instant it
+  // starts (ws.on("round_start") below checks your_cards itself) --
+  // there is nothing this click could speed up or improve, so it no
+  // longer touches the connection at all, just acknowledges.
+  haptics.lightTap();
+  showToast("spectate.reserve_confirmed");
 });
 
 // A real production incident, caught on video: a player who took a card

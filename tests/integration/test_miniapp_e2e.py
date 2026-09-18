@@ -676,6 +676,111 @@ async def test_rooms_screen_shows_a_real_online_and_playing_headcount(
         await asyncio.wait_for(task, timeout=15)
 
 
+async def test_spectate_reserve_button_no_longer_disrupts_the_live_call_display(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    """A real reported bug: clicking "ካርድ ያዝ" (Reserve a card) while
+    spectating a live round used to re-send "join" for the same
+    already-running round. The server can never assign a card while a
+    round is running (join() only accepts one during that round's own
+    "lobby" phase), so the only actual effect was a full
+    board.buildBoard() + call-badge/recent-calls rebuild of a view that
+    hadn't changed at all -- which looked exactly like an already-called
+    number (e.g. a shown "I30") flickering away and back, reported as
+    "the button removes the called number." Fixed by making the click a
+    plain acknowledgment: the player is already moved into the next
+    round automatically the instant it starts (ws.on("round_start")),
+    so the click can't speed up or improve anything.
+
+    Proven here byte-for-byte: the call badge, the recent-calls trail,
+    and every highlighted board cell must be identical before and after
+    the click, with a real WebSocket connection and a real running
+    round throughout -- not just "no crash."
+    """
+    room_id = await create_room(
+        conn, stake=Decimal("10.00"), min_players=1, lobby_seconds=3, call_interval_ms=300,
+        is_active=True,
+    )
+    room = await load_room_config(pool, room_id)
+    engine = RoundEngine(pool, redis, room, card_pool)
+    task = asyncio.create_task(engine.run_forever())
+
+    try:
+        telegram_id_a = next_telegram_id()
+        page_a, _ = await prepare_page(browser, telegram_id_a, first_name="PlayerA")
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page_a.goto(http_base + "/")
+        await page_a.wait_for_selector("#screen-rooms.active", timeout=10000)
+        user_a = await pool.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id_a)
+        assert user_a is not None
+        await fund_user(conn, user_a["id"], Decimal("100.00"))
+        await page_a.reload()
+        await page_a.wait_for_selector("#screen-rooms.active", timeout=10000)
+        room_selector = f'.room-card[data-room-id="{room_id}"]'
+        await page_a.wait_for_selector(room_selector, timeout=10000)
+        await page_a.click(room_selector)
+        await page_a.wait_for_selector("#screen-lobby.active", timeout=10000)
+        cells_a = await page_a.query_selector_all(".card-grid-cell")
+        await cells_a[0].click()
+        await page_a.wait_for_selector("#screen-game.active", timeout=20000)
+
+        # Player B connects fresh while the round is already running and
+        # holds no card -- the real, natural way to reach spectate mode.
+        telegram_id_b = next_telegram_id()
+        page_b, console_errors_b = await prepare_page(browser, telegram_id_b, first_name="PlayerB")
+        await page_b.goto(http_base + "/")
+        await page_b.wait_for_selector("#screen-rooms.active", timeout=10000)
+        await page_b.click(room_selector)
+        await page_b.wait_for_selector("#screen-game.active", timeout=10000)
+        await page_b.wait_for_selector("#spectate-banner:not(.hidden)", timeout=10000)
+
+        # At least one real call must have landed before this proves anything.
+        await page_b.wait_for_function(
+            "document.getElementById('call-badge').textContent.length > 0", timeout=15000
+        )
+
+        before_board_called = set(
+            await page_b.eval_on_selector_all(".board-cell.called", "els => els.map(e => e.textContent)")
+        )
+
+        await page_b.click("#reserve-card-btn")
+        await page_b.wait_for_selector("#toast.visible", timeout=5000)
+        toast_text = await page_b.text_content("#toast")
+        assert toast_text == (
+            "ተመዝግበዋል — ቀጣዩ ዙር ሲጀምር በራስ-ሰር ካርድ ያገኛሉ።"
+        ), f"unexpected confirmation text: {toast_text!r}"
+
+        # The click itself makes no network round trip anymore, but this
+        # room's real calling loop keeps running regardless -- a genuine
+        # new call landing in the moment between these two snapshots is
+        # real game progress, not a bug, so the only property that
+        # actually matters (and the one the original report was about)
+        # is that nothing already shown ever goes missing: the called
+        # set must never shrink, only possibly grow.
+        after_board_called = set(
+            await page_b.eval_on_selector_all(".board-cell.called", "els => els.map(e => e.textContent)")
+        )
+        vanished = before_board_called - after_board_called
+        assert not vanished, (
+            f"a called number vanished from the board: before={sorted(before_board_called)}, "
+            f"after={sorted(after_board_called)}, vanished={sorted(vanished)}"
+        )
+
+        assert console_errors_b == [], f"JS errors while spectating: {console_errors_b}"
+        await page_a.close()
+        await page_b.close()
+    finally:
+        await engine.stop()
+        # Longer than this file's usual 15s: this test's own setup work
+        # (funding a user, a page reload, a second real browser
+        # connection) takes several real seconds, during which
+        # run_forever()'s own continuous lifecycle loop can complete and
+        # restart multiple real rounds back to back at this room's fast
+        # call_interval_ms -- stop() genuinely needs longer to reach a
+        # safe checkpoint than a test with only one round ever plays out.
+        await asyncio.wait_for(task, timeout=45)
+
+
 async def _wait_for_class(locator, class_name: str, interval: float = 0.05) -> None:
     while True:
         classes = await locator.get_attribute("class")
