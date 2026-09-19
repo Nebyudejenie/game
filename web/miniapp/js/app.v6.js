@@ -1287,16 +1287,54 @@ el("fairness-close-btn").addEventListener("click", () => {
 
 // --- wallet --------------------------------------------------------------
 
+// Real reported bug: text on the wallet's Telebirr destination card was
+// unreadable in a real Telegram client, even though it renders correctly
+// here (this file's own stub tests always send an empty themeParams, so
+// none of this code path ever ran against them). Root cause: Telegram's
+// own theme_params object is not guaranteed to supply every color field
+// together -- a client that sends a light bg_color with no matching
+// text_color left this function's old code silently keeping the dark-
+// mode default (near-white) text color in place on top of a newly light
+// background. Computing a guaranteed-contrasting fallback from whichever
+// background color actually won closes this regardless of which fields
+// a given Telegram client happens to send.
+function relativeLuminance(hexColor) {
+  const hex = hexColor.replace("#", "");
+  const channels = [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+  const [r, g, b] = channels.map((c) => (c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function contrastingTextColor(bgHexColor) {
+  try {
+    // This app's own light/dark text tokens (tokens.css) -- reusing them
+    // keeps a themed wallet screen's fallback text on-brand instead of a
+    // generic black/white.
+    return relativeLuminance(bgHexColor) > 0.5 ? "#0B0E14" : "#F2F5FA";
+  } catch {
+    return "#F2F5FA"; // an unparseable color is vanishingly unlikely (Telegram always sends #rrggbb), but never crash the wallet over it
+  }
+}
+
 function applyWalletTheme() {
   const wallet = el("screen-wallet");
-  if (tg && tg.themeParams) {
-    const p = tg.themeParams;
-    if (p.bg_color) wallet.style.setProperty("--bg", p.bg_color);
-    if (p.secondary_bg_color) wallet.style.setProperty("--surface", p.secondary_bg_color);
-    if (p.text_color) wallet.style.setProperty("--text", p.text_color);
-    if (p.hint_color) wallet.style.setProperty("--muted", p.hint_color);
-    if (p.button_color) wallet.style.setProperty("--accent", p.button_color);
+  if (!tg || !tg.themeParams) return;
+  const p = tg.themeParams;
+  if (p.bg_color) wallet.style.setProperty("--bg", p.bg_color);
+  if (p.secondary_bg_color) wallet.style.setProperty("--surface", p.secondary_bg_color);
+  const bgForContrast = p.bg_color || p.secondary_bg_color;
+  const fallbackText = bgForContrast ? contrastingTextColor(bgForContrast) : null;
+  if (p.text_color) {
+    wallet.style.setProperty("--text", p.text_color);
+  } else if (fallbackText) {
+    wallet.style.setProperty("--text", fallbackText);
   }
+  if (p.hint_color) {
+    wallet.style.setProperty("--muted", p.hint_color);
+  } else if (fallbackText) {
+    wallet.style.setProperty("--muted", fallbackText);
+  }
+  if (p.button_color) wallet.style.setProperty("--accent", p.button_color);
 }
 
 // The three balance figures the server ever sends (cash/bonus/locked) are
@@ -1604,7 +1642,7 @@ el("deposit-automatic-toggle-btn").addEventListener("click", async () => {
 // this remembers it rather than assuming automatic is always the default.
 let depositSectionBeforeTelebirr = "deposit-automatic-section";
 
-el("deposit-telebirr-toggle-btn").addEventListener("click", () => {
+el("deposit-telebirr-toggle-btn").addEventListener("click", async () => {
   depositSectionBeforeTelebirr = el("deposit-automatic-section").classList.contains("hidden")
     ? "deposit-manual-section"
     : "deposit-automatic-section";
@@ -1612,6 +1650,16 @@ el("deposit-telebirr-toggle-btn").addEventListener("click", () => {
   el("deposit-manual-toggle-btn").classList.add("hidden");
   el("deposit-telebirr-toggle-btn").classList.add("hidden");
   el("deposit-telebirr-section").classList.remove("hidden");
+  // Real gap found alongside the color-contrast bug above: this specific
+  // entry point (Telebirr reached as a secondary option, Chapa still on)
+  // never actually called loadTelebirrDestination() at all -- unlike
+  // every other path into this same section, which left the account
+  // details permanently stuck on "loading" for anyone who got here via
+  // this exact button.
+  if (!telebirrDestinationLoaded) {
+    telebirrDestinationLoaded = true;
+    await loadTelebirrDestination();
+  }
 });
 
 el("deposit-telebirr-back-btn").addEventListener("click", () => {
