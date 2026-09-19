@@ -654,6 +654,120 @@ async def test_the_auto_switch_toggles_and_really_persists_both_round_and_user_l
         await asyncio.wait_for(task, timeout=30)
 
 
+async def test_switching_rooms_does_not_leak_a_stray_rooms_call_broadcast(
+    gateway_server, browser, pool, redis, card_pool, conn
+):
+    """Real reported bug: joinRoom() subscribes this WebSocket connection
+    to a room's live "call" broadcasts (services/gateway/connection.py's
+    _joined_rooms / FanoutHub.subscribe_room()), but nothing ever called
+    leaveRoom() when navigating away from a room -- a player who looked
+    into several different rooms in one session (verbatim report: "I
+    create 6 rooms and when I enter to each room... room number 6 is
+    working crazy, the number of out is 8 but it is over 20 numbers")
+    stayed subscribed to every one of them at once, so a fast, unwatched
+    room's own independent call sequence kept bleeding into whatever room
+    the player was actually looking at.
+
+    Room A ticks unattended, fast, with nobody ever watching it, so by
+    the time the player switches away to Room B its own real call_index
+    is already far higher than anything Room B could show this early --
+    if Room A's calls were still leaking in after leaving it, Room B's
+    own displayed count would be contaminated with that much higher
+    number instead of matching Room B's own real, still-low progress.
+    """
+    room_a = await create_room(
+        conn, stake=Decimal("10.00"), min_players=1, lobby_seconds=1, call_interval_ms=150,
+        is_active=True,
+    )
+    room_b = await create_room(
+        conn, stake=Decimal("10.00"), min_players=1, lobby_seconds=8, call_interval_ms=300,
+        is_active=True,
+    )
+    room_a_config = await load_room_config(pool, room_a)
+    room_b_config = await load_room_config(pool, room_b)
+    engine_a = RoundEngine(pool, redis, room_a_config, card_pool)
+    engine_b = RoundEngine(pool, redis, room_b_config, card_pool)
+    task_a = asyncio.create_task(engine_a.run_forever())
+    task_b = asyncio.create_task(engine_b.run_forever())
+
+    try:
+        telegram_id = next_telegram_id()
+        page, console_errors = await prepare_page(browser, telegram_id)
+        http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
+        await page.goto(http_base + "/")
+        await page.wait_for_selector("#screen-rooms.active", timeout=10000)
+
+        room_a_selector = f'.room-card[data-room-id="{room_a}"]'
+        room_b_selector = f'.room-card[data-room-id="{room_b}"]'
+
+        # Room A is already running and calling on its own, unattended --
+        # real time to rack up a real, high call_index before the player
+        # ever looks at it (75 calls at 150ms/call = 11.25s to exhaust, so
+        # this stays well inside its first, still-running round).
+        await asyncio.sleep(3.5)
+
+        await page.wait_for_selector(room_a_selector, timeout=10000)
+        await page.click(room_a_selector)
+        await page.wait_for_selector("#screen-game.active", timeout=10000)
+        await page.wait_for_function(
+            "document.getElementById('call-badge').textContent.length > 0", timeout=10000
+        )
+
+        room_a_call_index = await pool.fetchval(
+            "SELECT call_index FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1", room_a
+        )
+        assert room_a_call_index > 15, (
+            f"test setup assumption failed: room A should already be well into its own "
+            f"call sequence by now, got {room_a_call_index}"
+        )
+
+        # Back to the room list -- the real Telegram Back press, the exact
+        # navigation that used to leave room A's subscription alive
+        # forever (see test_telegram_back_button_works_from_a_live_game_
+        # screen for this same real-handler-invocation technique).
+        await page.evaluate("window.__triggerBackButton()")
+        await page.wait_for_selector("#screen-rooms.active", timeout=5000)
+
+        await page.wait_for_selector(room_b_selector, timeout=10000)
+        await page.click(room_b_selector)
+        await page.wait_for_selector("#screen-game.active", timeout=15000)
+        await page.wait_for_function(
+            "document.getElementById('stat-call').textContent !== '0/75'", timeout=15000
+        )
+
+        displayed_call_text = await page.text_content("#stat-call")
+        displayed_call_index = int((displayed_call_text or "0/75").split("/")[0])
+        room_b_real_call_index = await pool.fetchval(
+            "SELECT call_index FROM rounds WHERE room_id = $1 ORDER BY seq DESC LIMIT 1", room_b
+        )
+        # A tolerant, not exact, comparison -- the DOM read and the DB read
+        # happen a moment apart, so being one real call ahead or behind is
+        # expected and fine. The bug this guards against would show a
+        # number close to (or past) room A's own by-then-even-higher
+        # call_index, nowhere close to room B's own real, still-early one.
+        assert abs(displayed_call_index - room_b_real_call_index) <= 2, (
+            f"displayed {displayed_call_index}, but room B's real call_index is "
+            f"{room_b_real_call_index} -- likely contaminated by room A's own calls"
+        )
+        assert displayed_call_index < room_a_call_index, (
+            f"displayed {displayed_call_index} for room B is not below room A's own "
+            f"{room_a_call_index} -- looks exactly like the reported cross-room leak"
+        )
+
+        assert console_errors == [], f"JS errors switching rooms: {console_errors}"
+        await page.close()
+    finally:
+        # 30s, not this file's usual 15s: engine.stop() only takes effect
+        # once each engine's *current* round naturally finishes (up to 75
+        # calls away) -- see test_the_auto_switch_toggles_and_really_
+        # persists_both_round_and_user_level's own comment on this same
+        # asyncio.wait_for above for the full explanation.
+        await engine_a.stop()
+        await engine_b.stop()
+        await asyncio.wait_for(task_a, timeout=30)
+        await asyncio.wait_for(task_b, timeout=30)
+
+
 async def test_a_late_joiner_sees_an_already_taken_card_as_taken(
     gateway_server, browser, pool, redis, card_pool, conn
 ):

@@ -35,6 +35,25 @@ function renderLobbyCountdown(label, seconds) {
 // --- screen management --------------------------------------------------
 
 function showScreen(name) {
+  // Real, reported bug: joinRoom() subscribes this connection to a room's
+  // live broadcasts (services/gateway/connection.py's _joined_rooms/
+  // FanoutHub.subscribe_room()) but nothing ever called leaveRoom() to
+  // undo it -- browsing from room to room across a session (create
+  // several rooms, look into each one) kept every previously-viewed
+  // room's subscription alive on top of the new one. ws.on("call")'s own
+  // guard only checks the *screen* name ("game"/"lobby"), never which
+  // room a call actually belongs to, so a still-subscribed room's own
+  // independent call sequence kept overwriting the call badge/count for
+  // whichever room the player was actually looking at -- exactly the
+  // "shows 8 but it's really over 20" symptom this fixes. Every path
+  // back to the room list goes through this one function, so leaving
+  // here (not at each individual call site) closes every one of them at
+  // once, including the round naturally ending and bouncing back on its
+  // own via state_sync.
+  if (name === "rooms") {
+    const { currentRoomId } = getState();
+    if (currentRoomId !== null) ws.leaveRoom(currentRoomId);
+  }
   for (const el of document.querySelectorAll(".screen")) {
     el.classList.toggle("active", el.dataset.screen === name);
   }
@@ -698,6 +717,12 @@ ws.on("round_start", (sync) => {
 ws.on("call", (msg) => {
   const state = getState();
   if (state.screen !== "game" && state.screen !== "lobby") return;
+  // Defense in depth alongside the subscription-lifecycle fix in
+  // showScreen() above: a call belongs to exactly one round, so if this
+  // connection is (or ever again becomes, from some future regression)
+  // subscribed to more than one room at once, a stray round's own calls
+  // must never be applied to whatever round is actually on screen.
+  if (!state.round || msg.round_id !== state.round.round_id) return;
   board.markCalled(msg.number);
   const calledSoFar = new Set([...(state.round ? state.round.called || [] : []), msg.number]);
   setState({ round: { ...state.round, called: [...calledSoFar], call_index: msg.index } });
