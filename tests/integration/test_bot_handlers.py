@@ -1258,7 +1258,7 @@ async def test_support_command_sends_the_support_contact(bot_ctx):
     await dp.feed_update(bot, make_text_update(telegram_id, "/support"))
     await _settle()
     assert len(session.sent) == 1
-    assert "@jobingo_support" in session.sent[0].text
+    assert "@AradaBingo_Support" in session.sent[0].text
 
 
 async def test_support_button_press_sends_the_support_contact(bot_ctx):
@@ -1274,7 +1274,7 @@ async def test_support_button_press_sends_the_support_contact(bot_ctx):
     await dp.feed_update(bot, make_text_update(telegram_id, button_text))
     await _settle()
     assert len(session.sent) == 1
-    assert "@jobingo_support" in session.sent[0].text
+    assert "@AradaBingo_Support" in session.sent[0].text
 
 
 async def test_stale_cached_keyboard_play_and_withdraw_button_text_still_routes(bot_ctx):
