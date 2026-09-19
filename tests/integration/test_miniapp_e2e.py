@@ -1737,6 +1737,15 @@ async def test_disabling_voice_makes_zero_audio_requests(gateway_server, browser
         # the reload above -- otherwise this test would prove nothing
         # about the setting actually being off during gameplay.
         assert await page.evaluate("localStorage.getItem('jobingo_voice_enabled')") == "false"
+        # Cleared here, not tracked from page load: voiceCaller.preloadAll()
+        # deliberately warms all 75 clips on a brand-new session's very
+        # first boot (voice defaults on until a player says otherwise),
+        # which legitimately requested every clip before this test ever
+        # touched the toggle above. What this test actually needs to prove
+        # is that *disabled* voice makes zero requests during real
+        # gameplay from here on -- not that literally nothing was ever
+        # fetched before the player expressed a preference.
+        audio_requests.clear()
 
         room_selector = f'.room-card[data-room-id="{room_id}"]'
         await page.wait_for_selector(room_selector, timeout=10000)

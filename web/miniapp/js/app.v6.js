@@ -2161,6 +2161,10 @@ async function boot() {
   refreshRoomList();
   fetchAnnouncement();
   fetchInviteSummary();
+  // Warms the browser's cache for all 75 call clips well before any
+  // room's first call -- see voiceCaller.preloadAll()'s own docstring
+  // for why this specifically helps on a weak connection.
+  voiceCaller.preloadAll();
 
   // Deep link from the bot: /deposit's own "open the wallet" button
   // (services/bot/keyboards.py::open_wallet_keyboard) appends
