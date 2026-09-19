@@ -983,9 +983,9 @@
    (join() can't assign a card mid-round; the player auto-advances into
    the next round regardless), so this space is put to actual use
    instead. Two identical copies of the text sit back to back in a
-   track twice the visible width; animating that track from -50% to 0%
-   moves the content left-to-right with no visible seam -- the moment
-   the first copy has fully entered, the second copy is in exactly the
+   track twice the visible width; animating that track from 0% to -50%
+   moves the content right-to-left with no visible seam -- the moment
+   the first copy has fully exited, the second copy is in exactly the
    position the first started in, so the loop restart is invisible. */
 .announcement-marquee {
   overflow: hidden;
@@ -1009,8 +1009,8 @@
 }
 
 @keyframes announcement-marquee-scroll {
-  from { transform: translateX(-50%); }
-  to { transform: translateX(0%); }
+  from { transform: translateX(0%); }
+  to { transform: translateX(-50%); }
 }
 
 @media (prefers-reduced-motion: reduce) {
