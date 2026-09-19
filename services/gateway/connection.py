@@ -308,7 +308,19 @@ class ConnectionHandler:
                 room_id,
                 ack_name="claim",
                 action="claim",
-                payload={"card_no": card_no},
+                # round_id rides along in the payload purely so the
+                # claim_result reply below can echo it back -- the engine's
+                # own claim() only ever reads card_no from this dict
+                # (round_engine.py's _handle_command), so this extra key is
+                # inert to it. Without it, claim_result carried no
+                # identifying field at all: card_no alone isn't unique
+                # across rooms (the card pool is a shared 1..N range every
+                # room deals from independently), so a stale false-claim
+                # reply for a card just left behind in one room could
+                # match, and incorrectly shake/reject, an identically
+                # -numbered card genuinely held in whatever room the
+                # player has since switched to.
+                payload={"card_no": card_no, "round_id": round_id},
                 bucket=rate_limit.CLAIM,
             )
         elif t == "mark":
@@ -330,6 +342,22 @@ class ConnectionHandler:
             await self._send_error("bad_room_id", "room_id required.", "የክፍል መለያ ያስፈልጋል።")
             return
         assert self._user_id is not None
+        # Structurally enforce "one connection watches at most one room at a
+        # time" here, at the one place a subscription is actually created,
+        # rather than leaving it to every client-side navigation path to
+        # remember to send its own "leave" first. A real production bug
+        # (a player browsing several rooms in one session saw a fast,
+        # unattended room's own calls bleed into whatever room they were
+        # actually looking at) traced back to exactly this: nothing here
+        # ever stopped self._joined_rooms from accumulating more than one
+        # room, so a client that forgot -- or, as later found, one that
+        # simply couldn't yet, because it hadn't finished its first join
+        # before starting a second one -- left this connection subscribed
+        # to both forever. No real caller (client or test) ever relies on
+        # one connection being subscribed to more than one room at once.
+        for stale_room_id in list(self._joined_rooms - {room_id}):
+            self._joined_rooms.discard(stale_room_id)
+            self._hub.unsubscribe_room(stale_room_id, self._cq)
         self._joined_rooms.add(room_id)
         self._hub.subscribe_room(room_id, self._cq)
         state = await queries.build_state_sync(self._pool, room_id, self._user_id)
@@ -403,13 +431,25 @@ class ConnectionHandler:
                             "valid": result.ok,
                             "reason": result.reason,
                             "card_no": payload.get("card_no"),
+                            "round_id": payload.get("round_id"),
                         }
                     )
                 )
             else:
+                # room_id (already this method's own first parameter, no
+                # extra plumbing needed) lets the client tell a take_card/
+                # drop_card/set_auto ack for a room it has since navigated
+                # away from apart from one for the room it's actually in --
+                # same reasoning as claim_result's own round_id above.
                 await self._ws.send_text(
                     json.dumps(
-                        {"t": "ack", "for": ack_name, "ok": result.ok, "reason": result.reason}
+                        {
+                            "t": "ack",
+                            "for": ack_name,
+                            "ok": result.ok,
+                            "reason": result.reason,
+                            "room_id": room_id,
+                        }
                     )
                 )
 

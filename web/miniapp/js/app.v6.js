@@ -53,6 +53,16 @@ function showScreen(name) {
   if (name === "rooms") {
     const { currentRoomId } = getState();
     if (currentRoomId !== null) ws.leaveRoom(currentRoomId);
+    // Two smaller leaks in the same family, closed at the same spot:
+    // (1) any voice announcements this room already queued but hadn't
+    // played yet would otherwise keep draining and playing *through*
+    // whatever room is entered next, announcing that room's numbers
+    // wrong; (2) the lobby countdown's setInterval (startLobbyCountdown())
+    // is only ever cleared by the *next* one starting, so leaving a
+    // lobby screen without ever opening another one left it ticking
+    // forever in the background.
+    voiceCaller.resetRound();
+    clearInterval(countdownTimer);
   }
   for (const el of document.querySelectorAll(".screen")) {
     el.classList.toggle("active", el.dataset.screen === name);
@@ -282,6 +292,16 @@ function enterRoom(roomId) {
 }
 
 ws.on("state_sync", (msg) => {
+  // Defense in depth alongside the server-side single-room-per-connection
+  // enforcement in services/gateway/connection.py's _handle_join(): a
+  // state_sync for a room this client has already navigated away from can
+  // still be in flight (queued server-side before a "leave" was processed,
+  // or a queue-overflow resync) when it lands here. Applying it blind used
+  // to be able to overwrite state.round with a stranger room's data, or --
+  // worse, for a voided/done sync -- call showScreen("rooms") -> leaveRoom
+  // against whatever room this connection is *actually* in now, silently
+  // kicking the player out of a live round they're still genuinely playing.
+  if (msg.room_id !== getState().currentRoomId) return;
   setState({ round: msg });
   winPatterns = msg.win_patterns || winPatterns;
   minWinningLines = msg.min_winning_lines || minWinningLines;
@@ -483,6 +503,15 @@ ws.on("card_taken", (msg) => {
 
 ws.on("ack", (msg) => {
   if (!msg.ok) showToast(msg.reason || "error.generic");
+  // A take_card ack for a room this client has already left (in flight
+  // when the leave happened) must never touch this room's own
+  // pendingTakeCardAcks counter or trigger a re-join -- enterLobby()
+  // already reset that counter to 0 for whatever room is actually on
+  // screen now, so decrementing it here for a stray ack could drive it
+  // negative-then-clamped or, worse, hit 0 and force a spurious
+  // ws.joinRoom() against the *current* room, restarting its countdown
+  // and rebuilding its lobby DOM out from under the player mid-interaction.
+  if (msg.for === "take_card" && msg.room_id !== getState().currentRoomId) return;
   if (msg.for === "take_card") {
     if (msg.ok) haptics.success();
     // Several take_card commands can be in flight at once (quick taps on
@@ -869,6 +898,16 @@ el("voice-settings-btn").addEventListener("click", () => {
 
 ws.on("claim_result", (msg) => {
   if (msg.valid) return; // the eventual round_end message drives the UI
+  // card_no alone isn't unique across rooms -- every room deals from the
+  // same shared 1..card_pool_size range independently, so a false-claim
+  // reply that arrives late (already in flight when this connection left
+  // that room) could otherwise match an identically-numbered card
+  // genuinely held in whatever room the player has since switched to. The
+  // round this claim was actually for rides along in msg.round_id (see
+  // services/gateway/connection.py's claim dispatch), gating this exactly
+  // like ws.on("call")'s own round-identity guard above.
+  const state = getState();
+  if (!state.round || msg.round_id !== state.round.round_id) return;
   // card_no targets exactly the card that was claimed -- without it, a
   // false claim on one card would reset/shake every held card's button
   // instead of just the one that was actually wrong.
@@ -994,7 +1033,14 @@ el("invite-share-btn").addEventListener("click", () => {
 // clean bounce back to the room list, not a misleading result screen
 // (unlike round_end, this round never actually started -- there's no
 // "no winner" to report, just "not enough players joined").
-ws.on("round_voided", () => {
+ws.on("round_voided", (msg) => {
+  // Same round-identity guard as ws.on("call")/ws.on("state_sync") above:
+  // this connection should only ever be subscribed to the room currently
+  // on screen, but a stray broadcast for a room already navigated away
+  // from can still be in flight when it lands. Without this, a voided
+  // notice for an abandoned room would bounce the player off a different
+  // room they're actually still watching live.
+  if (!getState().round || msg.round_id !== getState().round.round_id) return;
   showToast("lobby.round_voided_underfilled");
   showScreen("rooms");
   refreshRoomList();
@@ -1003,6 +1049,14 @@ ws.on("round_voided", () => {
 // --- result (SETTLING) --------------------------------------------------
 
 ws.on("round_end", (msg) => {
+  // Same round-identity guard as ws.on("call")/ws.on("state_sync")/
+  // ws.on("round_voided") above -- a stray round_end for a room this
+  // connection has already left (but whose broadcast was already in
+  // flight) would otherwise render the wrong room's winners/payout onto
+  // the result screen and corrupt the real-money session reality-check
+  // total below with someone else's round outcome.
+  const preState = getState();
+  if (!preState.round || msg.round_id !== preState.round.round_id) return;
   el("spectate-banner").classList.add("hidden");
   el("your-card-section").classList.remove("hidden");
   el("fairness-panel").classList.add("hidden");
@@ -1986,12 +2040,19 @@ if (tg) {
     } else if (state.screen === "result") {
       showScreen("rooms");
     }
-    // showScreen() is a pure client-side view switch -- it never touches
-    // the WebSocket connection or sends a drop/leave command, so Back
-    // from a live "game" screen is safe: the round keeps running
-    // server-side exactly as before, the player just stops looking at
-    // it (same as backgrounding the app), rather than the button
-    // visibly showing on this screen while silently doing nothing.
+    // showScreen("rooms") now does send a real WebSocket message: it
+    // unsubscribes this connection from the room's live broadcasts (see
+    // showScreen()'s own comment above -- the cross-room call-leak fix).
+    // That's still safe to do from Back: services/gateway/connection.py's
+    // _handle_leave() only ever discards the broadcast subscription, never
+    // round_entries/cards/auto_mark, so the round keeps running and
+    // settling server-side exactly as before -- the player just stops
+    // *watching* it (same real-money outcome as backgrounding the app).
+    // The one thing this does give up is live updates for that round: if
+    // the player doesn't tap back into this room before it ends, they
+    // won't see its round_end here and must check the room again (or their
+    // balance) to find out how it settled, rather than getting a result
+    // screen for a round they've already navigated away from.
   });
 }
 

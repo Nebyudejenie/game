@@ -683,14 +683,21 @@ async def test_switching_rooms_does_not_leak_a_stray_rooms_call_broadcast(
         conn, stake=Decimal("10.00"), min_players=1, lobby_seconds=8, call_interval_ms=300,
         is_active=True,
     )
-    room_a_config = await load_room_config(pool, room_a)
-    room_b_config = await load_room_config(pool, room_b)
-    engine_a = RoundEngine(pool, redis, room_a_config, card_pool)
-    engine_b = RoundEngine(pool, redis, room_b_config, card_pool)
-    task_a = asyncio.create_task(engine_a.run_forever())
-    task_b = asyncio.create_task(engine_b.run_forever())
-
+    # None until actually created inside the try below -- if anything here
+    # raises before both tasks exist, the finally block below has nothing
+    # it needs to await/stop, instead of a NameError masking the real
+    # failure or (worse) a half-created engine leaking as a detached task.
+    task_a = None
+    task_b = None
     try:
+        room_a_config, room_b_config = await asyncio.gather(
+            load_room_config(pool, room_a), load_room_config(pool, room_b)
+        )
+        engine_a = RoundEngine(pool, redis, room_a_config, card_pool)
+        engine_b = RoundEngine(pool, redis, room_b_config, card_pool)
+        task_a = asyncio.create_task(engine_a.run_forever())
+        task_b = asyncio.create_task(engine_b.run_forever())
+
         telegram_id = next_telegram_id()
         page, console_errors = await prepare_page(browser, telegram_id)
         http_base = gateway_server.replace("ws://", "http://").replace("/ws", "")
@@ -761,11 +768,15 @@ async def test_switching_rooms_does_not_leak_a_stray_rooms_call_broadcast(
         # once each engine's *current* round naturally finishes (up to 75
         # calls away) -- see test_the_auto_switch_toggles_and_really_
         # persists_both_round_and_user_level's own comment on this same
-        # asyncio.wait_for above for the full explanation.
-        await engine_a.stop()
-        await engine_b.stop()
-        await asyncio.wait_for(task_a, timeout=30)
-        await asyncio.wait_for(task_b, timeout=30)
+        # asyncio.wait_for above for the full explanation. Both engines
+        # tick independently, so stopping and awaiting them concurrently
+        # (rather than one full 30s wait_for after another) keeps this
+        # teardown's worst case ~30s instead of ~60s -- and task_a/task_b
+        # are only ever None if construction itself failed above, in which
+        # case there's nothing here to stop.
+        if task_a is not None and task_b is not None:
+            await asyncio.gather(engine_a.stop(), engine_b.stop())
+            await asyncio.wait_for(asyncio.gather(task_a, task_b), timeout=30)
 
 
 async def test_a_late_joiner_sees_an_already_taken_card_as_taken(
